@@ -8,9 +8,9 @@ Handwritten paper on a tablet, wired to a running [Claude Code](https://claude.c
 
 Write in black for your own working, and switch to red when you want Claude's help. Tap **AI** to send the page to the Claude Code session in your project folder. Claude reads the ink directly and answers on the page with correction marks on your strokes, short notes in the margin, typeset formulas, and small sketches. A longer answer does not take up the paper: a numbered badge appears next to your red question, and tapping it opens the answer on a card floating over the page. On your computer, the conversation only gets a one-line note.
 
-![A handwritten page with Claude's notes in the margin](assets/demo.png)
+![A handwritten page with Claude's notes in the margin](assets/demo-en.png)
 
-*A page from real use, in Chinese. Black is my notes on the project. The red circle and the red line mark what I am handing to Claude. The blue notes in the margin are Claude's answers, each tied to the line it refers to. The red marks on the blue notes are my replies.*
+*A page from real use. Black is my notes on the project. The red loop, drawn without a word, marks what I am handing to Claude. The blue notes in the margin are Claude's answers, each tied to the line it refers to. The red line at the top and the red marks on the blue notes are my replies, and the first blue note answers that line.*
 
 > **Status: work in progress.** Private development started in late October 2026 (first private commit: 2026-11-01); this public repository starts from a fresh history. So far only the author has used it, for about three weeks of real work. It is in the middle of a refactor, so the page and this README will keep changing. It has only been run on Windows 11 with an iPad. Read [Limitations](#limitations) before you spend time on it.
 

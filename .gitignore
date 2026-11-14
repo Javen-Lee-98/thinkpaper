@@ -1,0 +1,19 @@
+# 私人内容：笔迹、投递、确认卡片、导入的书和原件、访问码、Zotero 密钥
+inkthink/data/
+inkthink/books/
+inkthink/config.json
+
+# 环境和缓存
+inkthink/.venv/
+__pycache__/
+*.pyc
+node_modules/
+
+# 设计讨论时的示意图页面
+.superpowers/
+
+# 导出给公开仓库的副本（inkthink/tools/make_release.py 生成）
+release/
+
+# 浏览器自动化工具留下的截图和日志
+.playwright-mcp/

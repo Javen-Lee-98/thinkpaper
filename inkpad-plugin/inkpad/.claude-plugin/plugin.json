@@ -1,0 +1,30 @@
+{
+  "name": "inkpad",
+  "version": "0.1.0",
+  "description": "手写草稿纸：用平板上的草稿纸代替文本框，手写内容直接进入当前对话，Claude 把批注写回草稿纸",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "草稿纸服务地址",
+      "description": "草稿纸中转服务的地址（本机）",
+      "default": "http://127.0.0.1:8765"
+    },
+    "server_command": {
+      "type": "string",
+      "title": "启动草稿纸服务的命令",
+      "description": "执行 /ink 而服务没在运行时，用这条命令在后台启动它（程序路径和参数用空格分开，含空格的路径加引号；留空则只连接已在运行的服务）。填你自己电脑上的路径，例如：<仓库文件夹>\\inkthink\\.venv\\Scripts\\python.exe <仓库文件夹>\\inkthink\\launch.py",
+      "default": ""
+    },
+    "offer_new_files": {
+      "type": "string",
+      "title": "新生成的文件提示到平板",
+      "description": "每轮结束时，把项目文件夹里新生成的图片、PDF、PPT、Word、Markdown 报给平板，由你决定要不要加进草稿纸",
+      "options": [
+        "true",
+        "false"
+      ],
+      "default": "true"
+    }
+  }
+}

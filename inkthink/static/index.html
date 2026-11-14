@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="草稿纸">
+<!-- 从主屏幕打开时：没有 Safari 界面，页面延伸到状态栏下面 -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#fffdf8">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<title>ThinkPaper 草稿纸</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+<link rel="preload" href="/static/fonts/xiaolai-gb2312.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+<header id="bar">
+  <div class="grp grow">
+    <button id="drawerBtn" aria-label="本子和页面">☰</button>
+    <!-- 名字长的可以左右滑着看全 -->
+    <div id="nbTitle" class="nb-title" role="button" aria-label="本子和页面">草稿本</div>
+  </div>
+  <div class="grp">
+    <button id="prev" aria-label="上一页">‹</button>
+    <span id="pageNo">–</span>
+    <button id="next" aria-label="下一页">›</button>
+    <!-- 单页 / 连续：并排的一对图标，当前的那个加框；点哪个就是哪个（和左上角那一对、抽屉里那组开关同一个状态）；只有一页的本子没有 -->
+    <div class="pair" id="barPair" role="group" hidden>
+      <button id="barSingle" data-v="single" data-icon="single" aria-label="单页：一页一页翻"></button>
+      <button id="barCont" data-v="flow" data-icon="cont" aria-label="连续：上下页接在一起"></button>
+    </div>
+    <!-- 加页图标：在这一页后面加一张和它同方向的空白页并翻过去（和左上角的同一个按钮） -->
+    <button id="barAdd" data-icon="addv" aria-label="在这一页后面加一张空白页" hidden></button>
+  </div>
+  <div class="grp">
+    <button id="barCheck" class="primary">AI</button><!-- 退出全屏后，顶栏上的「AI」：字跟着这一轮走，和右下角的同一个样子（app.js 的 updateCheck） -->
+    <button id="menuBtn" aria-label="更多">⋯</button>
+  </div>
+</header>
+
+<!-- 左侧工具栏（图标；长按看说明） -->
+<nav id="rail">
+  <button data-tool="pen" class="on" data-icon="pen" aria-label="笔：我自己的推导和草稿"></button>
+  <button data-tool="red" class="red-pen" data-icon="pen" aria-label="红笔：写给 Claude 的问题"></button>
+  <button data-tool="eraser" data-icon="eraser" aria-label="橡皮"></button>
+  <button id="undo" data-icon="undo" aria-label="撤销"></button>
+  <span class="rail-gap"></span>
+  <button id="fsBtn" title="全屏：隐藏 Safari 界面、收起上栏和工具栏，只留纸">全屏</button>
+</nav>
+
+<main id="stage">
+  <canvas id="bg"></canvas>
+  <canvas id="ink"></canvas>
+  <canvas id="live"></canvas>
+  <svg id="ai" xmlns="http://www.w3.org/2000/svg"><g id="aiRoot"></g></svg>
+  <div id="tex"></div><!-- 排好的公式（KaTeX），和批注层一起缩放 -->
+  <!-- 纸的四边：点一下往那个方向加一块纸（笔写到边上附近时会亮起来） -->
+  <button id="extDown" class="ext" hidden>＋ 加长</button>
+  <button id="extRight" class="ext" hidden>＋<br>加<br>宽</button>
+  <button id="extUp" class="ext" hidden>＋ 向上</button>
+  <button id="extLeft" class="ext" hidden>＋<br>向<br>左</button>
+</main>
+
+<!-- 长回答的卡片：点纸上的圈号，紧挨着它浮出来（不是画在纸上的）；点别处、黑笔落下、挪纸、翻页、开抽屉就收起。
+     红笔落在卡片里写在卡片上（acInk 那一层，和内容一起缩放、一起滑），橡皮擦卡片上的红字；手指在卡片里上下滑；没有按钮。
+     内容（acPage）按固定宽度排版，整体缩放到卡片的宽度：换屏幕大小红字不错位。Claude 接着回的各段在 acMore 里，之前的版本在最底下。
+     Claude 写的字不翻译（data-lang-keep） -->
+<div id="answerCard" role="dialog" hidden>
+  <div id="acSizer">
+    <div id="acPage">
+      <div class="ac-blk" id="acMain" data-blk="a">
+        <div class="ac-q" id="acQ" hidden><span class="ac-qh">问：</span><span class="ac-qt" id="acQt" data-lang-keep></span></div>
+        <div class="ac-body" id="acBody" data-lang-keep></div>
+      </div>
+      <div id="acMore"></div>
+      <div class="ac-older" id="acOlder" hidden><div class="ac-oh ac-blk" data-blk="oh">之前的版本</div><div class="ac-olist" id="acOlist" data-lang-keep></div></div>
+      <svg id="acInk" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+  </div>
+</div>
+
+<!-- 左侧抽屉：本子、页面缩略图、加页删页 -->
+<aside id="drawer" hidden>
+  <!-- 怎么翻页、纸多大。放在最上面，本子再多也不用往下划；当前选的那个加框 -->
+  <div class="dr-row" id="viewRow">
+    <div class="seg" id="segFlow"><button data-v="flow">连续</button><button data-v="single">单页</button></div>
+    <div class="seg" id="segFit"><button data-v="width">适配宽度</button><button data-v="page">整页</button></div>
+  </div>
+  <div class="dr-head">本子</div>
+  <!-- 草稿本、Claude 推送；文件夹（点一下折叠 / 展开）和里面的本子；不在文件夹里的本子 -->
+  <div id="nbList"></div>
+  <div class="dr-row">
+    <button id="actNewNb">＋ 新建本子…</button>
+    <button id="actNewFolder">＋ 新建文件夹…</button>
+  </div>
+  <div class="dr-row">
+    <button id="actUpload">导入文档…</button>
+  </div>
+  <div class="dr-row">
+    <!-- 这本发往哪个对话，或「只在本地（不发给 Claude）」：点开在列表里选 -->
+    <button id="actTarget" title="这本发往哪个对话：点一下换">这本发往：</button>
+  </div>
+  <!-- 页面那一行右边：作用在当前页的图标 -->
+  <div class="dr-head dr-pages">页面 <span id="thumbCount"></span>
+    <span class="dr-acts">
+      <button id="actTurnL" data-icon="rotl" aria-label="这一页连同写的字左转 90°"></button>
+      <button id="actTurnR" data-icon="rotr" aria-label="这一页连同写的字右转 90°"></button>
+      <button id="actAddPortrait" data-icon="addv" aria-label="在这一页后面加一张竖版空白页"></button>
+      <button id="actAddLandscape" data-icon="addh" aria-label="在这一页后面加一张横版空白页"></button>
+      <button id="actDelPage" data-icon="trash" aria-label="删除这一页（可以在「显示已删的页」里恢复）"></button>
+    </span>
+  </div>
+  <div id="thumbs"></div>
+  <div class="dr-row">
+    <button id="actHidden">显示已删的页</button>
+  </div>
+  <div id="hiddenList" hidden></div>
+</aside>
+
+<div id="menu" class="panel" hidden>
+  <label class="row"><input type="checkbox" id="optAi"> 显示 Claude 的批注</label>
+  <label class="row"><input type="checkbox" id="optFinger"> 手指也能书写</label>
+  <button class="row" id="actReplay">回放本页书写过程</button>
+  <button class="row" id="actFit">整页 / 适配宽度</button>
+  <button class="row" id="actClearAi">清除本页 Claude 批注</button>
+</div>
+
+<!-- 这本发往哪个对话：每本记住自己的对话。按项目文件夹分组，每个对话写最近打的一句话、什么时候开的、多久前活跃；
+     最下面一项「不发给 Claude（只在本地）」 -->
+<div id="targetPick" class="panel" hidden>
+  <div class="row small" id="targetPickHead"></div>
+  <div id="targetPickList"></div>
+  <button class="row" id="targetPickCancel">取消</button>
+</div>
+
+<!-- 一本旁边的文件夹图标点开：放进哪个文件夹、移出文件夹、新建文件夹 -->
+<div id="folderPick" class="panel" hidden>
+  <div class="row small">放进哪个文件夹</div>
+  <div id="folderPickList"></div>
+  <button class="row" id="folderPickCancel">取消</button>
+</div>
+
+<!-- 书页：原文件更新过 / 这一页有改动（对比旧版；Claude 改文件后换的新版还能「撤回这次修改」）。
+     全屏时和左上角那一排同一行、靠右，退出全屏时在顶栏下面靠右（app.js 的 placeVer） -->
+<div id="verchip" hidden>
+  <span id="verText"></span>
+  <button id="verAct"></button>
+  <button id="verUndo" hidden></button>
+  <button id="verClose" aria-label="收起">×</button>
+</div>
+
+<!-- 顶上的卡片（2026-11-14）：问话卡片（Claude 要你回答的问题，或纸上放不下的结果）和字迹确认卡片是同一种卡片、排同一个队。
+     从屏幕顶上落下、居中，一次只显示一张；在卡片外的纸上落笔，它缩成顶上一小条（#qbar：问的是什么、还有几张），点小条再展开。
+     问题：点一个选项，或用笔写在卡片里那一小块纸上（交的是笔迹的图，不转文字）；结果：点「知道了」；字迹确认：照旧（截图、候选、手写更正）。
+     答了这张就消失，下一张落下。问题卡片底下左边有「忽略」（不答了，这张消失）；排着不止一张时另有「全部忽略（N 张）」。
+     平板自己要问的一句（撤回修改前的确认）也用这张卡片。内容由 app.js 的 fillQ 按卡片的种类填 -->
+<div id="qcard" role="dialog" hidden>
+  <div class="qc-top"><b id="qcHead"></b><button id="qcLater" aria-label="收成顶上一小条，点它再打开">稍后</button></div>
+  <div id="qcBody"></div>
+  <div id="qcFoot"></div>
+</div>
+<button id="qbar" aria-label="点一下展开卡片" hidden><span id="qbarLead"></span><span id="qbarText" data-lang-keep></span><span id="qbarMore"></span></button>
+<!-- 排着不止一张时，小条旁边的「全部忽略（N 张）」：一次清掉排着的所有卡片（2026-11-14 用户在 iPad 上试过后定） -->
+<button id="qbarAll" hidden></button>
+
+<div id="toast" hidden></div>
+
+<!-- 导入：浏览电脑上对话所在的文件夹，或搜 Zotero 里的文献，点一下导入；或从 iPad 上传 -->
+<div id="importSheet" class="overlay" hidden>
+  <div class="card wide">
+    <div class="is-top"><b>导入文档</b><button id="isClose" aria-label="关闭">×</button></div>
+    <div class="is-tabs"><button data-tab="folder">电脑文件夹</button><button data-tab="zotero">Zotero</button></div>
+    <div id="isFolder" class="is-pane">
+      <div class="is-row"><span>电脑上的文件夹</span><select id="isSession" aria-label="哪个对话的文件夹"></select></div>
+      <div id="isCrumbs"></div>
+      <div id="isList"></div>
+    </div>
+    <div id="isZotero" class="is-pane" hidden>
+      <input id="zq" type="search" placeholder="搜标题、作者、年份" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div id="zCrumbs"></div>
+      <div id="zList"></div>
+    </div>
+    <div class="card-btns"><button id="isUpload">从 iPad 上传…</button></div>
+  </div>
+</div>
+
+<!-- 新建本子：名字 + 纸张方向 -->
+<div id="newNb" class="overlay" hidden>
+  <div class="card">
+    <h3>新建本子</h3>
+    <input id="newNbTitle" placeholder="名字，比如：随笔、想法、读书笔记" autocomplete="off">
+    <select id="newNbPaper" aria-label="纸张方向"><option value="portrait">竖版纸</option><option value="landscape">横版纸</option></select>
+    <p>黑笔写你自己的；想让 Claude 做什么，用红笔写。</p>
+    <div class="card-btns"><button id="newNbCancel">取消</button><button id="newNbOk" class="primary">建立</button></div>
+  </div>
+</div>
+
+<!-- 给文件夹起名字（新建、改名）：和新建本子同一种卡片 -->
+<div id="nameAsk" class="overlay" hidden>
+  <div class="card">
+    <h3 id="nameAskTitle">新建文件夹</h3>
+    <input id="nameAskInput" placeholder="文件夹的名字" autocomplete="off">
+    <div class="card-btns"><button id="nameAskCancel">取消</button><button id="nameAskOk" class="primary">好</button></div>
+  </div>
+</div>
+
+<div id="locked" class="overlay" hidden>
+  <div class="card">
+    <h3>需要访问码</h3>
+    <p>在电脑上打开二维码页扫码，或输入服务启动时打印的访问码（链接里 <code>k=</code> 后面那段）。</p>
+    <input id="codeInput" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="codeOk" class="primary">进入</button>
+  </div>
+</div>
+
+<input type="file" id="pdfFile" accept=".pdf,.ppt,.pptx,.doc,.docx,.rtf,.odt,.odp,.epub,.png,.jpg,.jpeg,.svg,.webp,application/pdf,image/*" hidden>
+<!-- 全屏时（打开时的样子，只有纸）：左上角是本子名和页码，点开抽屉；右下角一条。退出全屏后换成上面的顶栏和左侧工具栏 -->
+<div id="chipRow">
+  <button id="nbChip" aria-label="本子和页面"><span class="chip-menu" aria-hidden="true">☰</span><span id="chipName"></span><span id="chipPage"></span></button>
+  <!-- 全屏时没有顶栏，在这里翻页：这本不止一页就有（连续时也有）；第一页 ‹、最后一页 › 不能点 -->
+  <button id="chipPrev" aria-label="上一页" hidden>‹</button>
+  <button id="chipNext" aria-label="下一页" hidden>›</button>
+  <!-- 单页 / 连续：并排的一对图标，挨在一起像一个两格的开关，当前的那个白底加粗边框；点哪个就是哪个，点已选中的不变；
+       和抽屉里那组开关、顶栏上那一对同一个状态；只有一页的本子没有（页数到两页以上才出来）；说明长按看 -->
+  <div class="pair" id="chipPair" role="group" hidden>
+    <button id="chipSingle" data-v="single" data-icon="single" aria-label="单页：一页一页翻"></button>
+    <button id="chipCont" data-v="flow" data-icon="cont" aria-label="连续：上下页接在一起"></button>
+  </div>
+  <!-- 加页图标（纸上一个加号）：在这一页后面加一张和它同方向的空白页（这一页横着就加横版，否则竖版），翻过去；
+       和抽屉里那两个加页图标同一个办法 -->
+  <button id="chipAdd" data-icon="addv" aria-label="在这一页后面加一张空白页" hidden></button>
+</div>
+<div id="trouble" role="status" hidden></div><!-- 只在出问题时出现：连不上电脑、有字没存上 -->
+<div id="tools">
+  <span class="fb-grip" id="toolsGrip" role="button" aria-label="按住拖动工具条">⋮⋮</span>
+  <button id="toolsBars" aria-label="退出全屏：显示顶栏和左侧工具栏">退出全屏</button>
+  <button data-tool="pen" class="on" data-icon="pen" aria-label="黑笔：你自己在想"></button>
+  <button data-tool="red" class="red-pen" data-icon="pen" aria-label="红笔：明确要 Claude 处理的事"></button>
+  <button data-tool="eraser" data-icon="eraser" aria-label="橡皮：也能擦 Claude 的蓝字"></button>
+  <button id="toolsUndo" data-icon="undo" aria-label="撤销"></button>
+  <!-- 点了交给 Claude；交上去以后字跟着这一轮走：已交 / 排队中 / Claude 在看 / 在改文件，结束变回「AI」；这本只在本地时写「只在本地」 -->
+  <button id="check">AI</button>
+</div>
+<script src="/static/katex/katex.min.js"></script>
+<script src="/static/gesture.js"></script>
+<script src="/static/turn.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

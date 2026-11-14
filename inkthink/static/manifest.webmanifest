@@ -1,0 +1,20 @@
+{
+ "name": "ThinkPaper 草稿纸",
+ "short_name": "草稿纸",
+ "display": "standalone",
+ "orientation": "any",
+ "background_color": "#e8e5df",
+ "theme_color": "#fffdf8",
+ "icons": [
+  {
+   "src": "/static/icon-180.png",
+   "sizes": "180x180",
+   "type": "image/png"
+  },
+  {
+   "src": "/static/icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png"
+  }
+ ]
+}

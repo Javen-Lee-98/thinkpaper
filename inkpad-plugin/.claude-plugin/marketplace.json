@@ -1,0 +1,5 @@
+{
+  "name": "inkthink-local",
+  "owner": { "name": "local" },
+  "plugins": [{ "name": "inkpad", "source": "./inkpad" }]
+}

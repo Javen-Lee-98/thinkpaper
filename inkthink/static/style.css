@@ -1,0 +1,624 @@
+@font-face {
+  font-family: "Xiaolai";
+  src: url("/static/fonts/xiaolai-gb2312.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --bar: 52px;
+  --rail: 60px;
+  --ai: #2f5fae;
+  --desk: #e8e5df;
+  --panel: #fffdf8;
+  --line: #d9d3c6;
+  --muted: #7a746a;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--desk);
+  color: #222;
+  font: 15px/1.4 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+#bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--bar);
+  padding: 0 8px;
+  padding-top: env(safe-area-inset-top);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  z-index: 10;
+  overflow-x: auto;
+}
+.grp { display: flex; align-items: center; gap: 4px; flex: none; }
+.grp.grow { flex: 1 1 auto; min-width: 0; }
+.nb-title { min-width: 0; max-width: 260px; height: 36px; line-height: 36px; padding: 0 8px; overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: none; font-weight: 600; cursor: pointer; }
+/* 一行放不下的名字：左右滑着看；还有没露出来的那一头渐隐 */
+.nb-title::-webkit-scrollbar, #nbList .nb-item::-webkit-scrollbar { display: none; }
+.fade-r { -webkit-mask-image: linear-gradient(to right, #000 82%, transparent); mask-image: linear-gradient(to right, #000 82%, transparent); }
+.fade-l { -webkit-mask-image: linear-gradient(to right, transparent, #000 18%); mask-image: linear-gradient(to right, transparent, #000 18%); }
+.fade-l.fade-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 18%, #000 82%, transparent); mask-image: linear-gradient(to right, transparent, #000 18%, #000 82%, transparent); }
+#bar button, #bar select { padding: 0 8px; min-width: 36px; }
+#bar button.primary { padding: 0 12px; }
+button.red-pen { color: #d23c2e; }
+#pageNo { min-width: 52px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* 顶栏上「单页 / 连续」一对图标：挨在一起像一个两格的开关，当前的那个白底加粗边框（和选中的笔一样）；
+   和左边的翻页、右边的加页图标之间留出间隔，免得连着看成一组 */
+#bar .pair { display: flex; gap: 2px; margin: 0 8px; padding: 1px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+#bar .pair button { min-width: 40px; padding: 0; border-color: transparent; border-radius: 8px; background: none; color: #222; }
+#bar .pair button.on { background: #fff; border-color: #222; box-shadow: inset 0 0 0 1px #222; }
+#bar #barAdd { min-width: 40px; padding: 0; color: #222; } /* 加页图标（纸上一个加号） */
+
+button, select, input {
+  font: inherit;
+  color: #222;
+}
+button, select {
+  height: 36px;
+  min-width: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+select { padding: 0 6px; max-width: 160px; }
+button:disabled { opacity: .4; }
+/* 选中的按钮（工具、连续阅读、导入面板的两栏……）：底还是白的，线条、字照原色，靠加粗的边框看出选中 */
+button.on { background: #fff; border-color: #222; color: #222; box-shadow: inset 0 0 0 1.5px #222; }
+button.red-pen.on { background: #fff; border-color: #d23c2e; color: #d23c2e; box-shadow: inset 0 0 0 1.5px #d23c2e; }
+button.primary { background: var(--ai); border-color: var(--ai); color: #fff; font-weight: 600; padding: 0 16px; }
+
+#rail {
+  position: fixed;
+  left: 0;
+  top: calc(var(--bar) + env(safe-area-inset-top));
+  bottom: 0;
+  width: var(--rail);
+  padding: 10px 6px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  z-index: 10;
+}
+#rail button { width: 100%; height: 46px; min-width: 0; padding: 0; font-size: 14px; flex: none; }
+#rail .rail-gap { flex: 1; }
+#rail #fsBtn { height: auto; min-height: 46px; padding: 4px 0; font-size: 15px; line-height: 1.2; color: #222; } /* 全屏：字和「AI」按钮一样大，不用淡色 */
+#rail button.active { background: #efe9dc; color: #222; }
+
+/* 全屏（打开时的样子）：收起顶栏和左侧工具栏，纸面占满；抽屉从屏幕顶上开起，让开左上角的本子名 */
+body.collapsed #bar, body.collapsed #rail { display: none !important; }
+body.collapsed #stage { inset: env(safe-area-inset-top) 0 0 0; }
+body.collapsed #drawer { top: 0; padding-top: calc(env(safe-area-inset-top) + 58px); }
+.fb-grip { padding: 0 6px; color: var(--muted); cursor: grab; touch-action: none; font-size: 16px; letter-spacing: -2px; } /* 右下角那一条左端的把手 */
+
+/* 纸边的「加长 / 加宽」：平时不显示，笔写到边上附近时才出来 */
+.ext {
+  position: absolute;
+  z-index: 3;
+  padding: 2px 10px;
+  height: auto;
+  min-width: 0;
+  border: 1px dashed #c9bfa9;
+  border-radius: 10px;
+  background: rgba(255, 253, 248, .85);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s, background .2s;
+}
+#extRight, #extLeft { padding: 8px 4px; }
+.ext.hot { opacity: 1; pointer-events: auto; background: #fff3d6; border-color: #e0a52a; color: #8a5a00; }
+
+#stage {
+  position: fixed;
+  inset: calc(var(--bar) + env(safe-area-inset-top)) 0 0 var(--rail);
+  overflow: hidden;
+  touch-action: none;
+}
+#stage canvas, #stage svg { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#ai { pointer-events: none; overflow: visible; }
+#tex { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
+#tex .tx { position: absolute; display: flex; align-items: center; color: var(--ai); white-space: nowrap; }
+#tex .tx.faded { opacity: .35; }
+
+.ai-item text { font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; fill: var(--ai); }
+.ai-item path { fill: none; stroke: var(--ai); stroke-linecap: round; stroke-linejoin: round; opacity: .9; }
+.ai-item path.hl { fill: rgba(255, 229, 106, .45); stroke: none; mix-blend-mode: multiply; } /* 荧光笔：下面的字照样清楚 */
+.ai-item path.leader { opacity: .35; stroke-dasharray: 1 6; }
+.ai-item.dismissed { opacity: .25; }
+.ai-item.adopted path { stroke: #1f3d7a; } /* 采纳的：深蓝实线 */
+.ai-item.adopted text { fill: #1f3d7a; }
+.ai-item text.adopt-star { fill: #c9a227; }
+/* 长回答的圈号：没点开看过的实心（蓝底白字），看过的空心（蓝圈蓝字），采纳的深蓝；到达时跳两下。
+   连续阅读时相邻页上的圈号（.nbr-badge）也画在这一层，样子一样 */
+#aiRoot .badge circle { fill: var(--ai); stroke: var(--ai); stroke-width: 1.8; }
+#aiRoot .badge text { font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; fill: #fff; }
+#aiRoot .badge.seen circle { fill: #fff; }
+#aiRoot .badge.seen text { fill: var(--ai); }
+#aiRoot .badge.adopted circle { fill: #1f3d7a; stroke: #1f3d7a; }
+#aiRoot .badge.adopted.seen circle { fill: #fff; }
+#aiRoot .badge.adopted.seen text { fill: #1f3d7a; }
+#aiRoot .badge text.adopt-star { fill: #c9a227; }
+#aiRoot .badge.dismissed { opacity: .25; }
+#aiRoot .badge .bdg { transform-box: fill-box; transform-origin: center; }
+#aiRoot .badge.fresh .bdg { animation: badgeHop .45s ease-in-out 2; }
+#aiRoot .badge .bdot { fill: #d23c2e; stroke: #fff; stroke-width: 1.5; } /* 卡片上有还没交给 Claude 的红字 */
+@keyframes badgeHop { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-9px); } }
+/* 修改建议：虚线框 + ✓ × 两个钮；同意的框变绿，不同意的整条变淡，发出去的画淡 */
+.ai-item path.sbox { stroke-dasharray: 7 5; opacity: .85; }
+.ai-item.v-yes path.sbox { stroke: #2f7a3e; }
+.ai-item path.dash { stroke-dasharray: 7 5; } /* 概念图上建议加的：同意了变实线 */
+.ai-item.v-yes path.dash { stroke-dasharray: none; }
+.ai-item.v-no { opacity: .45; }
+.ai-item.sent { opacity: .55; }
+.ai-item.sent.v-no { opacity: .3; } /* 发出去以后，不采纳的仍比采纳的淡 */
+.ai-item text.vstat { font-family: -apple-system, "PingFang SC", sans-serif; fill: var(--muted); }
+.ai-item text.vstat.yes, .ai-item text.vstat.ok { fill: #2f7a3e; }
+.ai-item text.vstat.fail { fill: #b8584c; }
+.ai-item text.vstat.undone { fill: #8a6d3b; }
+.ai-item .vbtn circle { fill: #fff; stroke: var(--ai); stroke-width: 1.6; }
+.ai-item .vbtn text { font-family: -apple-system, "PingFang SC", sans-serif; fill: var(--ai); }
+.ai-item .vbtn.yes.on circle { fill: #2f7a3e; stroke: #2f7a3e; }
+.ai-item .vbtn.no.on circle { fill: #b8584c; stroke: #b8584c; }
+.ai-item .vbtn.on text { fill: #fff; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.panel {
+  position: fixed;
+  top: calc(var(--bar) + env(safe-area-inset-top) + 6px);
+  right: 8px;
+  width: 250px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .14);
+  z-index: 20;
+}
+.panel .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  box-sizing: border-box;
+}
+.panel button.row:active, .panel label.row:active { background: #f0ece3; }
+.panel input[type=checkbox] { width: 18px; height: 18px; }
+.panel .small { color: var(--muted); font-size: 12px; min-height: 0; padding: 6px 8px; line-height: 1.5; }
+#targetPick { width: 340px; z-index: 40; } /* 抽屉开着时点开，在抽屉上面 */
+body.collapsed #targetPick { top: calc(env(safe-area-inset-top) + 58px); left: min(338px, calc(100vw - 348px)); right: auto; } /* 全屏：贴在抽屉右边 */
+/* 「这本发往」的列表：按项目文件夹分组（文件夹名做小标题），每个对话两行字；多了在里面上下滑 */
+#targetPickList, #folderPickList { max-height: min(62vh, 560px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#targetPick .tp-folder { margin: 8px 8px 2px; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#targetPick .tp-folder:first-child { margin-top: 2px; }
+.panel .row .tp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 6px 0; }
+.panel .row .tp-l1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel .row .tp-l1.none { color: var(--muted); }
+.panel .row .tp-l2 { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel .row .tp-check { flex: none; font-weight: 600; }
+#targetPick .tp-sess { padding-left: 14px; } /* 对话缩在文件夹名下面 */
+/* 选中的那一项：白底加粗边框（不整块涂色） */
+.panel button.row.on { background: #fff; color: #222; font-weight: 600; box-shadow: inset 0 0 0 1.5px #222; }
+.panel .row .tp-l2, .panel button.row.on .tp-l1.none { font-weight: 400; }
+.tp-sep { height: 1px; margin: 6px 4px; background: var(--line); }
+/* 一本旁边的文件夹图标点开的小列表：紧挨着那个图标（位置由页面算） */
+#folderPick { width: 240px; right: auto; z-index: 40; }
+
+/* 长回答的卡片：点圈号紧挨着它浮出来；蓝色手写体、白底细框、轻微阴影；宽约半屏（最多 460 像素）、最高半屏，多了在卡片里上下滑
+   （手指滑由 app.js 的 cardMove 做：笔刚用过时落下的手掌不滑）。红笔在上面写字，没有按钮。
+   里面的内容（#acPage）按固定宽度 440 排版、整体缩放到卡片的宽度（app.js 的 layoutCard），换屏幕大小换行不变，红字不错位 */
+#answerCard {
+  position: fixed;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  width: min(460px, 50vw);
+  max-height: 50vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: none;
+  scrollbar-width: none; /* 滚动条不占宽度：内容的缩放按卡片的整个宽度算 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-text-size-adjust: 100%;
+  padding: 0;
+  background: #fff;
+  border: 1px solid rgba(47, 95, 174, .35);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
+  color: var(--ai);
+  font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif;
+  font-size: 20px;
+  line-height: 1.55;
+  z-index: 28;
+}
+#answerCard::-webkit-scrollbar { display: none; }
+#acSizer { position: relative; overflow: hidden; }
+#acPage { position: absolute; left: 0; top: 0; width: 440px; box-sizing: border-box; padding: 12px 16px 14px; transform-origin: 0 0; }
+/* 卡片上的红字：叠在内容上，和内容一起缩放、一起滑；不接点按（笔、手指由卡片自己接） */
+#acInk { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+#acInk path { fill: none; stroke: #d23c2e; stroke-linecap: round; stroke-linejoin: round; }
+#acInk circle { fill: #d23c2e; }
+/* Claude 接着回的一段：上面一条细线，前面一行较淡的红色「红字：……」（它回应的那句红字） */
+#answerCard .ac-seg { margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(47, 95, 174, .25); }
+#answerCard .ac-mq { margin-bottom: 6px; color: #d23c2e; opacity: .7; font-size: 18px; }
+#answerCard .ac-q { margin-bottom: 6px; opacity: .6; font-size: 18px; } /* 顶上一行较淡的「问：……」 */
+#answerCard .ac-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+#answerCard .ac-gap { height: .6em; }
+#answerCard .ac-tex { margin: 4px 0; overflow-x: auto; overflow-y: hidden; font-size: 20px; }
+#answerCard .ac-older { margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(47, 95, 174, .25); opacity: .75; }
+#answerCard .ac-oh { font-size: 16px; opacity: .8; margin-bottom: 4px; }
+#answerCard .ac-old + .ac-old { margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(47, 95, 174, .2); }
+
+#toast button { margin-left: 10px; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: #fff; color: #222; pointer-events: auto; }
+/* 提示不挡点按：盖在 ✓ × 钮上时照样点得到下面的钮；带「打开」「去看看」的，只有那个按钮接点按 */
+#toast {
+  pointer-events: none;
+  position: fixed;
+  left: 50%;
+  top: calc(var(--bar) + env(safe-area-inset-top) + 52px); /* 让开右上角的版本提示条 */
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 8px 14px;
+  background: rgba(30, 30, 30, .88);
+  color: #fff;
+  border-radius: 10px;
+  font-size: 14px;
+  z-index: 30;
+}
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(232, 229, 223, .96);
+  z-index: 40;
+}
+.card {
+  width: min(380px, 86vw);
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.card h3 { margin: 0 0 8px; }
+.card p { color: var(--muted); font-size: 14px; }
+.card input { width: 100%; box-sizing: border-box; height: 40px; padding: 0 10px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 8px; -webkit-user-select: text; user-select: text; }
+/* 顶上的卡片（问话卡片、字迹确认卡片，同一种）：从屏幕顶上落下、居中；白底细框，和长回答卡片同一种观感，Claude 的话是蓝色手写体。
+   上沿由 app.js 的 placeQ 量好放在左上角那一排（全屏）或顶栏（退出全屏）下面，最高到右下角那一条上面为止，多了在卡片里上下滑。
+   层次在抽屉、菜单、长回答卡片、右下角那一条下面：不会盖住它们 */
+#qcard {
+  position: fixed;
+  left: 50%;
+  top: calc(56px + env(safe-area-inset-top));
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px));
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid rgba(47, 95, 174, .35);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
+  z-index: 19;
+}
+#qcard.qc-drop { animation: qcDrop .24s ease-out; } /* 落下来 */
+@keyframes qcDrop { from { transform: translate(-50%, -28px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+.qc-top { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 8px 2px 14px; color: var(--ai); font-size: 14px; }
+.qc-top b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qc-top button { flex: none; height: 30px; border: 0; background: none; color: var(--muted); }
+#qcBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 0 14px; }
+#qcFoot { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 8px 12px 12px; }
+#qcFoot:empty { display: none; }
+/* 底下靠左的「忽略」「全部忽略（N 张）」：灰色的文字按钮，和右边的「稍后」「交回答」隔开（2026-11-14 用户在 iPad 上试过后定） */
+.qc-left { display: flex; align-items: center; gap: 4px; margin-right: auto; min-width: 0; }
+.qc-ign { height: 34px; padding: 0 10px; border: 0; background: none; color: var(--muted); font-size: 14px; white-space: nowrap; }
+.qc-ign:active { background: #f1ede4; }
+/* 撤回修改之前问一声：几行平常的字（不是 Claude 的话，不用手写体） */
+.qc-local { padding: 6px 0 4px; color: #3d3a34; font-size: 16px; line-height: 1.55; }
+.qc-local div + div { margin-top: 6px; color: #8a5a10; }
+/* Claude 的话（问题、结果）：蓝色手写体；单独一行的 $$…$$ 排成公式（和长回答卡片同一个办法） */
+.qc-q, .qc-text { color: var(--ai); font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; font-size: 21px; line-height: 1.5; padding: 4px 0 6px; }
+.qc-q .ac-line, .qc-text .ac-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.qc-q .ac-gap, .qc-text .ac-gap { height: .6em; }
+.qc-q .ac-tex, .qc-text .ac-tex { margin: 4px 0; overflow-x: auto; overflow-y: hidden; }
+/* 问题的选项：文字按钮；点了那个白底加粗边框，随即交上去 */
+.qc-opts { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 8px; }
+.qc-opts button { height: 42px; padding: 0 16px; font-size: 18px; color: var(--ai); font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; }
+.qc-opts button.on { background: #fff; border-color: #222; box-shadow: inset 0 0 0 1.5px #222; }
+/* 手写回答的那一小块纸：用笔写（黑笔红笔都行，写出来都是黑字），交的是这块纸上笔迹的图 */
+.qc-padhint { color: var(--muted); font-size: 13px; padding: 4px 0 4px; }
+.qc-pad { display: block; width: 100%; height: 140px; box-sizing: border-box; border: 1px dashed #c9bfa9; border-radius: 8px; background: #fffdf8; touch-action: none; }
+.qc-padbtns { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 0 10px; }
+/* 缩成的那一小条：顶上居中（上沿和卡片一样，在左上角那一排、顶栏下面），写着问的是什么、还有几张；点一下展开 */
+#qbar {
+  position: fixed;
+  left: 50%;
+  top: calc(56px + env(safe-area-inset-top));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(420px, calc(100vw - 32px));
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid rgba(47, 95, 174, .45);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
+  color: var(--ai);
+  font-size: 14px;
+  white-space: nowrap;
+  z-index: 19;
+}
+#qbarLead { flex: none; font-weight: 600; }
+#qbarText { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; font-size: 16px; }
+#qbarMore { flex: none; margin-left: 4px; padding: 1px 8px; border-radius: 10px; background: #e8eef8; color: #1f3d7a; font-size: 12px; }
+#qbarMore:empty { display: none; }
+/* 缩成小条时、排着不止一张：小条旁边的「全部忽略（N 张）」，位置由 placeQ 量（小条右边，放不下就在下面） */
+#qbarAll {
+  position: fixed;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .10);
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  z-index: 19;
+}
+/* 字迹确认卡片的内容（和以前一样）：哪一页、每处的截图（先按图的大小留好位置）、候选、更正框 */
+#qcBody > .q { padding: 2px 0 4px; color: #4a463f; }
+#qcBody > .q button { height: 32px; }
+.cq { padding: 10px 0; border-top: 1px solid #eee7da; }
+.cq:first-child { border-top: 0; }
+.cq img { display: block; max-width: 100%; max-height: 200px; margin: 4px 0 8px; border: 1px solid #eee7da; border-radius: 6px; background: #fff; box-sizing: border-box; }
+.cq .q { margin-bottom: 6px; }
+.cq .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.cq .opts button { height: 38px; font-size: 17px; font-family: "Xiaolai", KaiTi, serif; }
+.cq .opts button.on { background: #fff; border-color: var(--ai); color: var(--ai); box-shadow: inset 0 0 0 1.5px var(--ai); }
+
+.cq input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 18px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.ai-temp .confirm-mark { fill: rgba(47, 95, 174, .08); stroke: var(--ai); stroke-width: 2.5; animation: pulse 1s ease-in-out infinite; }
+#verchip {
+  position: fixed;
+  right: 10px;
+  top: calc(var(--bar) + env(safe-area-inset-top) + 8px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 80vw;
+  padding: 4px 4px 4px 12px;
+  background: #fff6e8;
+  border: 1px solid #e3b766;
+  border-radius: 18px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .10);
+  font-size: 13px;
+  color: #7a5310;
+  z-index: 12;
+}
+#verchip button { flex: none; height: 28px; padding: 0 10px; font-size: 13px; border-radius: 14px; white-space: nowrap; }
+#verText { min-width: 0; } /* 放不下时这一句折行，按钮不折 */
+#verClose { border: 0; background: none; color: #a07a3a; font-size: 18px; padding: 0 6px; }
+#verUndo { background: #fff; border-color: #d8b36a; color: #7a5310; } /* 「撤回这次修改」 */
+#verchip.old { background: #fde9e7; border-color: #d98a80; color: #8a2b20; }
+.ai-temp .chg { fill: rgba(232, 150, 30, .10); stroke: #e0901e; stroke-width: 2; stroke-dasharray: 7 5; }
+.ai-temp .chg-label { fill: #c07400; font-size: 15px; font-family: -apple-system, "PingFang SC", sans-serif; }
+#drawer {
+  position: fixed;
+  left: 0;
+  top: calc(var(--bar) + env(safe-area-inset-top));
+  bottom: 0;
+  width: min(330px, 86vw);
+  padding: 8px 12px 20px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  box-shadow: 8px 0 28px rgba(0, 0, 0, .14);
+  z-index: 22;
+  -webkit-overflow-scrolling: touch;
+}
+.dr-head { margin: 12px 2px 6px; color: var(--muted); font-size: 12px; }
+#nbList .nb-item { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 4px; padding: 0 2px 0 10px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
+/* 当前这本名字下面另起的一行：「撤回上次修改」（文字按钮，整行宽，不会被名字挤出去） */
+#nbList .nb-sub { flex: 0 0 100%; display: flex; padding: 0 0 6px; }
+#nbList .nb-sub button { height: 32px; padding: 0 12px; font-size: 13px; font-weight: 400; color: #7a5310; background: #fff6e8; border: 1px solid #e3b766; border-radius: 16px; }
+#nbList .nb-name { flex: 1; min-width: 0; padding: 9px 0; line-height: 1.35; white-space: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+#nbList .nb-name::-webkit-scrollbar { display: none; }
+#nbList .nb-acts { flex: none; display: flex; }
+#nbList .nb-acts button, .dr-acts button { height: 32px; min-width: 32px; padding: 0; border: 0; background: none; color: var(--muted); }
+#nbList .nb-acts button:active, .dr-acts button:active { background: #e9e3d6; }
+.dr-pages { display: flex; align-items: center; gap: 4px; }
+.dr-acts { margin-left: auto; display: flex; }
+.dr-acts button { color: #4a463f; }
+/* 图标：内嵌线条 SVG，颜色跟按钮走；长按看说明（不弹系统菜单） */
+[data-icon] { -webkit-touch-callout: none; }
+[data-icon] svg { display: block; width: 22px; height: 22px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+#nbList .nb-item:active { background: #f4efe4; }
+#nbList .nb-item.cur { background: #efe9dc; border-color: var(--line); font-weight: 600; }
+#nbList small { color: var(--muted); font-size: 12px; margin-left: 6px; }
+#nbList .nb-local { flex: none; margin: 0 4px 0 6px; font-weight: 400; white-space: nowrap; } /* 只在本地的本子：名字后面的小字 */
+/* 文件夹（只有一层）：一行，点一下折叠 / 展开；▸ 折着、▾ 开着，写着里面几本；展开时里面的本子缩进列在下面 */
+#nbList .nf-item { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; padding: 0 2px 0 6px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
+#nbList .nf-item:active { background: #f4efe4; }
+#nbList .nf-mark { flex: none; display: flex; align-items: center; gap: 2px; width: 42px; color: #4a463f; font-size: 15px; }
+#nbList .nf-mark svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+#nbList .nf-name { flex: 1; min-width: 0; padding: 9px 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#nbList .nf-count { flex: none; margin: 0 4px 0 6px; white-space: nowrap; }
+#nbList .nb-item.nested { margin-left: 22px; }
+.dr-row { display: flex; gap: 6px; margin: 8px 0; }
+.dr-row button { flex: 1; height: 36px; padding: 0 6px; font-size: 13px; }
+/* 「这本发往」那一行：对话的叫法可能带着一句话，放不下就折成两行，按钮跟着长高，不截掉 */
+.dr-row #actTarget { height: auto; min-height: 36px; padding: 7px 8px; line-height: 1.4; text-align: left; }
+#thumbs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.th { position: relative; border: 1px solid var(--line); border-radius: 6px; background: #fff; overflow: hidden; min-height: 60px; }
+.th img { display: block; width: 100%; }
+.th.cur { outline: 3px solid var(--ai); outline-offset: -1px; }
+.th span { position: absolute; left: 4px; bottom: 3px; padding: 0 5px; border-radius: 4px; background: rgba(255, 255, 255, .9); color: var(--muted); font-size: 11px; }
+.th.blank span::after { content: " 空白"; }
+.th.hid img { opacity: .6; }
+.th.hid span::after { content: " 隐藏页"; }
+#hiddenList .hr { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid #eee7da; font-size: 13px; }
+#hiddenList .hr span { flex: 1; }
+#hiddenList .hr button { height: 30px; font-size: 12px; }
+.card select { width: 100%; max-width: none; height: 40px; margin-bottom: 8px; }
+.card.wide { width: min(600px, 94vw); max-height: 86vh; display: flex; flex-direction: column; box-sizing: border-box; }
+.is-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.is-top button { height: 32px; min-width: 32px; border: 0; background: none; font-size: 20px; color: var(--muted); }
+.is-row { display: flex; align-items: center; gap: 8px; }
+.is-row span { flex: none; color: var(--muted); font-size: 13px; }
+.is-row select { flex: 1; margin-bottom: 0; }
+#isCrumbs, #zCrumbs { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
+#isCrumbs a, #zCrumbs a { color: var(--ai); text-decoration: none; cursor: pointer; }
+#isList, #zList { flex: 1; min-height: 120px; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid #eee7da; }
+.is-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.is-tabs button { flex: 1; height: 34px; }
+.is-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.is-pane[hidden] { display: none; }
+.card #zq { margin-bottom: 0; }
+.is-item.off { opacity: .45; }
+.is-more { display: block; width: 100%; margin: 8px 0; height: 34px; }
+.is-head { margin: 10px 2px 2px; color: var(--muted); font-size: 12px; }
+.is-item { display: flex; align-items: center; gap: 8px; padding: 9px 4px; border-bottom: 1px solid #f1ece2; cursor: pointer; }
+.is-item:active { background: #f4efe4; }
+.is-ico { flex: none; width: 24px; text-align: center; font-size: 18px; }
+.is-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.is-name small { display: block; color: var(--muted); font-size: 12px; }
+.is-item button { flex: none; height: 30px; padding: 0 8px; font-size: 12px; }
+.is-badge { flex: none; font-size: 12px; color: #2f7a3e; }
+.is-badge.chg { color: #b06b00; }
+.card-btns { display: flex; justify-content: flex-end; gap: 8px; }
+[hidden] { display: none !important; }
+
+/* 全屏（打开时的样子：只有纸、左上角的本子名、右下角一条）和退出全屏：
+   退出后顶栏和左侧工具栏回来，左上角的本子名和右下角那一条让位，出问题时那一句挪到顶栏下面 */
+body:not(.collapsed) #chipRow, body:not(.collapsed) #tools { display: none; }
+body:not(.collapsed) #trouble { top: calc(var(--bar) + env(safe-area-inset-top) + 8px); }
+#chipRow {
+  position: fixed;
+  left: calc(12px + env(safe-area-inset-left));
+  top: calc(10px + env(safe-area-inset-top));
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)); /* 放不下时本子名那块先截短，翻页、「单页 / 连续」、加页不被挤出屏幕 */
+  z-index: 25; /* 抽屉开着时也在它上面：再点一下收起 */
+}
+#chipRow > button:not(#nbChip) { flex: none; height: 36px; min-width: 36px; padding: 0; border: 1px solid transparent; border-radius: 18px; background: rgba(255, 253, 248, .9); color: #4a463f; font-size: 20px; }
+#chipRow > button#chipAdd { min-width: 40px; color: #222; } /* 加页图标（纸上一个加号）：线条用深色，看得清 */
+/* 「单页 / 连续」一对图标：挨在一起像一个两格的开关（底和左上角别的按钮一样，外加一圈细线框住这一对）；
+   当前的那个白底加粗边框（和右下角那一条上选中的笔一样）；和左边的翻页、右边的加页图标之间留出间隔，免得连着看成一组 */
+#chipRow .pair { flex: none; display: flex; gap: 2px; margin: 0 8px; border-radius: 18px; background: rgba(255, 253, 248, .9); box-shadow: inset 0 0 0 1px var(--line); }
+#chipRow .pair button { height: 36px; min-width: 40px; padding: 0; border: 1px solid transparent; border-radius: 18px; background: none; color: #222; }
+#chipRow .pair button.on { background: #fff; border-color: #222; box-shadow: inset 0 0 0 1px #222; }
+.chip-menu { flex: none; font-size: 16px; color: #4a463f; } /* 三条横线：看得出点这里是打开菜单 */
+#nbChip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(60vw, 300px);
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: rgba(255, 253, 248, .9);
+  color: var(--muted);
+  font-size: 15px;
+}
+/* 只在出问题时出现（连不上电脑、有字没存上），好了就消失；不挡笔：点不着 */
+#trouble {
+  position: fixed;
+  left: 50%;
+  top: calc(56px + env(safe-area-inset-top)); /* 全屏时在左上角那一排（本子名、翻页、单页 / 连续、加页）下面，不压着它 */
+  transform: translateX(-50%);
+  max-width: min(70vw, 520px);
+  padding: 8px 16px;
+  border: 1px solid #d98a80;
+  border-radius: 18px;
+  background: #fde9e7;
+  color: #8a2b20;
+  font-size: 14px;
+  line-height: 1.4;
+  pointer-events: none;
+  z-index: 26;
+}
+#chipName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#chipPage { flex: none; font-variant-numeric: tabular-nums; }
+#chipPage:empty { display: none; }
+#tools {
+  position: fixed;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: rgba(255, 253, 248, .94);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .08);
+  z-index: 30;
+}
+#tools button { height: 40px; min-width: 40px; padding: 0 8px; border: 1px solid transparent; border-radius: 20px; background: none; }
+#tools button.on { background: #fff; border-color: #222; box-shadow: inset 0 0 0 1px #222; }
+#tools .fb-grip { align-self: stretch; display: flex; align-items: center; padding: 0 4px 0 10px; } /* 把手：按住把这一条拖到顺手的地方 */
+#tools #toolsBars { font-size: 15px; color: #222; padding: 0 10px; margin-right: 2px; white-space: nowrap; } /* 退出全屏：字和「AI」按钮一样大，和左侧工具栏上的「全屏」一个样 */
+/* 抽屉最上面的两组开关：一行放得下就并排，放不下（英文、窄屏）各占一行 */
+#viewRow { flex-wrap: wrap; gap: 6px 12px; margin-top: 2px; }
+.seg { display: flex; gap: 4px; flex: 1 1 auto; }
+.seg button { white-space: nowrap; }
+#tools button.red-pen.on { border-color: #d23c2e; box-shadow: inset 0 0 0 1px #d23c2e; }
+#tools #check { background: var(--ai); color: #fff; font-size: 15px; padding: 0 18px; margin-left: 2px; }
+/* 「AI」按钮（右下角那一条和顶栏上的两个；2026-11-14 以前叫「检查」）：最小宽度由页面按最长的那几个字算好（fitCheckWidth），换字时不变宽变窄。
+   一轮在走（已交、排队中、Claude 在看、在改文件）：浅蓝底、深蓝字、蓝框，还能点；这本只在本地：灰底灰字，字前一把锁 */
+#check, #barCheck { white-space: nowrap; box-sizing: border-box; }
+#tools #check.busy, #bar #barCheck.busy { background: #dce6f5; border-color: var(--ai); color: #1f3d7a; }
+#tools #check.locked, #bar #barCheck.locked { background: #ebe8e1; border-color: var(--line); color: #6b665d; }
+.ck-lock { display: inline-block; vertical-align: -2px; margin-right: 4px; }
+.ck-lock svg { display: block; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#actTarget { text-align: left; padding: 0 10px; }
+/* 抽屉最下面的语言切换：当前的那个加框 */
+#langRow { margin-top: 14px; }
+#langRow button.on { border-color: #222; font-weight: 600; }

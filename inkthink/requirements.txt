@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 上一行告诉 pip 这个文件是 UTF-8：老版本的 pip 在中文 Windows 上默认按 GBK 读，读到中文注释会出错
+pymupdf>=1.24,<2
+qrcode>=7.4
+numpy>=1.26
+Pillow>=10
+# 本机手写识别（Windows Ink），只在 Windows 上装；没有也能用，只是不附「电脑识别」
+winrt-runtime>=3.2; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2; sys_platform == "win32"
+winrt-Windows.Foundation.Numerics>=3.2; sys_platform == "win32"
+winrt-Windows.UI.Input.Inking>=3.2; sys_platform == "win32"

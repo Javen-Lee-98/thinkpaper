@@ -4,7 +4,7 @@
 
 Handwritten paper on a tablet, wired to a running [Claude Code](https://claude.com/claude-code) session.
 
-**Pen and paper instead of keyboard and mouse for an agent harness.** The model, the tools and the project files all come from Claude Code; ThinkPaper replaces the input and output layer: you write on the page, and Claude answers on the page.
+**A tablet and stylus, used like pen and paper, instead of keyboard and mouse for an agent harness.** The model, the tools and the project files all come from Claude Code; ThinkPaper replaces the input and output layer: you write on the page, and Claude answers on the page.
 
 Write in black for your own working, and switch to red when you want Claude's help. Tap **AI** to send the page to the Claude Code session in your project folder. Claude reads the ink directly and answers on the page with correction marks on your strokes, short notes in the margin, typeset formulas, and small sketches. A longer answer does not take up the paper: a numbered badge appears next to your red question, and tapping it opens the answer on a card floating over the page. On your computer, the conversation only gets a one-line note.
 

@@ -17,7 +17,7 @@ const T = await boot({ name: 'notebooks', open: false });
 const js = T.evalJS, SRC = join(T.ROOT, 'src'), NB = join(T.DATA, 'notebooks');
 mkdirSync(SRC, { recursive: true });
 for (const t of [V47, V48]) {
-  execFileSync(PY, ['-c', `import fitz,sys
+  execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 doc=fitz.open(); p=doc.new_page(width=960,height=540); p.insert_text((60,120),"slide",fontsize=28); doc.save(sys.argv[1])`, join(SRC, t + '.pdf')]);
   await T.post('/bridge/import', { sid: 'S1', path: join(SRC, t + '.pdf') });
 }
@@ -56,6 +56,11 @@ async function newNotebook(title, paper) {
   await T.waitFor(`document.querySelector('#newNb').hidden && window.__ink.S.nb.title === ${JSON.stringify(title)} && window.__ink.S.page`);
   await T.sleep(400);
   return fresh;
+}
+// 一本的「⋯」→ 菜单里的某一项（rename 改名…、delete 删除这本…）；sel 是那一行（默认当前这本）
+async function menu(act, sel = '#nbList .nb-item.cur') {
+  await tap(sel + ' .nb-more', 300);
+  await tap(`#nbMenu [data-act=${act}]`);
 }
 // 一行名字的样子：几行、放不下没有、滑到了哪、两头的渐隐、开头相同的那段还露着多宽
 const lineOf = (sel) => js(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return null;
@@ -132,9 +137,9 @@ await tap(rowOf(LONG) + ' .nb-name');
 await nbIs(port.id);
 await drawer(true);
 
-// 4. 给自己的本子改名（当前这本那一行的铅笔）
+// 4. 给自己的本子改名（当前这本那一行的「⋯」→「改名…」）
 await answer('prompt', '周三例会想法');
-await tap('#actRename');
+await menu('rename');
 await T.waitFor(`document.querySelector('#chipName').textContent === '周三例会想法'`);
 const a4 = await asked(), r4 = await cur();
 T.ok('问「改成什么名字」，默认填着现在的名字', a4.length === 1 && /改成什么名字/.test(a4[0][0]) && a4[0][1] === LONG, a4);
@@ -150,7 +155,7 @@ await T.pen(T.line(200, 300, 250));
 const ink5 = (await cur()).strokes;
 await drawer(true);
 await answer('prompt', '例会 v47 定稿');
-await tap('#actRename');
+await menu('rename');
 await nbIs('book:例会 v47 定稿.pdf');
 await T.sleep(500);
 const r5 = await cur(), src5 = JSON.parse(readFileSync(join(T.BOOKS, '_sources.json'), 'utf8'));
@@ -162,27 +167,30 @@ T.ok('原文件的记录也跟着走（还指着电脑上那份原文件）', Bo
 // 6. 草稿本不能改名、不能删
 await tap(rowOf('草稿本') + ' .nb-name');
 await nbIs('scratch');
-T.ok('草稿本那一行没有改名和删除', (await T.count('#nbList .nb-item.cur')) === 1 && !(await T.visible('#actRename')) && !(await T.visible('#actDelete')),
-  await js(`[...document.querySelectorAll('#nbList .nb-item.cur .nb-acts button')].map((b) => [b.dataset.icon, b.hidden])`));
+T.ok('草稿本那一行没有「⋯」（没有改名和删除）', (await T.count('#nbList .nb-item.cur')) === 1 && (await T.count('#nbList .nb-item.cur .nb-more')) === 0
+  && !(await T.visible('#actRename')) && !(await T.visible('#actDelete')),
+  await js(`[...document.querySelectorAll('#nbList .nb-item.cur .nb-acts button')].map((b) => b.className + ':' + b.textContent)`));
 const no6 = await T.api('/api/notebook/rename', { method: 'POST', body: JSON.stringify({ nb: 'scratch', title: '改不了' }) });
 T.ok('直接让服务改草稿本的名字也不行', no6.status === 400 && (await T.apiJson('/api/notebooks'))[0].title === '草稿本', no6.status);
 
 // 7. 在别的一本那一行直接改名、删除；当前本子（草稿本）不变
 await answer('prompt', '例会 v48');
-await tap(rowOf(V48) + ' .nb-acts [data-icon=edit]');
+await menu('rename', rowOf(V48));
 await T.waitFor(`Boolean(document.querySelector(${JSON.stringify(rowOf('例会 v48'))}))`);
 T.ok('在别的一本那一行改名：列表里换成新名字，当前还是草稿本', (await names()).includes('例会 v48') && !(await names()).includes(V48) && (await cur()).id === 'scratch'
   && existsSync(join(T.BOOKS, '例会 v48.pdf')) && !existsSync(join(T.BOOKS, V48 + '.pdf')), [await names(), (await cur()).id]);
-const trashLabel = await js(`document.querySelector(${JSON.stringify(rowOf('例会 v48') + ' .nb-acts [data-icon=trash]')}).getAttribute('aria-label')`);
-T.ok('删除按钮的说明（长按看）说的是文件留在电脑上，不说「可以找回」', trashLabel === '删除这本（文件还留在电脑上）', trashLabel);
+await tap(rowOf('例会 v48') + ' .nb-more', 300);
+const trashLabel = await js(`(document.querySelector('#nbMenu [data-act=delete]') || {}).textContent`);
+T.ok('菜单里删除那一项写着「删除这本…」（不说「可以找回」）；别的那本的菜单里没有「存回 PDF」', trashLabel === '删除这本…' && (await T.count('#nbMenu [data-act=save]')) === 0, trashLabel);
+await tap(rowOf('例会 v48') + ' .nb-more', 300); // 收起
 await answer('confirm', false);
-await tap(rowOf('例会 v48') + ' .nb-acts [data-icon=trash]');
+await menu('delete', rowOf('例会 v48'));
 const a7 = await asked();
 T.ok('删除前问一句：说了是哪本、PDF 和手写都还留在电脑上、要找回让 Claude 挪回来；点取消就不删', a7.length === 1
-  && a7[0][0] === '从列表里删除《例会 v48》？\nPDF 和上面的手写都还留在电脑上，要找回就让 Claude 帮你挪回来。'
+  && a7[0][0] === '从列表里删除《例会 v48》？\n文件和上面的手写都还留在电脑上，要找回就让 Claude 帮你挪回来。'
   && (await names()).includes('例会 v48') && existsSync(join(T.BOOKS, '例会 v48.pdf')), a7);
 await answer('confirm', true);
-await tap(rowOf('例会 v48') + ' .nb-acts [data-icon=trash]');
+await menu('delete', rowOf('例会 v48'));
 await T.waitFor(`!document.querySelector(${JSON.stringify(rowOf('例会 v48'))})`);
 const toast7 = await js(`document.querySelector('#toast').hidden ? '' : document.querySelector('#toast').textContent`);
 T.ok('删完的提示也说文件还留在电脑上、要找回让 Claude 挪回来', toast7 === '已删除「例会 v48」。文件还留在电脑上，要找回就让 Claude 帮你挪回来。', toast7);
@@ -200,7 +208,7 @@ await T.pen(T.line(150, 300, 300));
 T.ok('在要删的本子上写了一笔并存上', (await T.strokes()) === 1 && (await T.saved()) && inkIn('pad-' + port.id.slice(4)) === 1, inkIn('pad-' + port.id.slice(4)));
 await drawer(true);
 await answer('confirm', true);
-await tap('#actDelete');
+await menu('delete');
 await nbIs('scratch');
 await T.sleep(500);
 const a8 = await asked();

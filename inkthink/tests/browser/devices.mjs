@@ -37,7 +37,7 @@ T.ok('只凭设备令牌就能写、能存', (await T.strokes()) === 1 && (await
 
 // 2. 一台新平板（什么都没记）拿着不对的访问码打开：出「需要访问码」，进不来；输入对的才进
 await T.evalJS(`(localStorage.clear(), 1)`);
-await T.go('?k=not-the-code&lang=zh&notour=1', { raw: true, wait: false });
+await T.go('?k=not-the-code&lang=zh', { raw: true, wait: false });
 T.ok('访问码不对：出现「需要访问码」的输入页', await T.waitFor(`!document.querySelector('#locked').hidden`) && /需要访问码/.test(await T.text('#locked h3'))
   && (await T.visible('#codeInput')) && (await T.visible('#codeOk')), await T.text('#locked h3'));
 T.ok('没进到纸，电脑上也没多配一台', !(await entered()) && (await devices()).length === 1, (await devices()).length);

@@ -6,7 +6,7 @@
   第一次调用 mcp__inkpad__ink_reply 的时间、这一轮最后一条回复的时间。
 
 token 是估计：文字按每字约 1 个 token；图片按每 28×28 像素 1 个视觉 token（长边超过 2576 时先按比例缩到 2576），
-和 docs/research/2026-10-25-recognition-and-speed.md 的算法一样。
+和 docs/archive/research/2026-10-25-recognition-and-speed.md 的算法一样。
 
 用法：
     .venv\\Scripts\\python.exe tools\\timing.py [--data data] [--projects 目录 ...] [--since 2026-10-20] [--csv 输出.csv]

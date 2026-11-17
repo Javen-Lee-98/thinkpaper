@@ -1,6 +1,6 @@
 // 导入文档：抽屉里「导入文档…」打开面板；「电脑文件夹」一栏浏览对话所在的文件夹，点一个 PDF 导入成一本能翻页的本子；
 // 图片（自己成为一本，不进「Claude 推送」）和 Markdown 也能导入；导入时纸上写「正在导入 …」（不用转换的不提转换），
-// 导入过的再点写「正在打开 …」；同一个文件再点一次不会多出一本；「从 iPad 上传…」传一个 PDF。Word / PPT 要开 Office 转换，这里不测。
+// 导入过的再点写「正在打开 …」；同一个文件再点一次不会多出一本；「从平板上传…」传一个 PDF。Word / PPT 要开 Office 转换，这里不测。
 // 跑法：node tests/browser/import_docs.mjs [临时目录]；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -14,14 +14,14 @@ const T = await boot({ name: NAME, open: false, sessions: [{ sid: 'S1', label: '
 if (PROJ !== join(T.ROOT, 'proj')) throw new Error('临时目录的位置和 browser_lib 里的对不上：' + PROJ);
 const js = T.evalJS, UP = join(T.ROOT, 'ipad');
 for (const d of [PROJ, join(PROJ, 'figs'), join(PROJ, 'notes'), UP]) mkdirSync(d, { recursive: true });
-const makePdf = (path, texts) => execFileSync(PY, ['-c', `import fitz,sys,json
+const makePdf = (path, texts) => execFileSync(PY, ['-c', `import pymupdf as fitz,sys,json
 doc=fitz.open()
 for t in json.loads(sys.argv[2]):
     p=doc.new_page(width=960,height=540); p.insert_text((60,120),t,fontsize=36)
 doc.save(sys.argv[1])`, path, JSON.stringify(texts)]);
 makePdf(join(PROJ, '例会汇报_v1.pdf'), ['Intro', 'Method A', 'Result']);
 makePdf(join(UP, '从平板传的.pdf'), ['From iPad', 'Page two']);
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 pix=fitz.Pixmap(fitz.csRGB, fitz.IRect(0,0,300,200), 0); pix.set_rect(pix.irect,(255,0,0)); pix.save(sys.argv[1])`, join(PROJ, 'figs', 'chart.png')]);
 writeFileSync(join(PROJ, 'notes', '对照.md'), '# 对照 MarkerXYZ\n\n- 第 1 页\n', 'utf8');
 writeFileSync(join(PROJ, 'run.py'), 'print(1)\n', 'utf8');
@@ -123,11 +123,11 @@ await toasts();
 await tapRow('对照.md');
 await nbIs('book:对照.pdf');
 const t5 = await toasts(), s5 = await st();
-const mdText = execFileSync(PY, ['-c', 'import fitz,sys; sys.stdout.buffer.write(fitz.open(sys.argv[1])[0].get_text().encode("utf-8"))', join(T.BOOKS, '对照.pdf')]).toString('utf8');
+const mdText = execFileSync(PY, ['-c', 'import pymupdf as fitz,sys; sys.stdout.buffer.write(fitz.open(sys.argv[1])[0].get_text().encode("utf-8"))', join(T.BOOKS, '对照.pdf')]).toString('utf8');
 T.ok('Markdown 导入成一本书：排成了一页，有底图，提示「正在导入 …」', s5.id === 'book:对照.pdf' && s5.pages === 1 && s5.bg > 0 && !s5.sheet && t5[0][0] === '正在导入 对照.md…' && t5[0][1] === true, [s5, t5]);
 T.ok('排出来的 PDF 里是文件里的字；原件另留了一份', mdText.includes('MarkerXYZ') && mdText.includes('第 1 页') && existsSync(join(T.BOOKS, '_原件', '对照.md')), mdText.slice(0, 80));
 
-// 6. 导入图片：和从 iPad 上传一样，自己成为一本（「Claude 推送」那本只放 Claude 推过来的）
+// 6. 导入图片：和从平板上传一样，自己成为一本（「Claude 推送」那本只放 Claude 推过来的）
 await openPanel();
 await tapRow('figs');
 await T.waitFor(`document.querySelector('#isCrumbs').textContent === 'proj › figs'`);
@@ -142,12 +142,12 @@ const nbs6 = (await T.apiJson('/api/notebooks')).map((n) => n.id);
 T.ok('没有放进「Claude 推送」：那本没出现，书多了这一本', same(await bookList(), ['例会汇报_v1', '对照', 'chart'].sort()) && !nbs6.includes('board')
   && !existsSync(join(T.DATA, 'notebooks', 'board', 'bg-0000.png')), [await bookList(), nbs6]);
 
-// 7. 「从 iPad 上传…」：点了去选文件；选一个 PDF，传上来成一本书
+// 7. 「从平板上传…」：点了去选文件；选一个 PDF，传上来成一本书
 await openPanel();
 await T.cdp('Page.setInterceptFileChooserDialog', { enabled: true }); // 无头浏览器里不真的弹出选文件的窗口
 await js(`document.querySelector('#pdfFile').addEventListener('click', () => { window.__picking = (window.__picking || 0) + 1; }); 1`);
 await tap('#isUpload', 400);
-T.ok('点「从 iPad 上传…」：面板关上，去选文件', !(await T.visible('#importSheet')) && (await js(`window.__picking`)) === 1, await js(`window.__picking`));
+T.ok('点「从平板上传…」：面板关上，去选文件', !(await T.visible('#importSheet')) && (await js(`window.__picking`)) === 1, await js(`window.__picking`));
 await toasts();
 const input = await T.cdp('Runtime.evaluate', { expression: `document.querySelector('#pdfFile')` });
 await T.cdp('DOM.setFileInputFiles', { files: [join(UP, '从平板传的.pdf')], objectId: input.result.objectId });

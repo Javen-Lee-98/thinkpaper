@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # 单独跑这个文件时也找得到 test_server
 
 import backup  # noqa: E402
-import fitz  # noqa: E402
+import pymupdf as fitz  # noqa: E402
 import keep  # noqa: E402
 import prompt  # noqa: E402
 import server  # noqa: E402
@@ -570,13 +570,19 @@ class RulesAndBackupTest(unittest.TestCase):
             for bad in self.OLD:
                 self.assertNotIn(bad, t)
         proto = prompt.protocol()  # 固定说明里「我」换成了「用户」
-        for must in ("- 改文件：", "动手前先调 mcp__inkpad__ink_edit", "覆盖原文件还是另存一份", "不替用户选", "按它返回的路径改",
-                     "mcp__inkpad__ink_import 导入改好的那个文件", "result 逐条回报", "用户在对话里打字让你改已导入的文档也一样先调 ink_edit",
-                     "就带上 mode", "没说的在对话里问用户", "一次 ink_edit 只办一个文件", "这一轮要改同一个文件的几处合起来只调一次",
-                     "要改两个文件就调两次", "下一轮再改，再调", "用户点了「忽略」，这次就不改这个文件",
-                     "要生成或修改文件就照做（改已导入的文档照「改文件」那一条走）", "【草稿纸·撤回】是用户在平板上撤回了你的一次修改"):
+        for must in ("- 改文件：", "动手前先调 mcp__inkpad__ink_edit", "照它的说明和返回做", "从留底拿旧版回来盖掉现在这份也算",
+                     "要生成或修改文件就照做（改已导入的文档照「改文件」那一条走）", "【草稿纸·撤回】"):
             self.assertIn(must, proto)
-        self.assertIn("用户也可能点「忽略」不答：忽略了的问题不要再问。", proto)
+        # 2026-11-16 规则瘦身：一步步怎么做只在 ink_edit 的说明（和它的返回）里，固定说明不再重复
+        edit = T.tool_desc("ink_edit")
+        for must in ("覆盖原文件，还是另存一份？", "不要替用户选", "按返回的路径改完", "用 ink_import 导入改好的那个文件",
+                     "ink_reply 的 result 逐条回报", "用户在对话里打字让你改已导入的文档也一样先调它", "就带上 mode", "没说的，在对话里问用户",
+                     "一次只办一个文件", "这一轮要改同一个文件的几处合起来只调一次", "要改两个文件就调两次", "下一轮再改再调",
+                     "用户点了「忽略」，这次就不改这个文件"):
+            self.assertIn(must, edit)
+            self.assertNotIn(must, proto)
+        self.assertIn("这条只是告诉你，不用回复，也不用动手", prompt.build_undo_message({"action": "restored", "path": "x.md"}))
+        self.assertIn("忽略了的问题不要再问", T.tool_desc("ink_ask"))
         self.assertIn("先调 mcp__inkpad__ink_edit", texts[1])
         self.assertIn("要改它，先调 mcp__inkpad__ink_edit", texts[2])
         plug = Path(__file__).resolve().parents[2] / "inkpad-plugin" / "inkpad" / "hooks" / "register.tsx"

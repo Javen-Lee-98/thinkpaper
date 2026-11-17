@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 import webbrowser
 from datetime import datetime
@@ -51,9 +52,12 @@ import versions
 import zotero
 
 try:
-    import fitz  # PyMuPDF：渲染 PDF / 图片 / SVG，提取原文
+    import pymupdf as fitz  # PyMuPDF：渲染 PDF / 图片 / SVG，提取原文
 except ImportError:
-    fitz = None
+    try:
+        import fitz  # 1.24.3 以前的 PyMuPDF 只有这个旧名字
+    except ImportError:
+        fitz = None
 
 try:
     import qrcode
@@ -123,7 +127,25 @@ WORD_EXT = {".doc", ".docx", ".rtf", ".odt"}
 SLIDE_EXT = {".ppt", ".pptx", ".odp"}
 TEXT_EXT = {".md", ".txt"}
 IMPORT_EXT = {".pdf"} | WORD_EXT | SLIDE_EXT | RENDER_EXT | IMAGE_EXT | TEXT_EXT
+# 能导入哪几种，说给用户听的那一串（阶段 E：以前三处说法不一）。上传出错的提示、导入面板「这里没有能导入的文件」那一句（app.js）、
+# 文件选择框收的扩展名（index.html 的 accept）都照 IMPORT_EXT 说成一样；tests/test_server.py 的 ImportKindsTest 守着
+IMPORT_KINDS = "PDF、PPT、Word、EPUB、图片、Markdown 和纯文本"
 SCAN_MAX_PAGES = 40
+# 图里看不到的、还没交的红字（阶段 E）：收成小蓝点的短批注浮出来时写在小卡片上的红字，服务端画的图里只有那个点。整本检测（Claude 自己取的）
+# 时在「这一页收起来的是」那一条后面写明；用户点「AI」时平板先把它收成卡片、连同红字交上去（app.js 的 dotToCard），所以那时不写。
+# 快照（平板画的图）里长回答的卡片、小蓝点上的红字都看不到、也不附卡片的图：消息里如实说一句（snapshot_unsent）。
+# 这两句本该和别的消息文字一起放在 prompt.py；这次那个文件另有人在改，先放在这里
+SCAN_DOT_UNSENT = "（这个小蓝点浮出来时我在上面写了红字，还没交：图里只有这个点，看不到红字；我在平板上点「AI」时它会收成圈号，连同红字一起交给你）"
+
+
+def snapshot_unsent(cards, dots):
+    """快照消息里的一句：这一页有几张卡片、几个小蓝点上有还没交的红字，快照的图里看不到。都没有返回 None。"""
+    what = "、".join(x for x in (f"{cards} 张卡片" if cards else "", f"{dots} 个小蓝点" if dots else "") if x)
+    if not what:
+        return None
+    shown = "和".join(x for x in ("圈号" if cards else "", "小蓝点" if dots else "") if x)
+    return (f"这一页有 {what}上有我还没交的红字：快照的图里只有{shown}，看不到这些红字；"
+            "我在平板上点「AI」时会连同红字一起交给你。")
 # 平板浏览电脑文件夹时不进去的文件夹（另外跳过 . 和 $ 开头的）
 BROWSE_SKIP = {"node_modules", "__pycache__", "venv", "env", "site-packages", "system volume information"}       # 整本检测一次最多交几页
 CONFIRM_WAIT_S = 25       # 等用户回答确认卡片时，一次长轮询最多挂这么久
@@ -225,7 +247,7 @@ def convert_to_pdf(src, out, owners=(), legacy=False):
             text_to_pdf(src, out)
         return []
     if ext not in WORD_EXT | SLIDE_EXT:
-        raise ValueError(f"不支持的文件类型：{ext}（可以导入 PDF、PPT、Word、图片、EPUB）")
+        raise ValueError(f"不支持的文件类型：{ext}（可以导入 {IMPORT_KINDS}）")
     # 只转换副本：原文件可能正开在用户的 Word / PowerPoint 里，按原路径打开再关闭会连带关掉用户那份
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / f"inkthink-import{ext}"
@@ -552,12 +574,17 @@ class App:
         self.pdf_lock = pages.FITZ_LOCK  # PyMuPDF 只能一个线程一个线程地用
         pages.FIG_DIR = self.data / "figures"  # Claude 放上来的图（figure）
         self.file_lock = threading.Lock()
+        # 每次投递（整本的按页）Claude 已经交了哪几组的读法、回应到了哪几组：{(投递编号, 页的键): {"read": set, "hit": set}}，
+        # 只在内存里（服务重启后最多多提醒一次）；见 reads_owed
+        self.reads_seen = {}
+        self.reads_lock = threading.Lock()
         self.folder_lock = threading.Lock()  # 抽屉里的文件夹（notebooks/folders.json）：读改写不让别的请求插进来
         self._rounds = {}  # 投递编号 -> 已经记过的进展
         self.page_lock = threading.Lock()
         self.dev_seen = {}  # 设备 id -> (最近一次请求的时刻, IP)，只在内存里  # 存页面：比版本号和写文件之间不让别的请求插进来
         self._docs = {}
         self._hidden_cache = {}
+        self._ans_cache = {}  # 页的数据文件 -> ((修改时间, 大小), 上面没擦掉的长回答有几条)；见 answer_count
         self.bridge = Bridge()
         self.bridge.pref_file = self.data / "preferred_target.txt"
         if self.bridge.pref_file.exists():
@@ -807,13 +834,16 @@ class App:
                     out[i] = n
         return out
 
-    def book_of_source(self, src):
-        """这个原文件导入成了哪本（书名），没有返回 None。"""
+    def book_of_source(self, src, shared_first=False):
+        """这个原文件导入成了哪本（书名），没有返回 None。
+
+        shared_first（Claude 一侧用）：同一个原文件导入成了几本时，先挑不是「只在本地」的那本；只有只在本地的，照样返回它，
+        由调用的地方拦下（ensure_writable）。"""
         want = str(Path(src).resolve()).lower()
-        for name, info in self.sources().items():
-            if info["src"].lower() == want and (self.books / name).is_file():
-                return name
-        return None
+        hits = [name for name, info in self.sources().items() if info["src"].lower() == want and (self.books / name).is_file()]
+        if shared_first:
+            hits.sort(key=lambda name: self.is_local("book:" + name))  # 稳定排序：同类里还是原来的先后
+        return hits[0] if hits else None
 
     def similar_book(self, src):
         """名字只差版本号之类的旧本子（如 …_v47_修改6.pptx 和 …_v47_修改7.pptx），用来提示「替换旧版」。
@@ -1167,7 +1197,7 @@ class App:
         if not src.is_file():
             raise ValueError(f"找不到文件：{src}")
         if src.suffix.lower() not in IMPORT_EXT:
-            raise ValueError(f"不支持的文件类型：{src.suffix}（可以导入 PDF、PPT、Word、图片、EPUB）")
+            raise ValueError(f"不支持的文件类型：{src.suffix}（可以导入 {IMPORT_KINDS}）")
         same = self.book_of_source(src) if register and not as_new else None
         if same:
             self.update_document("book:" + same, src)
@@ -1258,6 +1288,10 @@ class App:
     def kind_of(self, nb):
         return "book" if nb.startswith("book:") else "pad" if nb.startswith("pad:") else nb
 
+    def blank_nb(self, nb):
+        """空白本子（草稿本、自己新建的本子；平板的 blankNb）：服务端画的图整页是纸、没有右边那一栏（pages.blank_rect）。"""
+        return self.kind_of(nb) in ("scratch", "pad")
+
     def nb_title(self, nb):
         kind = self.kind_of(nb)
         if kind == "book":
@@ -1314,10 +1348,24 @@ class App:
     def is_local(self, nb):
         return bool(self.setting(nb, "local", False))
 
-    def ensure_shareable(self, nb):
-        """设为「只在本地」的本子不发给 Claude：发送、整本检测、快照、确认字迹都在这里拦下（Claude 写回批注在 bridge_reply 里另拦）。"""
+    def ensure_shareable(self, nb, which=None):
+        """设为「只在本地」的本子不发给 Claude：发送、整本检测、快照、确认字迹都在这里拦下（Claude 往里写、往里放在 ensure_writable 里另拦）。
+
+        which：经 /bridge/* 回给 Claude 时说成哪一本（「平板上开着的这一本」「这一页所在的那本」），不带书名（2026-11-16 用户定
+        「拦住，也不列名字」）。不给就写《书名》：平板上用户自己点「AI」时，和 Claude 写全了名字的整本检测（名字是它自己写的）。"""
         if nb and self.is_local(nb):
-            raise ValueError(f"《{self.nb_title(nb)}》设为「只在本地」，不发给 Claude。要发的话，在平板抽屉里点「这本发往」选一个对话。")
+            who = which or f"《{self.nb_title(nb)}》"
+            raise ValueError(f"{who}设为「只在本地」，不发给 Claude。要发的话，在平板抽屉里点「这本发往」选一个对话。")
+
+    def ensure_writable(self, nb, which, doing, again, tail=""):
+        """设为「只在本地」的本子，Claude 一侧（/bridge/*）也不往里放东西、不换掉它：写回批注（用户 2026-11-12 定）；
+        导入时原地更新、按 replace 替换、另存出来的新文件换掉它、往「Claude 推送」推页面（2026-11-16 定「拦住，也不列名字」）。
+        在动任何东西之前调，拦下时什么都没写。回给 Claude 的话按写批注那一句的样子拼：which 是开头（「这一页所在的那本」
+        「这个文件导入成的那本」……，都不带书名），doing 是 Claude 不做的事，again 是「要……的话」里的动作。
+        用户自己在平板上的导入、更新、替换（/api/*）不经过这里，照常。"""
+        if nb and self.is_local(nb):
+            raise ValueError(f"{which}只在本地：用户设了不发给 Claude，Claude 也不{doing}。"
+                             f"要{again}的话，请用户在平板抽屉里点「这本发往」选一个对话（就取消了只在本地）。{tail}")
 
     def set_setting(self, nb, key, value):
         f = self._nb_dir(nb) / "settings.json"
@@ -1465,6 +1513,7 @@ class App:
         sizes, page_info = [], []
         paper = self.setting(nb, "paper", "portrait")
         hidden = set((self.doc_info(nb) or {}).get("hidden") or []) if kind == "book" else set()
+        d = self._nb_dir(nb)
         for k, e in enumerate(lay.pages):
             if "pdf" in e:
                 h = pdf_h[e["pdf"]]
@@ -1475,6 +1524,11 @@ class App:
             sizes.append({"w": PAGE_W, "h": h})
             page_info.append({"key": e["key"], "pdf": e.get("pdf"), "board": e.get("board"),
                               "blank": "pdf" not in e and "board" not in e, "hiddenSlide": e.get("pdf") in hidden})
+            if self.reply_waiting(nb, e["key"]):  # 有 Claude 写回、还没落到纸上的回答：平板在页码旁标「别的页有新回答」
+                page_info[-1]["newAns"] = True
+            n_ans = self.answer_count(d / (layout.file_stem(e["key"]) + ".json"))
+            if n_ans:  # 这一页上有几条没擦掉的长回答（圈号）：卡片里的上一条、下一条跨页时找下一页用（2026-11-16 夜）
+                page_info[-1]["ans"] = n_ans
         info = {"id": nb, "title": self.nb_title(nb), "kind": kind, "pages": len(lay.pages), "sizes": sizes,
                 "pageInfo": page_info, "hidden": len(lay.hidden), "paper": self.setting(nb, "paper", "portrait"),
                 "flow": bool(self.setting(nb, "flow", kind == "book")),  # 连续阅读：书（导入的文档）默认开
@@ -1531,6 +1585,34 @@ class App:
             i = lay.restore(key)
             lay.save()
         return i
+
+    def move_page(self, nb, i, j, key=None):
+        """把第 i 页挪到第 j 页（j 按挪完以后的位置算；抽屉里拖缩略图，2026-11-16 用户定）。只改页序（layout.json），
+        页的键不变，各页的笔迹文件不动、不改名。key：平板以为第 i 页是哪一页（页的键）；对不上说明页序在别处改过了，不挪。
+        书里的横版空白纸和前面最近一页书页一样大（blank_height）：挪完前面换了一页、算出来的高度变了的，把原来的高度记进它的页序，
+        纸不因挪页变大变小（转过的页、写到纸边的字都还对得上）。返回挪完后它是第几页。"""
+        with self.file_lock:
+            lay = self.layout_of(nb)
+            if key and lay.entry(int(i))["key"] != key:
+                raise ValueError("页的先后在别处改过了：重新打开这本再挪")
+            before = self._blank_heights(nb, lay)
+            j = lay.move(int(i), int(j))
+            after = self._blank_heights(nb, lay)
+            for e in lay.pages:
+                if e["key"] in before and after.get(e["key"]) != before[e["key"]]:
+                    e["h"] = before[e["key"]]
+            lay.save()
+        self.schedule_paper(nb)  # 原稿、往来稿按新的页序重出
+        return j
+
+    def _blank_heights(self, nb, lay):
+        """书里各张空白纸现在算出来的高度 {键: 高}；别的本子的空白纸高度和位置无关，返回空的。"""
+        if self.kind_of(nb) != "book":
+            return {}
+        with self.pdf_lock:
+            pdf_h = [round(PAGE_W * p.rect.height / p.rect.width, 1) for p in self._doc(nb[5:])]
+        paper = self.setting(nb, "paper", "portrait")
+        return {e["key"]: blank_height(lay, k, paper, pdf_h) for k, e in enumerate(lay.pages) if "pdf" not in e}
 
     def hidden_pages(self, nb):
         lay = self.layout_of(nb)
@@ -1632,8 +1714,9 @@ class App:
                 return None
             d = self.paper_folder(nb)
             d.mkdir(parents=True, exist_ok=True)
-            pages.export_pdf(items, d / "原稿.pdf", ai=False)
-            pages.export_pdf(items, d / "往来.pdf", ai=True)
+            blank = self.blank_nb(nb)  # 空白本子：整页是纸，没有右边那一栏
+            pages.export_pdf(items, d / "原稿.pdf", ai=False, blank=blank)
+            pages.export_pdf(items, d / "往来.pdf", ai=True, blank=blank)
             return d
         except Exception as e:  # noqa: BLE001 - 导出失败不影响存页
             print(f"[纸] 《{self.nb_title(nb)}》的原稿、往来稿没导出：{e}")
@@ -1702,18 +1785,23 @@ class App:
         return ""
 
     def page_thumb(self, nb, i):
-        """抽屉里的页面缩略图（底图 + 笔迹，宽约 170 像素），按页文件和底图的版本缓存。"""
+        """抽屉里的页面缩略图（底图 + 笔迹，宽约 170 像素），按页文件和底图的版本缓存。
+        书页、推送页只画到正文区的右边（PAGE_W）；空白本子整页是纸，写到原来那一栏位置的字也画进来（阶段 E；缓存的键带 b2，换掉以前的）。"""
         e = self.page_entry(nb, i)
         f = self._key_file(nb, e["key"])
+        blank = self.blank_nb(nb)
         ver = f"{nb}|{e}|{f.stat().st_mtime if f.exists() else 0}|{self.book_path(nb[5:]).stat().st_mtime if nb.startswith('book:') else 0}"
+        ver += "|b2" if blank else ""
         out = self.data / "cache" / f"thumb-{hashlib.sha1(ver.encode()).hexdigest()[:20]}.png"
         if not out.exists():
             page = json.loads(self.load_page(nb, i))
             base_h, bg = self.page_base(nb, i, page)
-            right, bottom = pages.content_extent(dict(page, ai=[]), base_h)
-            left, top = pages.content_origin(page)
-            pages.render_page(dict(page, ai=[]), str(out), base_h, bg, (), 170 / (PAGE_W - left),
-                              [left, top, PAGE_W, max(base_h, min(bottom, base_h * 1.6))])
+            bare = dict(page, ai=[])
+            right, bottom = pages.content_extent(bare, base_h, blank=blank)
+            left, top = pages.content_origin(bare, blank=blank)
+            right = right if blank else PAGE_W
+            pages.render_page(bare, str(out), base_h, bg, (), 170 / (right - left),
+                              [left, top, right, max(base_h, min(bottom, base_h * 1.6))], blank=blank)
         return out.read_bytes()
 
     # -- Claude 写回的批注：先放进每页的待处理文件，平板打开那一页时排版（按页的键存，插页、删页不影响）
@@ -1733,6 +1821,39 @@ class App:
             items = json.loads(f.read_text("utf-8"))
             f.unlink()
             return items
+
+    def reply_waiting(self, nb, key):
+        """这一页有没有 Claude 写回、还没落到纸上的回答（2026-11-16，「别的页有新回答」的记号用）：待处理文件里有看得见的条目
+        （只有读法的、只是记账的 lsent、msent、vsent 不算）。只读，不取走、不改任何文件。没加锁：正好在写的那一刻读到半截就当没有，
+        平板那边还有事件补上。"""
+        f = self._key_file(nb, key, ".pending.json")
+        if not f.exists():
+            return False
+        try:
+            entries = json.loads(f.read_text("utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(entries, list) and any(isinstance(e, dict) and shown_items(e.get("items")) for e in entries)
+
+    def answer_count(self, f):
+        """页的数据文件 f 上没擦掉的长回答（带圈号的 write，和平板 isBadge 一样认）有几条（2026-11-16 夜，卡片里的上一条、
+        下一条跨页时，平板靠它知道别的页有没有回答，不用把每页都载下来）。只读，不写任何文件；按文件的修改时间和大小记着，
+        没改过就不再读（页数多的书也不慢）。文件不在、读到半截或坏了算 0。还没落到纸上的回答（待处理文件里的）不算。"""
+        try:
+            st = f.stat()
+        except OSError:
+            return 0
+        sig, key = (st.st_mtime_ns, st.st_size), str(f)
+        hit = self._ans_cache.get(key)
+        if hit and hit[0] == sig:
+            return hit[1]
+        try:
+            page = json.loads(f.read_text("utf-8"))
+            n = sum(1 for a in page.get("ai") or [] if is_badge(a))
+        except (OSError, ValueError, AttributeError, TypeError):
+            n = 0
+        self._ans_cache[key] = (sig, n)
+        return n
 
     # -- 投递
 
@@ -1770,16 +1891,26 @@ class App:
         book_text = self.page_text(nb, i)
         meta["corrections"] = self.corrections_for(meta.get("groups") or [], (book_text,))
         meta["vocab"] = self.vocab_for(nb, reader or meta.get("target") or "", book_text)
+        if not snapshot:  # 之前采纳了、Claude 还没回报改成了没有的修改：这次消息里列出来（B 组⑤）
+            meta["owed"] = self.owed_for(meta.get("target") or "", skip={v.get("ref") for v in meta.get("verdicts") or [] if isinstance(v, dict)})
         e = self.page_entry(nb, i) if nb.startswith("book:") else {}
         src = (str(self.book_path(nb[5:])), e["pdf"] + 1) if "pdf" in e else None
         text = prompt.build_message(meta, paths, self.page_label(nb, i), book_text, sub_id, snapshot, src=src)
+        if snapshot:  # 快照：卡片、小蓝点上还没交的红字图里看不到，也不附卡片的图——如实说一句（放在最后那句「写回用……」前面）
+            unsent = snapshot_unsent(*pages.unsent_on_page(page))
+            if unsent:
+                parts = text.split("\n\n")
+                text = "\n\n".join(parts[:-1] + [unsent] + parts[-1:])
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
         (d / "message.txt").write_text(text, "utf-8")
+        if not snapshot:  # 这次采纳的、在文档上的修改：记下，Claude 没用 result 回报就在之后的消息里提醒
+            self.record_owed(sub_id, meta.get("target"), nb, self.owed_rows(meta.get("verdicts"), meta["page_key"]))
         return sub_id, text
 
     def card_images(self, page, d, prefix=""):
         """这一页上要连同红字一起交的长回答卡片：每张画成 d/<prefix>card-<圈号>.png（pages.render_card）。
-        返回 [{id, n, q, img, marks}]，marks 是这次交的红字的 id（平板据此记下「交过了」）。"""
+        返回 [{id, n, q, img, marks, note?}]，marks 是这次交的红字的 id（平板据此记下「交过了」）；
+        note 为 True 的是纸上的短批注收成的卡片（用户在那条短批注上写了红字，平板交稿时把它收成了圈号，见 pages.from_note）。"""
         out = []
         for it, marks in pages.cards_to_send(page):
             img = d / f"{prefix}card-{it.get('n') or len(out) + 1}.png"
@@ -1788,7 +1919,10 @@ class App:
             except Exception as e:  # noqa: BLE001 - 画不出来就不附这张卡片（红字留着，下次再交）
                 print(f"[卡片] 圈号 {it.get('n')} 的卡片没画成：{e}")
                 continue
-            out.append({"id": it.get("id"), "n": it.get("n"), "q": it.get("q"), "img": str(img), "marks": [m.get("id") for m in marks]})
+            c = {"id": it.get("id"), "n": it.get("n"), "q": it.get("q"), "img": str(img), "marks": [m.get("id") for m in marks]}
+            if pages.from_note(it):
+                c["note"] = True
+            out.append(c)
         return out
 
     def load_submission(self, sub_id):
@@ -1811,26 +1945,18 @@ class App:
     def attach_reco(self, nb, i, groups, only=None, page=None):
         """给笔迹分组加上本机手写识别的候选（g["reco"]）。
 
-        groups 是平板发来的（或服务端算的）分组；按服务器上存的这一页重新分组，编号和位置都对得上才用。
+        groups 是平板发来的（或服务端算的）分组；和服务器上存的这一页对得上的才认（pages.sent_groups）。
+        认之前判断中文还是英文，判出的语种放进 g["reco_lang"]（recognize.choose）。
         """
         if not recognize.AVAILABLE or not groups:
             return
         if page is None:
             page = json.loads(self.load_page(nb, i))
-        mine = {gid: ss for gid, ss in pages.group_strokes(pages.ink(page))}
-        boxes = {g["id"]: g["bbox"] for g in pages.compute_groups(pages.ink(page))}
-        want = []
-        for g in groups:
-            gid = g.get("id")
-            if gid not in mine or (only and not only(g)):
-                continue
-            if any(abs(a - b) > 3 for a, b in zip(boxes.get(gid, []), g.get("bbox") or [])):
-                continue  # 平板上的这一页还没存到服务器，分组对不上
-            want.append((gid, mine[gid]))
-        reco = recognize.recognize(want)
+        mine = pages.sent_groups([g for g in groups if not only or only(g)], page)
+        reco = recognize.recognize_lang(list(mine.items()))
         for g in groups:
             if g.get("id") in reco:
-                g["reco"] = reco[g["id"]]
+                g["reco"], g["reco_lang"] = reco[g["id"]]["text"], reco[g["id"]]["lang"]
 
     def line_anchors(self, loc, items):
         """「g3:1」这类锚点：一组笔迹写了几行（比如列表的编号和上一行连着写成一组），只指其中第 k 行。
@@ -1975,25 +2101,34 @@ class App:
             ent = entries.get(str(page_no)) if page_no is not None else None
             if not ent:
                 raise ValueError(f"整本检测 {meta['id']} 里没有第 {page_no} 页；有：{'、'.join(entries) or '（无）'}（用 page 指定页码）")
+            gx = ent.get("gx") or {}
+            # reds：这一页这次新写的红笔（要交读法的那几组）；live：这一页没全擦掉的组。旧的整本检测没记这两样：按 gx 推
             loc = {"id": meta["id"], "nb": meta["nb"], "page": ent["page"], "key": ent.get("key"), "groups": ent["groups"],
-                   "crop": ent["crop"], "sel": None, "level": meta.get("level"), "rot": ent.get("rot"), "gx": ent.get("gx") or {},
-                   "vx": ent.get("vx") or {}}
+                   "crop": ent["crop"], "sel": None, "level": meta.get("level"), "rot": ent.get("rot"), "gx": gx,
+                   "vx": ent.get("vx") or {},
+                   "reds": ent["reds"] if "reds" in ent else [g for g, x in gx.items() if x.get("red") and x.get("sel")],
+                   "live": ent["live"] if "live" in ent else list(gx), "marks": ent.get("marks") or []}
         else:
-            groups, gx = meta.get("groups") or [], {}
+            groups, gx, reds, live, marks = meta.get("groups") or [], {}, [], [], []
             if isinstance(groups, list):
                 gx = {g["id"]: {"ids": g["ids"], "red": bool(g.get("red")), "sel": bool(g.get("inSel"))}
                       for g in groups if "id" in g and g.get("ids")}
+                # 整页交上来的：还要回答的红笔问题（之前几轮回答过的不算）要交读法；全擦掉的组不算
+                live = [g["id"] for g in groups if "id" in g and (g.get("n") or 1) > (g.get("erased") or 0)]
+                marks = [g["id"] for g in groups if g.get("id") in live and mark_like(g)]  # 只是划线的：不用交读法
+                reds = [g["id"] for g in groups if g.get("id") in live and prompt.asking(g) and g["id"] not in marks]
                 groups = {g["id"]: g["bbox"] for g in groups if "id" in g and "bbox" in g}
             loc = {"id": meta["id"], "nb": meta["nb"], "page": meta["page"], "key": meta.get("page_key"), "groups": groups,
                    "crop": meta.get("crop"), "sel": meta.get("sel"), "level": meta.get("level"), "rot": meta.get("rot"), "gx": gx,
-                   "vx": {v["id"]: v["ref"] for v in meta.get("verdicts") or [] if isinstance(v, dict) and v.get("id") and v.get("ref")}}
+                   "vx": {v["id"]: v["ref"] for v in meta.get("verdicts") or [] if isinstance(v, dict) and v.get("id") and v.get("ref")},
+                   "reds": reds, "live": live, "marks": marks}
         loc["nb"] = self.current_nb(loc["nb"])  # 投递之后书可能换成了新版、跟着改了名
         # 投递之后用户可能插了页、删了页：按页的键找它现在是第几页
         if not loc["key"]:
             loc["key"] = self.page_key(loc["nb"], loc["page"])
         now = self.index_of_key(loc["nb"], loc["key"])
         if now is None:
-            raise ValueError("那一页已经从本子里删掉了（可以在平板抽屉的「显示已删的页」里恢复）")
+            raise ValueError("那一页已经从本子里删掉了（可以在平板抽屉的「显示已删的页」里还原）")
         loc["page"] = now
         return loc
 
@@ -2002,8 +2137,12 @@ class App:
     def page_count(self, nb):
         return self.notebook_info(nb)["pages"]
 
-    def resolve_nb(self, want):
-        """Claude 说的本子：id，或名字（书名、「草稿本」、「Claude 推送」；也可只写名字的一部分）。"""
+    def resolve_nb(self, want, claude=False):
+        """Claude 说的本子：id，或名字（书名、「草稿本」、「Claude 推送」；也可只写名字的一部分）。
+
+        claude=True（/bridge 一侧，2026-11-16 用户定「拦住，也不列名字」）：只在本地的本子只在写全了时认出来（id、名字，
+        或文件名去掉扩展名后和名字一样），由调用的地方拦下；只写了一部分的不往它们上面配，出错时列出的现有本子里也没有它们。
+        平板一侧（文件提示上的「更新」「替换」）照旧都认。"""
         items = self.notebooks()
         want = str(want).strip()
         for key in ("id", "title"):
@@ -2011,10 +2150,15 @@ class App:
             if hit:
                 return hit[0]["id"]
         stem = Path(want).stem.lower()
+        if claude:
+            hit = [n for n in items if n.get("local") and stem and n["title"].lower() == stem]
+            if hit:
+                return hit[0]["id"]
+            items = [n for n in items if not n.get("local")]
         hit = [n for n in items if stem and (stem in n["title"].lower() or n["title"].lower() in stem)]
         if len(hit) == 1:
             return hit[0]["id"]
-        raise KeyError(f"没有叫「{want}」的本子；现有：{'、'.join(n['title'] for n in items)}")
+        raise KeyError(f"没有叫「{want}」的本子；现有：{'、'.join(n['title'] for n in items) or '（没有）'}")
 
     def page_base(self, nb, i, page=None):
         """返回（底图高度，底图字节或 None）；插入的空白纸没有底图。给了页面 JSON 时，高度按页面的转角（rot）换算。"""
@@ -2092,7 +2236,8 @@ class App:
         truncated = max(0, len(picked) - SCAN_MAX_PAGES)
         picked = picked[:SCAN_MAX_PAGES]
         sub_id, d = self.new_sub_dir()
-        entries, infos, stamps, sent, msent = {}, [], {}, {}, {}
+        entries, infos, stamps, sent, msent, lsent = {}, [], {}, {}, {}, {}
+        blank = self.blank_nb(nb)  # 空白本子：图里整页是纸、没有右边那一栏，范围包住这一页上所有的东西（pages.blank_rect）
         for i, page, groups in picked:
             base_h, bg = self.page_base(nb, i, page)
             for g in groups:
@@ -2102,29 +2247,37 @@ class App:
             h = max(base_h, page.get("h") or 0)
             x0, y0 = 0, 0
             if region:
-                ox, oy = pages.origin(page)
-                x0, tw = -ox, pages.widths(page)[1]
-                y0 = max(-oy, min(float(region[0]), h - 50))
+                px0, py0, tw, h = pages.paper_rect(page, base_h, blank=blank)  # 整张纸的宽；空白本子包住纸外的东西
+                x0 = px0
+                y0 = max(py0, min(float(region[0]), h - 50))
                 clip = [x0, y0, tw, min(h, max(y0 + 50, float(region[1])))]
                 scale = pages.fit_scale(tw - x0, clip[3] - clip[1], cap=1.6)
             else:
-                (x0, y0), (right, bottom) = pages.content_origin(page), pages.content_extent(page, base_h)
+                (x0, y0), (right, bottom) = pages.content_origin(page, blank=blank), pages.content_extent(page, base_h, blank=blank)
                 clip = [x0, y0, right, bottom]
                 scale = pages.fit_scale(right - x0, bottom - y0)
             img = d / f"p{i + 1:03d}.png"
             labelled = [g for g in groups if g["n"] > g["erased"]] + verdicts  # s 编号也标在图里
-            pages.render_page(page, str(img), base_h, bg, labelled, scale, clip)
+            # 图里的像素 (px, py) = 页面坐标 ((px / scale + x0), (py / scale + y0))：下面记进 crop，Claude 回的 box 按它换回去
+            pages.render_page(page, str(img), base_h, bg, labelled, scale, clip, blank=blank)
             key = lay.entry(i)["key"]
             vis = dict(pages.group_strokes(pages.ink(page)))
             gx = {g["id"]: {"ids": [s["id"] for s in vis[g["id"]]], "red": g["red"], "sel": g["inSel"]} for g in groups if g["id"] in vis}
+            # 只是划线、圈、箭头的组不用交读法（mark_like；2026-11-17 用户定：几页一起交时也免，和单页交一样）。
+            # 这条路上没有 PP-OCR 的读法，只凭本机手写识别判断；没认过字的组照旧要
+            bare = [g["id"] for g in groups if g["n"] > g["erased"] and mark_like(g)]
             entries[str(i + 1)] = {"page": i, "key": key, "groups": {g["id"]: g["bbox"] for g in groups}, "gx": gx,
                                    "crop": {"x0": x0, "y0": y0, "scale": scale}, "rot": page.get("rot") or 0,
-                                   "vx": {v["id"]: v["ref"] for v in verdicts}}
-            info = {"no": i + 1, "image": str(img), "label": self.page_label(nb, i), "scale": scale, "h": h,
+                                   "vx": {v["id"]: v["ref"] for v in verdicts},
+                                   # 回的时候要交读法的：这一页上次之后新写的红笔（App.reads_owed）；没全擦掉的组
+                                   "reds": [g["id"] for g in groups if g["red"] and g["inSel"] and g["n"] > g["erased"] and g["id"] not in bare],
+                                   "live": [g["id"] for g in groups if g["n"] > g["erased"]], "marks": bare}
+            info = {"no": i + 1, "image": str(img), "label": self.page_label(nb, i), "scale": scale, "h": h, "y0": y0,
                     "groups": groups, "now": pages.last_touch(page), "first": key not in seen,
                     "clip": clip if region else None, "base_h": base_h, "role": self.page_role(nb, i),
                     "verdicts": verdicts,
-                    "answers": [{"n": a.get("n"), "q": a.get("q"), "text": a.get("text"), "more": pages.more_of(a)} for a in pages.answers_of(page)]}
+                    "answers": [dict({"n": a.get("n"), "q": a.get("q"), "text": a.get("text"), "more": pages.more_of(a)},
+                                     **({"note": True} if pages.from_note(a) else {})) for a in pages.answers_of(page)]}
             if verdicts:
                 sent[i] = [v["ref"] for v in verdicts]
             cards = self.card_images(page, d, prefix=f"p{i + 1:03d}-")  # 长回答卡片上的红字：每张卡片一张图
@@ -2136,20 +2289,35 @@ class App:
                 info["pdf_page"] = lay.entry(i)["pdf"] + 1
             if unplaced.get(i):
                 info["unplaced"] = unplaced[i]
+            # 收成小蓝点的短批注：图里只有一个点，字写进消息；浮出来时上面写了还没交的红字的，后面写明图里看不到（SCAN_DOT_UNSENT）。
+            # 用户点「AI」几页一起交时，平板已经先把这种小蓝点收成卡片了，不写
+            dots = [str(a["text"]).strip() + (SCAN_DOT_UNSENT if origin != "tablet" and pages.unsent_marks(a) else "")
+                    for a in pages.dot_items(page)]
+            if dots:
+                info["dots"] = dots
             infos.append(info)
             stamps[key] = pages.last_touch(page)
+            if origin == "tablet":  # 用户点「AI」几页一起交的：这一页交到了哪一笔为止（平板的 lastSent，见 mark_pages_sent）
+                lsent[i] = stamps[key]
         title = self.nb_title(nb)
+        owe_now = [r for no, e in entries.items() for r in self.owed_rows(
+            next(p["verdicts"] for p in infos if p["no"] == int(no)), e["key"], int(no))]
+        # 之前采纳了、还没回报的修改：用户点「AI」几页一起交时列出来（Claude 自己整本检测取来的不列）（B 组⑤）
+        owed = self.owed_for(target, skip={r["ref"] for r in owe_now}) if origin == "tablet" and infos else []
         text = prompt.build_scan_message(title, infos, sub_id, origin=origin, only_new=only_new,
-                                         skipped_old=skipped_old, truncated=truncated)
+                                         skipped_old=skipped_old, truncated=truncated, owed=owed)
         meta = {"id": sub_id, "kind": "scan", "nb": nb, "target": target,
                 "created": datetime.now().isoformat(timespec="seconds"), "pages": entries}
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
         (d / "message.txt").write_text(text, "utf-8")
+        self.record_owed(sub_id, target, nb, owe_now)
         self.mark_seen(nb, stamps, target)
         if sent:  # 这几条决定 Claude 收到了：记下，平板画淡、不再发
             self.mark_verdicts_sent(nb, sent)
         if msent:  # 卡片上的这几笔红字交过了：平板记下这一轮，圈号上的红点没了
             self.mark_cards_sent(nb, msent, sub_id)
+        if lsent:  # 这几页交过了：平板记下交到了哪一笔为止
+            self.mark_pages_sent(nb, lsent, sub_id)
         return sub_id, text, len(infos)
 
     def new_groups(self, page, t_seen):
@@ -2188,6 +2356,18 @@ class App:
         for i, cards in sent.items():
             self.add_pending(nb, lay.entry(i)["key"], {"msent": cards, "req": req, "t": int(time.time() * 1000)})
         self.bridge.emit("msent", nb=nb, req=req, pages={str(i): c for i, c in sent.items()})
+
+    def mark_pages_sent(self, nb, sent, req):
+        """用户点「AI」几页一起交上去的那几页：记下各页交到了哪一笔为止（那一页当时最后落笔、擦除的时刻，平板的时钟）。
+        单页交时平板自己记（页面的 lastSent）；几页一起交时别的页不在平板手上，和卡片红字一样排进那几页的待处理队列
+        （平板打开时合进 lastSent）、并告诉平板它手里的那几页。平板只在「短批注上的红字什么时候收成卡片」时看 lastSent：
+        上次交稿之前写的不再收（免得几页一起交时当普通红笔交过的、下次单页交时又被收成卡片再交一次）。
+        不直接改页面文件。sent：{页号: 时刻}。"""
+        lay = self.layout_of(nb)
+        now = int(time.time() * 1000)
+        for i, t in sent.items():
+            self.add_pending(nb, lay.entry(i)["key"], {"lsent": t, "req": req, "t": now})
+        self.bridge.emit("lsent", nb=nb, req=req, pages={str(i): t for i, t in sent.items()})
 
     def pending_msent(self, nb, key):
         """还在队列里、平板还没合进页面的「卡片红字交过了」标记（红字的 id）。"""
@@ -2243,6 +2423,114 @@ class App:
         except ValueError:
             return set()
 
+    # -- 服务把关的两条（2026-11-16 规则瘦身 B 组④⑤）：读法漏了哪几组、采纳的修改还没回报的
+
+    READS_KEEP = 300  # reads_seen 最多记这么多次投递（按页），旧的丢掉
+
+    def reads_owed(self, loc, items):
+        """这次投递（整本的按页）还缺哪几组的读法：红笔那几组（loc["reds"]）和到这次为止回应到的那几组（anchor、from、to、anchors
+        指着的、这一页上没全擦掉的组），减去到这次为止交过 read 的。几次 ink_reply 合起来算（Claude 可以先写批注、后交读法）。
+        返回组号（按编号排）；没指明投递的（写到平板当前页）不查。"""
+        live = set(loc.get("live") or ())
+        if not live or str(loc.get("id") or "").startswith("direct-"):
+            return []
+
+        def base(v):
+            g = str(v).strip().lower().split(":")[0]
+            return "g" + g if g.isdigit() else g
+        with self.reads_lock:
+            rec = self.reads_seen.pop((loc["id"], loc.get("key")), None) or {"read": set(), "hit": set()}
+            self.reads_seen[(loc["id"], loc.get("key"))] = rec  # 放回最后：最近用到的留着
+            while len(self.reads_seen) > self.READS_KEEP:
+                del self.reads_seen[next(iter(self.reads_seen))]
+            for it in items:
+                if it["type"] == "read":
+                    if it.get("anchor"):
+                        rec["read"].add(base(it["anchor"]))
+                elif it["type"] != "result":
+                    refs = [it.get(k) for k in ("anchor", "from", "to")] + list(it.get("anchors") or [])
+                    rec["hit"].update(b for b in (base(v) for v in refs if v) if b in live)
+            want = [g for g in loc.get("reds") or [] if g in live] + sorted(rec["hit"] - set(loc.get("reds") or ()))
+            num = lambda g: int(g[1:]) if g[1:].isdigit() else 0  # noqa: E731
+            marks = set(loc.get("marks") or ())  # 只是划线的组：红笔也好、回应时指到它也好，都不点名要读法
+            return sorted({g for g in want if g not in rec["read"] and g not in marks}, key=num)
+
+    OWED_TELLS = 3  # 采纳了、还没回报的修改，在之后的消息里最多提醒这么多次（每次交稿都提会一直挂在消息里；平板上那条也一直标着没改）
+
+    def _owed_file(self):
+        return self.data / "owed.json"
+
+    def _owed_load(self):
+        f = self._owed_file()
+        try:
+            rows = json.loads(f.read_text("utf-8")) if f.exists() else []
+        except ValueError:
+            rows = []
+        return [r for r in rows if isinstance(r, dict) and r.get("ref") and r.get("sub")]
+
+    def record_owed(self, sub_id, sid, nb, rows):
+        """这次消息里我采纳了的修改（在文档上的 suggest，Claude 要去改原文件、改完用 result 回报的）：记下，之后没回报就提醒。
+        rows：[{s, ref, key, page}]，s 是这次消息里的 s 编号，key 是那一页的键，page 是整本消息里的页码（单页投递是 None）。"""
+        if not rows:
+            return
+        with self.file_lock:
+            old = [r for r in self._owed_load() if r["ref"] not in {x["ref"] for x in rows}]
+            new = [{"sub": sub_id, "sid": sid or "", "nb": nb, "key": r["key"], "page": r.get("page"), "s": r["s"], "ref": r["ref"],
+                    "told": 0, "t": int(time.time())} for r in rows]
+            self._owed_file().write_text(json.dumps((old + new)[-200:], ensure_ascii=False), "utf-8")
+
+    def settle_owed(self, refs):
+        """Claude 用 result 回报了（改成了或没改成都算）：这几条不再提醒。"""
+        refs = set(refs)
+        if not refs:
+            return
+        with self.file_lock:
+            rows = self._owed_load()
+            keep = [r for r in rows if r["ref"] not in refs]
+            if len(keep) != len(rows):
+                self._owed_file().write_text(json.dumps(keep, ensure_ascii=False), "utf-8")
+
+    def _owed_still(self, r):
+        """这条还该提醒吗：那一页、那条建议还在，还是「采纳」、没擦掉、没清除，平板上也还没记着结果。"""
+        try:
+            nb = self.current_nb(r["nb"])
+            f = self._key_file(nb, r["key"])
+            page = json.loads(f.read_text("utf-8")) if f.exists() else None
+        except (OSError, ValueError, KeyError):
+            return False
+        a = next((a for a in (page or {}).get("ai") or [] if isinstance(a, dict) and a.get("id") == r["ref"]), None)
+        return bool(a) and a.get("verdict") == "yes" and not a.get("result") and not a.get("dismissed") and not a.get("erasedAt")
+
+    def owed_for(self, sid, skip=()):
+        """要写进这次消息的「还没回报的修改」：发给这个对话的、还该提醒的（skip：这次消息里刚带上的，不算），按那次投递分组：
+        [{sub, page, ids}]。每列出一次记一次，满 OWED_TELLS 次就不再提；那条建议没了、改了决定的也不再提。"""
+        skip = set(skip)
+        with self.file_lock:
+            rows = self._owed_load()
+            keep, out = [], {}
+            for r in rows:
+                if r["ref"] in skip:
+                    keep.append(r)
+                    continue
+                if not self._owed_still(r):
+                    continue
+                if r.get("sid", "") == (sid or ""):
+                    out.setdefault((r["sub"], r.get("page")), []).append(r["s"])
+                    r["told"] = int(r.get("told") or 0) + 1
+                if r["told"] < self.OWED_TELLS:
+                    keep.append(r)
+            if keep != rows or out:
+                self._owed_file().write_text(json.dumps(keep, ensure_ascii=False), "utf-8")
+        num = lambda s: int(s[1:]) if str(s)[1:].isdigit() else 0  # noqa: E731
+        return [{"sub": sub, "page": page, "ids": sorted(ids, key=num)} for (sub, page), ids in out.items()]
+
+    @staticmethod
+    def owed_rows(verdicts, key, page=None):
+        """一次消息里带的决定里，要 Claude 改原文件、改完回报的：采纳了的、在文档上的修改建议（概念图上的、在我写的字上的不算）。"""
+        return [{"s": v["id"], "ref": v["ref"], "key": key, "page": page} for v in verdicts or []
+                if isinstance(v, dict) and v.get("id") and v.get("ref") and v.get("verdict") == "yes"
+                and v.get("kind", "suggest") == "suggest" and v.get("on") == "doc"]
+
     # -- 确认卡片：Claude 拿不准的字迹截一小块图，问用户
 
     def confirm_snippet(self, cid, k, nb, i, bbox):
@@ -2251,11 +2539,12 @@ class App:
         h = max(base_h, page.get("h") or 0)
         cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         hw, hh = max(160, (bbox[2] - bbox[0]) / 2 + 60), max(60, (bbox[3] - bbox[1]) / 2 + 40)
-        px0, py0, px1, _ = pages.paper_rect(page, base_h)
-        clip = [max(px0, cx - hw), max(py0, cy - hh), min(px1, cx + hw), min(h, cy + hh)]
+        blank = self.blank_nb(nb)  # 空白本子：整页是纸，没有右边那一栏
+        px0, py0, px1, py1 = pages.paper_rect(page, base_h, blank=blank)
+        clip = [max(px0, cx - hw), max(py0, cy - hh), min(px1, cx + hw), min(max(h, py1) if blank else h, cy + hh)]
         scale = min(2.0, 900 / max(1, clip[2] - clip[0]), 500 / max(1, clip[3] - clip[1]))
         out = self.data / "confirms" / f"{cid}-{k}.png"
-        pages.render_page(page, str(out), base_h, bg, (), scale, clip, mark=bbox)
+        pages.render_page(page, str(out), base_h, bg, (), scale, clip, mark=bbox, blank=blank)
         return out
 
     # -- 问话卡片（2026-11-14，阶段 C）：能写在纸上的都写在纸上；只有要用户回答才能继续的问题、纸上放不下的结果，
@@ -2501,8 +2790,10 @@ class App:
         if mode not in ("overwrite", "saveas"):
             raise ValueError("mode 只能是 overwrite（覆盖原文件）或 saveas（另存一份）")
         real = self.edit_target(path)
-        name = self.book_of_source(real)
-        title = Path(name).stem if name else None
+        name = self.book_of_source(real, shared_first=True)
+        # 对应的那本只在本地：改电脑上的文件照常（不往本子里放东西），但不说那本叫什么，告诉 Claude 改完别导入（导入会被拦下）
+        local = bool(name) and self.is_local("book:" + name)
+        title = Path(name).stem if name and not local else None
         with self.edit_lock:
             if mode == "overwrite":
                 try:
@@ -2521,7 +2812,7 @@ class App:
         self.withdraw_edit_cards(real)
         print(f"[改文件] {'覆盖' if mode == 'overwrite' else '另存'}：{real.name}" + (f" → {target.name}" if saved_as else ""))
         return {"done": True, "mode": mode, "target": str(target), "original": str(real), "book": title, "eid": e["eid"],
-                "text": prompt.edit_go(mode, str(real), str(target), title)}
+                "text": prompt.edit_go(mode, str(real), str(target), title, local=local)}
 
     def ask_edit(self, sid, path):
         """ink_edit 没带 mode：在平板顶上弹问话卡片「覆盖还是另存」（只能点选，不能手写）。返回 {ask: 卡片编号, name}；
@@ -2573,14 +2864,15 @@ class App:
         if hits:
             b.persist()
 
-    def saveas_book(self, path):
-        """另存出来、还没导入过的新文件：原文件导入成的那本（Claude 改完导入新文件时，那本跟着换成它）。没有返回 None。"""
+    def saveas_book(self, path, shared_first=False):
+        """另存出来、还没导入过的新文件：原文件导入成的那本（Claude 改完导入新文件时，那本跟着换成它）。没有返回 None。
+        shared_first 见 book_of_source。"""
         try:
             hist = self.keeper.history(path)
         except (KeepError, OSError):
             return None
         rec = next((r for r in hist if r["kind"] == "saveas"), None)
-        name = self.book_of_source(rec["path"]) if rec else None
+        name = self.book_of_source(rec["path"], shared_first) if rec else None
         return "book:" + name if name else None
 
     def pending_edit(self, path):
@@ -2700,7 +2992,7 @@ class App:
                     try:
                         out["summary"] = self.update_document(nb, src, undo=True)
                     except (ValueError, OSError) as e:
-                        warns.append(f"电脑上的文件已经撤回了，但平板上这本没换成（{e}）：点右上角的「更新到草稿纸」再试")
+                        warns.append(f"电脑上的文件已经撤回了，但平板上这本没换成（{e}）：点右上角的「更新这本」再试")
             elif r["action"] == "switched":
                 orig = Path(r["path"])
                 if orig.is_file():
@@ -2977,34 +3269,44 @@ class App:
         return {"nb": nb, "page": 0, "title": self.nb_title(nb)}
 
     def accept_offer(self, oid, mode=None):
-        """把文件加进草稿纸：单张图/单页 → 「Claude 推送」里的一页；多页文档 → 一个新本子。
+        """把文件加进草稿纸，成自己的一本：多页文档、单页 PDF、单张图都一样（不再放进「Claude 推送」）。
 
-        mode="update"：原地更新导入过的那本；mode="replace"：用它替换名字相近的那本（都保留笔迹、可对比）。
+        mode="update"：原地更新导入过的那本；mode="replace"：用它替换名字相近的那本（都保留笔迹、可对比）；
+        mode="new"：同一个原文件导入过，也另建一本。
+        文件已经不在电脑上了：收掉这条提示，如实告诉平板。加的时候出错：提示恢复成没处理，可以再点一次。
         """
         view = next((x for x in self.pending_offers() if x["id"] == oid), None)
+        hit = next((x for x in self.offers() if x["id"] == oid), None)
+        if hit is None:
+            raise KeyError("这个文件提示已经过期")
+        if not Path(hit["path"]).is_file():
+            self.resolve_offer(oid, "dismissed")
+            raise ValueError(f"「{hit['name']}」已经不在电脑上了（可能被删了或挪走了），这条提示收掉了")
+        same_file = {x["id"] for x in self.offers() if x["state"] == "new" and x["path"].lower() == hit["path"].lower()}
         o = self.resolve_offer(oid, "added")
         src = Path(o["path"])
-        if mode in ("update", "replace") and o.get(mode):
-            nb = self.resolve_nb(o[mode])
-            summary = self.update_document(nb, src)
-            # 同一本较早的几个新版本不用再提示了
-            for name in (view or {}).get("older", []):
-                for x in self.offers():
-                    if x["state"] == "new" and x["name"] == name:
-                        self.resolve_offer(x["id"], "dismissed")
-            return {"nb": summary["id"], "old": summary["old_id"], "page": (summary["changed"] + summary["added"] + [1])[0] - 1,
-                    "title": summary["title"], "summary": summary["text"], "headline": summary["headline"],
-                    "prev": summary["prev"], "updated": True}
-        single = o["ext"] in IMAGE_EXT or o["ext"] == ".svg"
-        if o["ext"] == ".pdf" and fitz is not None:
-            with self.pdf_lock, fitz.open(str(src)) as doc:
-                single = len(doc) == 1
-        if single:
-            i = self.add_board_page(src)
-            return {"nb": "board", "page": self.index_of_key("board", f"p{i:04d}"),
-                    "title": self.board_index()["pages"][i]["title"]}
-        nb = self.import_document(src, as_new=mode == "new")
-        return {"nb": nb, "page": 0, "title": self.notebook_info(nb)["title"]}
+        try:
+            if mode in ("update", "replace") and o.get(mode):
+                nb = self.resolve_nb(o[mode])
+                summary = self.update_document(nb, src)
+                # 同一本较早的几个新版本不用再提示了
+                for name in (view or {}).get("older", []):
+                    for x in self.offers():
+                        if x["state"] == "new" and x["name"] == name:
+                            self.resolve_offer(x["id"], "dismissed")
+                return {"nb": summary["id"], "old": summary["old_id"], "page": (summary["changed"] + summary["added"] + [1])[0] - 1,
+                        "title": summary["title"], "summary": summary["text"], "headline": summary["headline"],
+                        "prev": summary["prev"], "updated": True}
+            nb = self.import_document(src, as_new=mode == "new")
+            return {"nb": nb, "page": 0, "title": self.notebook_info(nb)["title"]}
+        except Exception:
+            with self.file_lock:  # 没加成：这条提示（和同一文件的那几条）放回去，平板上还能再点
+                items = self.offers()
+                for x in items:
+                    if x["id"] in same_file and x["state"] == "added":
+                        x["state"] = "new"
+                self.save_offers(items)
+            raise
 
 
 VERSION_NUM = re.compile(r"(?:v|ver|rev|r|版本?|修改|改|稿)(\d+)|(\d{6,})", re.I)
@@ -3033,6 +3335,8 @@ def blank_height(lay, i, paper, pdf_h):
     e = lay.pages[i]
     if (e.get("orient") or paper) != "landscape":
         return SCRATCH_H
+    if isinstance(e.get("h"), (int, float)) and e["h"] > 0:  # 挪过页、前面换了一页：用挪之前的高度（App.move_page 记下的）
+        return e["h"]
     prev = next((x["pdf"] for x in reversed(lay.pages[:i]) if "pdf" in x), None)
     if prev is not None and pdf_h and pdf_h[prev] < PAGE_W:
         return pdf_h[prev]
@@ -3143,6 +3447,107 @@ def clean_item(obj):
     return item
 
 
+# 短批注最多多长（2026-11-16 规则瘦身 B 组①：原来规则里写「短的（约 40 字以内）用 note」，改成服务按字数归位）：
+# note、question 的 text 超过这么多「字」，就当长回答收成圈号加卡片，放在同一个 anchor 旁边。
+# 汉字、全角符号算 1 个字，英文字母、数字、半角符号和空格算半个（手写体里大约两个英文字母占一个汉字宽）。
+# 为什么是 60：规则和工具说明里说的是「约 40 字以内」，门槛放宽一半，略长一点的短批注照旧上纸、不被误收；
+# 短批注字号 21、最宽约 300（空白本子）到 336（书页右边那一栏），一行约 14–16 个汉字，60 字已经是四行左右，再长就挡纸面了
+NOTE_MAX = 60
+
+
+# 只是划线、圈、箭头的红笔组不用交读法（2026-11-16 用户定「划线免交」）：没有字可转写，交上来也只是一句「（划线）」。
+# 认法保守：没全擦掉的笔画不超过 3 笔，而且本机认过字（有 reco 这一项）、头一个认法和 PP-OCR 里都没有像样的字
+# ——去掉标点、符号、空白，再去掉划线和圈常被认成的那几个（一二三、〇、0、O、l、1、口……），什么都不剩。没认过字的组不免（分不出）
+MARK_GLYPHS = set("一二三亠丨丿乙丶〇口日冂凵匚0OoIl1")
+
+
+def mark_like(g):
+    if not isinstance(g, dict) or not isinstance(g.get("reco"), list) or (g.get("n") or 1) - (g.get("erased") or 0) > 3:
+        return False
+    seen = (str(g["reco"][0]) if g["reco"] else "") + str(g.get("ocr") or "")
+    return not [c for c in seen if unicodedata.category(c)[0] not in "PSZC" and c not in MARK_GLYPHS]
+
+
+def note_len(text):
+    """一段话按「字」数有多长：汉字、全角算 1，别的算半个（NOTE_MAX 的算法）。"""
+    return sum(1 if unicodedata.east_asian_width(c) in "WF" else 0.5 for c in str(text))
+
+
+def item_problem(obj):
+    """Claude 写回的一条批注 clean_item 不收时，为什么不收（给 Claude 看的一句话）。"""
+    if not isinstance(obj, dict):
+        return "不是一条批注（要写成 {type, …}）"
+    t = obj.get("type")
+    if t not in ITEM_TYPES:
+        return f"type「{t}」不认识"
+    has_text = isinstance(obj.get("text"), str) and obj["text"].strip()
+    if t in ("read", "note", "question", "write", "suggest", "insert", "number", "label", "node", "cross", "wavy", "strike") and not has_text:
+        return prompt.MISSING_TEXT.get(t, "缺 text")
+    if t == "link":
+        return "缺 from 或 to（连线的两头）"
+    if t == "group":
+        return "缺 anchors（归成一类的那几组）"
+    if t == "result":
+        return "缺 anchor（s 编号）或 ok（true / false）"
+    if t == "formula":
+        return "缺 tex（LaTeX）"
+    if t == "sketch":
+        return "nodes（或旧写法的 shapes）里没有能画的"
+    if t == "figure":
+        return "缺 path（图的文件路径）"
+    return "缺必填的内容"
+
+
+def _anchor_of(it):
+    return str(it.get("anchor") or "").strip().lower()
+
+
+def settle_items(raw):
+    """Claude 一次写回的几条批注：逐条校验（clean_item），再按规则把关（2026-11-16 规则瘦身 B 组，原来只写在固定说明里）：
+    ① note、question 写长了（超过 NOTE_MAX 字）：当长回答，收成圈号卡片（type 改成 write，anchor、box 不变；没有 q 就没有，不编）；
+    ② write 的 anchor 写成 end：当成没指明答哪句（页面把圈号放在这一轮最后一句还没答的红笔问题旁）；
+       另画 number 去配圈号：只处理认得准的——这一次里有长回答，而且每一条 number 都指着某条长回答的同一处（同一个 anchor、
+       同一个 box，或写 end、什么都没指）；有一条 number 指着别处（像是给步骤排顺序），就都不动；
+    ③ 不收的（cross、wavy、strike 没带理由等）：这一条退回，说明第几条、缺什么；同一次的别的照写。
+    返回（[(第几条, 批注)], [告诉 Claude 的话]）；第几条从 1 数，按 Claude 给的顺序。"""
+    kept, notes = [], []
+    for k, obj in enumerate(raw if isinstance(raw, list) else [], 1):
+        t = obj.get("type") if isinstance(obj, dict) else None
+        if t in ("note", "question") and isinstance(obj.get("text"), str) and note_len(obj["text"].strip()) > NOTE_MAX:
+            it = clean_item(dict(obj, type="write"))
+            if it:
+                if _anchor_of(it) == "end":  # 短批注没有「页末」：当成没指明，不再另报一句
+                    del it["anchor"]
+                where = f" {it['anchor']} " if it.get("anchor") else " box 指的那块" if "box" in it else "这一轮最后一句还没答的红笔问题"
+                notes.append(prompt.REPLY_LONG_NOTE.format(k=k, type=t, n=round(note_len(obj["text"].strip())), max=NOTE_MAX, where=where))
+                kept.append((k, it))
+                continue
+        it = clean_item(obj)
+        if it is None:
+            notes.append(prompt.REPLY_REJECTED.format(k=k, type=f" {t} " if t in ITEM_TYPES else " ", why=item_problem(obj)))
+            continue
+        kept.append((k, it))
+    writes = [it for _, it in kept if it["type"] == "write" and "card" not in it]
+    for k, it in kept:
+        if it in writes and _anchor_of(it) == "end":
+            del it["anchor"]
+            notes.append(prompt.REPLY_END_ANCHOR.format(k=k))
+    if writes:
+        spots = {("a", _anchor_of(w)) for w in writes if _anchor_of(w)} | {("b", tuple(w["box"])) for w in writes if "box" in w}
+        nums = [(k, it) for k, it in kept if it["type"] == "number"]
+
+        def at_write(it):
+            if "box" in it:
+                return ("b", tuple(it["box"])) in spots
+            a = _anchor_of(it)
+            return a in ("", "end") or ("a", a) in spots
+        if nums and all(at_write(it) for _, it in nums):
+            for k, it in nums:
+                kept.remove((k, it))
+                notes.append(prompt.REPLY_NUMBER_DROPPED.format(k=k))
+    return kept, notes
+
+
 def card_no(v):
     """write 的 card：长回答卡片的圈号，正整数（数字或数字串）；别的返回 None。"""
     if isinstance(v, bool):
@@ -3152,6 +3557,19 @@ def card_no(v):
     if isinstance(v, str) and v.strip().isdigit():
         v = int(v.strip())
     return v if isinstance(v, int) and v >= 1 else None
+
+
+def is_badge(a):
+    """纸上一个圈号的长回答，还没擦掉（和平板 app.js 的 isBadge 加上没有 erasedAt 一样：type 是 write、at 是两个数）。"""
+    if not isinstance(a, dict) or a.get("type") != "write" or a.get("erasedAt"):
+        return False
+    at = a.get("at")
+    return isinstance(at, list) and len(at) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in at)
+
+
+def shown_items(items):
+    """Claude 写回的这一批里有没有平板纸上看得见的（读法只在「Claude 读到了什么」里显示，不算）。"""
+    return isinstance(items, list) and any(isinstance(it, dict) and it.get("type") != "read" for it in items)
 
 
 def attach_cards(page, items):
@@ -3379,9 +3797,9 @@ code{{font-size:15px;user-select:all}}</style>
 <h2>用平板扫码打开草稿纸</h2>
 <p>平板和这台电脑要连同一个 Wi-Fi。已连上的 Claude Code 对话：{escape_html(names)}</p>
 {''.join(blocks) or '<p>没找到局域网地址，检查电脑是否连着 Wi-Fi。</p>'}
-<p style="color:#777">扫不开时：确认 Windows 防火墙已允许（见 README）；有些公共/校园 Wi-Fi 禁止设备互访，可改用电脑开的移动热点。</p>
+<p style="color:#777">扫了打不开时：确认 Windows 防火墙已允许（见 inkthink\\README.md 的「出了问题」一节）；有些公共/校园 Wi-Fi 禁止设备互访，可改用电脑开的移动热点。</p>
 <h3>设备与安全</h3>
-<p style="color:#555">扫码打开过的设备会换到一个只属于它的令牌。断开一台设备时会同时换访问码（它可能还记着旧地址）；你别的设备照常用，新设备扫新的二维码。</p>
+<p style="color:#555">扫码打开过的设备会换到一个只属于它的凭据。断开一台设备时会同时换访问码（它可能还记着旧地址）；你别的设备照常用，新设备扫新的二维码。</p>
 <div id="devs">读取中…</div>
 <p><button onclick="act('/bridge/code/rotate','换了访问码之后，新设备要扫新的二维码。确定换？')">更换访问码</button>
  <button onclick="act('/bridge/stop','停止草稿纸服务？平板会连不上，插件也不会自动重新启动；要再用就在对话里输入 /ink。')">停止服务</button></p>
@@ -3534,6 +3952,16 @@ def api_page_delete(h, q):
     h.send_json({"notebook": app.notebook_info(nb)})
 
 
+def api_page_move(h, q):
+    """抽屉里拖缩略图换页序：{nb, from, to, key}，把第 from 页挪到第 to 页（都从 0 起，to 按挪完以后的位置算）。
+    只改页序，各页的笔迹文件不动；key 是平板以为第 from 页是哪一页，对不上就不挪（400）。和插页、删页一样返回挪完后的页号和这本的样子。"""
+    app = h.app
+    req = h.read_json()
+    nb = str(req.get("nb") or "scratch")
+    i = app.move_page(nb, int(req.get("from", -1)), int(req.get("to", -1)), str(req.get("key") or "") or None)
+    h.send_json({"page": i, "notebook": app.notebook_info(nb)})
+
+
 def api_page_hidden(h, q):
     h.send_json(h.app.hidden_pages(q.get("nb", "scratch")))
 
@@ -3567,7 +3995,7 @@ def api_upload(h, q):
     raw = (q.get("name") or "文档.pdf").replace("\\", "/").split("/")[-1]
     name = "".join(c for c in raw if c.isprintable() and c not in '<>:"|?*').strip() or "文档.pdf"
     if Path(name).suffix.lower() not in IMPORT_EXT:
-        raise ValueError("可以导入 PDF、PPT、Word、图片、EPUB")
+        raise ValueError(f"可以导入 {IMPORT_KINDS}")
     body = h.read_body(limit=400 * 1024 * 1024)
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / name
@@ -3636,6 +4064,9 @@ def api_snapshot(h, q):
     if not slot:
         raise KeyError("这个快照请求已经过期")
     try:
+        # 发出快照请求时查过一次（bridge_snapshot），但平板可能正好在这几秒里换到了「只在本地」的本子：
+        # 交回来的是那一本的页，这里再查一次，不存、不发，回给 Claude 的话不带书名
+        h.app.ensure_shareable(str(req.get("nb") or "scratch"), "平板上开着的这一本")
         slot["result"] = h.app.save_submission(req, snapshot=True, reader=slot.get("sid"))
     except ValueError as e:
         slot["error"] = str(e)
@@ -3667,9 +4098,18 @@ def api_send_all(h, q):
     h.send_json({"id": sub_id, "target": target, "label": label, "pages": count})
 
 
-def confirm_public(c):
-    """t：问的时刻（平板把确认卡片和问话卡片按先后排成一队）；每处的截图只说有没有（iw、ih 是它的像素大小，平板先留好位置）。"""
-    return {"id": c["id"], "label": c["label"], "nb": c["nb"], "page": c["page"], "where": c["where"], "t": c.get("t", 0),
+def confirm_public(c, app=None):
+    """t：问的时刻（平板把确认卡片和问话卡片按先后排成一队）；每处的截图只说有没有（iw、ih 是它的像素大小，平板先留好位置）。
+    给了 app：问过之后插了页、删了页、挪了页，页号和「哪一页」那句按那一页的键现找（找不到就照问的时候的）。"""
+    page, where = c["page"], c["where"]
+    if app is not None and c.get("key"):
+        try:
+            now = app.index_of_key(c["nb"], c["key"])
+            if now is not None and now != page:
+                page, where = now, app.page_label(c["nb"], now)
+        except Exception:  # noqa: BLE001 - 本子没了、改了名：照问的时候的
+            pass
+    return {"id": c["id"], "label": c["label"], "nb": c["nb"], "page": page, "where": where, "t": c.get("t", 0),
             "questions": [{k: v for k, v in qq.items() if k != "img"} | {"img": bool(qq.get("img"))}
                           for qq in c["questions"]]}
 
@@ -3712,7 +4152,7 @@ def api_ask_answer(h, q):
 
 def api_confirms(h, q):
     b = h.app.bridge
-    h.send_json([confirm_public(c) for c in b.confirms.values() if c["answers"] is None])
+    h.send_json([confirm_public(c, h.app) for c in b.confirms.values() if c["answers"] is None])
 
 
 def api_confirm_img(h, q):
@@ -3745,7 +4185,7 @@ def answer_confirm(app, cid, raw, quiet=False):
         sub_id, d = app.new_sub_dir()
         text = prompt.build_confirm_answer(c, answers, late=True)
         (d / "message.txt").write_text(text, "utf-8")
-        meta = {"id": sub_id, "target": c["sid"], "nb": c["nb"], "page": c["page"], "groups": c["groups"],
+        meta = {"id": sub_id, "target": c["sid"], "nb": c["nb"], "page": c["page"], "page_key": c.get("key"), "groups": c["groups"],
                 "crop": {"x0": 0, "y0": 0, "scale": 1}, "sel": None}
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
         b.enqueue(c["sid"], sub_id)
@@ -3916,8 +4356,10 @@ def api_offers(h, q):
 def api_offer_accept(h, q):
     app = h.app
     req = h.read_json()
-    res = app.accept_offer(req.get("id", ""), req.get("mode"))
-    app.bridge.emit("offers")
+    try:
+        res = app.accept_offer(req.get("id", ""), req.get("mode"))
+    finally:  # 成没成都告诉各台平板马上刷新这条提示：没加成时提示放回去了，文件不在了时收掉了（阶段 E 补：以前只在加成时发）
+        app.bridge.emit("offers")
     if res.get("updated"):
         app.bridge.emit("updated", nb=res["nb"], old=res["old"], text=res["summary"], title=res["title"], prev=res["prev"])
     print(f"[加入] {res['title']}")
@@ -3963,9 +4405,18 @@ def bridge_status_of(app, sid):
         target, title = b.default_target(), ""
     labels = {s["sid"]: s["label"] for s in b.alive()}
     url = app.tablet_url()
+    # 平板上开着的是「只在本地」的本子：/ink 的输出和面板进的是 Claude 的对话，不带它的名字，也不说它发往谁
+    # （2026-11-17 用户定；和 /bridge/* 的拒绝话不带书名是一回事）。插件按 targetLocal 另说一句
+    local = False
+    try:
+        local = bool(nb) and app.is_local(nb)
+    except (KeyError, ValueError, OSError):
+        pass
+    if local:
+        target, title = None, ""
     return {
         "url": url, "qr": qr_svg(url), "code": app.code, "known": sid in b.sessions, "stableUrl": app.stable_url(),
-        "tabletOnline": b.tablet_online(), "isTarget": target == sid,
+        "tabletOnline": b.tablet_online(), "isTarget": target == sid and not local, "targetLocal": local,
         "targetLabel": labels.get(target, ""), "targetNb": title, "sessions": len(labels),
         "submissionsDir": str((app.data / "submissions").resolve()),
         "skipDirs": [str(app.data.resolve()), str(app.books.resolve())],  # 找新文件时跳过草稿纸自己的数据
@@ -4032,25 +4483,28 @@ def bridge_reply(h, q):
     app = h.app
     req = h.read_json()
     meta = app.locate(req.get("sid", ""), req.get("submission"), req.get("page"))
-    if app.is_local(meta["nb"]):  # 用户定的（2026-11-12）：只在本地的本子 Claude 也不往上写
-        raise ValueError(f"《{app.nb_title(meta['nb'])}》这本只在本地：用户设了不发给 Claude，Claude 也不往上写批注。"
-                         "要写的话，请用户在平板抽屉里点「这本发往」选一个对话（就取消了只在本地）。")
-    items = [it for it in (clean_item(x) for x in (req.get("items") or [])) if it]
+    # 用户定的（2026-11-12）：只在本地的本子 Claude 也不往上写；拦下时那句不带书名（2026-11-16，原来开头是「《书名》这本」）
+    app.ensure_writable(meta["nb"], "这一页所在的那本", "往上写批注", "写")
+    # 逐条校验、按规则把关（短批注写长了收成圈号、write 的 anchor 写 end、另画 number 配圈号、缺理由的批改符号退回）：
+    # 查出来的话接在工具结果后面告诉 Claude（notes）
+    kept, notes = settle_items(req.get("items") or [])
+    if not kept:
+        raise ValueError("items 里没有能写的批注" + ("：" + "".join(notes) if notes else "（items 是空的）"))
+    for k, it in [x for x in kept if x[1]["type"] == "result"]:  # 回报：s 编号换成建议的 id；对不上的不要
+        ref = (meta.get("vx") or {}).get(str(it["anchor"]).lower())
+        if ref:
+            it["ref"] = ref
+        else:
+            kept.remove((k, it))
+            notes.append(prompt.REPLY_BAD_RESULT.format(k=k, s=it["anchor"]))
+    items = [it for _, it in kept]
     if not items:
-        raise ValueError("items 里没有能写的批注（type 不认识，或缺了必填的 text、tex、from/to、anchors、nodes、path）")
+        raise ValueError("result 的 anchor 要填消息里「修改建议的决定」列出的 s 编号")
     if any(it["type"] == "write" and "card" in it for it in items):  # 回应卡片上的红字：那张卡片得在这一页上、没擦掉
         attach_cards(json.loads(app.load_page(meta["nb"], meta["page"])), items)
     for it in items:  # 图：把文件存进来（SVG 画成 PNG），平板、发给 Claude 的图、存回 PDF 都用这一份
         if it["type"] == "figure":
             it.update(app.store_figure(it.pop("path")))
-    for it in [x for x in items if x["type"] == "result"]:  # 回报：s 编号换成建议的 id；对不上的不要
-        ref = (meta.get("vx") or {}).get(str(it["anchor"]).lower())
-        if ref:
-            it["ref"] = ref
-        else:
-            items.remove(it)
-    if not items:
-        raise ValueError("result 的 anchor 要填消息里「修改建议的决定」列出的 s 编号")
     results = [x for x in items if x["type"] == "result"]
     eid = app.edit_of_round(meta["nb"], meta["id"]) if results else None
     for it in results if eid else ():  # 这几条是哪一次改文件改的：平板上撤回那一次时，「已改」写成「已撤回」
@@ -4059,16 +4513,24 @@ def bridge_reply(h, q):
     entry = {"req": meta["id"], "level": meta.get("level"), "items": items, "groups": groups, "gx": gx,
              "crop": meta.get("crop"), "sel": meta.get("sel"), "rot": meta.get("rot"), "t": int(time.time() * 1000)}
     app.add_pending(meta["nb"], meta["key"], entry)
+    if results:  # 回报了的不再在之后的消息里提醒（B 组⑤）
+        app.settle_owed([it["ref"] for it in results])
+    missing = app.reads_owed(meta, items)  # 红笔那几组、回应到的那几组还缺读法的：点名，不拦（B 组④）
+    if missing:
+        notes.append(prompt.REPLY_MISSING_READS.format(ids="、".join(missing)))
     label = app.page_label(meta["nb"], meta["page"])
-    app.bridge.emit("ai", nb=meta["nb"], page=meta["page"], req=meta["id"], label=label)
+    # key：那一页的键（页号会因插页、删页、换页序变）；shown：有没有纸上看得见的（只有读法的不在平板上出「别的页有新回答」的记号）
+    app.bridge.emit("ai", nb=meta["nb"], page=meta["page"], key=meta["key"], shown=shown_items(items), req=meta["id"], label=label)
     app.progress(meta["id"], "replied", req.get("sid", ""))
     print(f"[回写] {len(items)} 条 → {label}")
-    h.send_json({"ok": True, "count": len(items), "page": label, "tabletOnline": app.bridge.tablet_online()})
+    h.send_json({"ok": True, "count": len(items), "page": label, "tabletOnline": app.bridge.tablet_online(), "notes": notes})
 
 
 def bridge_show(h, q):
     app = h.app
     req = h.read_json()
+    # 「Claude 推送」设成了只在本地：不加页、不改它发往的对话（2026-11-16 用户定），Word、PPT 也不先转换
+    app.ensure_writable("board", "「Claude 推送」这本", "往里推页面，这次什么都没推", "推")
     i = app.add_board_page(req.get("path", ""), req.get("page"), req.get("title"))
     app.bind_target("board", str(req.get("sid") or ""))  # 推给你的页，你在上面写的发回推它的对话
     title = app.board_index()["pages"][i]["title"]
@@ -4080,15 +4542,23 @@ def bridge_show(h, q):
 
 def bridge_import(h, q):
     """ink_import：导入一份文档；导入过的（或指定替换某本）原地更新。另存出来的新文件（ink_edit 选了另存）导入时，
-    原文件那本跟着换成它。原地更新时原文件自上次导入后变了、却没先留底：结果里带一句提醒（remind），不拦。"""
+    原文件那本跟着换成它。原地更新时原文件自上次导入后变了、却没先留底：结果里带一句提醒（remind），不拦。
+
+    要落到的那本「只在本地」（2026-11-16 用户定「拦住，也不列名字」）：拒绝，什么都不写——同一个原文件再导入时也不悄悄另建一本；
+    Claude 明说 as_new 才另建（只在本地的那本不动）。同一个原文件导入成了几本时，先落到不是只在本地的那本。"""
     app = h.app
     req = h.read_json()
     path = req.get("path", "")
-    target = app.resolve_nb(req["replace"]) if req.get("replace") else None
+    target = app.resolve_nb(req["replace"], claude=True) if req.get("replace") else None
+    which = "replace 指的那本"
     if not target and not req.get("as_new"):
-        same = app.book_of_source(path)
-        target = "book:" + same if same else app.saveas_book(path)
+        same = app.book_of_source(path, shared_first=True)
+        if same:
+            target, which = "book:" + same, "这个文件导入成的那本"
+        else:
+            target, which = app.saveas_book(path, shared_first=True), "原文件导入成的那本"
     if target:  # 同一个文件的新版本，或指定替换某本，或另存出来的那份：原地更新，笔迹保留
+        app.ensure_writable(target, which, "往里导入、不换掉它，这次什么都没导入", "导入", "不要另建一本绕过去。")
         flush_tablet(app)
         remind = app.import_remind(target, path)
         eid = app.pending_edit(path)  # 改完导入：记下是哪一次修改，平板上的提示条据此出「撤回这次修改」
@@ -4120,7 +4590,7 @@ def bridge_snapshot(h, q):
     wait = float(req.get("wait") or 15)
     if not b.tablet_online():
         raise ValueError("平板上没有打开草稿纸页面。")
-    h.app.ensure_shareable((b.where or {}).get("nb"))
+    h.app.ensure_shareable((b.where or {}).get("nb"), "平板上开着的这一本")
     rid = uuid.uuid4().hex[:10]
     slot = {"done": threading.Event(), "result": None, "error": None, "sid": str(req.get("sid") or "")}
     b.snapshots[rid] = slot
@@ -4138,7 +4608,13 @@ def bridge_snapshot(h, q):
 def bridge_scan(h, q):
     app, b = h.app, h.app.bridge
     req = h.read_json()
-    nb = app.resolve_nb(req["nb"]) if req.get("nb") else (b.where or {}).get("nb") or "scratch"
+    if req.get("nb"):  # 写全了名字、被拦下时，scan 里那句带的书名是 Claude 自己写的
+        nb = app.resolve_nb(req["nb"], claude=True)
+    else:  # 没写：检测平板上开着的那本（没开着就是草稿本，名字是固定的），拦下时不说书名
+        nb = (b.where or {}).get("nb")
+        app.ensure_shareable(nb, "平板上开着的这一本")
+        nb = nb or "scratch"
+        app.ensure_shareable(nb, "草稿本")
     flush_tablet(app)
     pages_req = req.get("pages")
     if isinstance(pages_req, (int, float)):
@@ -4157,7 +4633,7 @@ def bridge_confirm(h, q):
     if not raw:
         raise ValueError("questions 不能为空")
     loc = app.locate(sid, req.get("submission"), req.get("page"))
-    app.ensure_shareable(loc.get("nb"))
+    app.ensure_shareable(loc.get("nb"), "这一页所在的那本")
     cid = uuid.uuid4().hex[:10]
     questions = []
     for k, x in enumerate(raw):
@@ -4183,7 +4659,8 @@ def bridge_confirm(h, q):
             qq["iw"], qq["ih"] = png_size(qq["img"])  # 平板按这个大小先留好位置，图载入时卡片不跳高
         questions.append(qq)
     label = b.sessions.get(sid, {}).get("label", "")
-    c = {"id": cid, "sid": sid, "label": label, "nb": loc["nb"], "page": loc["page"],
+    # key：那一页的键。卡片可能挂很久（重启后还在）：这期间插页、删页、挪页，平板上的页号和晚到的回答都按它找那一页
+    c = {"id": cid, "sid": sid, "label": label, "nb": loc["nb"], "page": loc["page"], "key": loc["key"],
          "where": app.page_label(loc["nb"], loc["page"]), "groups": [{"id": k, "bbox": v} for k, v in loc["groups"].items()],
          "questions": questions, "answers": None, "done": threading.Event(), "late": False, "t": time.time()}
     b.confirms[cid] = c
@@ -4329,6 +4806,7 @@ API = {
     ("POST", "/api/page/delete"): api_page_delete,
     ("GET", "/api/page/hidden"): api_page_hidden,
     ("POST", "/api/page/restore"): api_page_restore,
+    ("POST", "/api/page/move"): api_page_move,
     ("GET", "/api/thumb"): api_thumb,
     ("POST", "/api/notebook/new"): api_notebook_new,
     ("POST", "/api/notebook/delete"): api_notebook_delete,

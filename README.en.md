@@ -6,7 +6,7 @@ Handwritten paper on a tablet, wired to a running [Claude Code](https://claude.c
 
 **A tablet and stylus, used like pen and paper, instead of keyboard and mouse for an agent harness.** The model, the tools and the project files all come from Claude Code; ThinkPaper replaces the input and output layer: you write on the page, and Claude answers on the page.
 
-Write in black for your own working, and switch to red when you want Claude's help. Tap **AI** to send the page to the Claude Code session in your project folder. Claude reads the ink directly and answers on the page with correction marks on your strokes, short notes in the margin, typeset formulas, and small sketches. A longer answer does not take up the paper: a numbered badge appears next to your red question, and tapping it opens the answer on a card floating over the page. On your computer, the conversation only gets a one-line note.
+Write in black for your own working, and switch to red when you want Claude's help. Tap **AI** to send the page to the Claude Code session in your project folder. Claude reads the ink directly and answers on the page with correction marks on your strokes, short notes beside your writing, typeset formulas, and small sketches. A longer answer does not take up the paper: a numbered badge appears next to your red question, and tapping it opens the answer on a card floating over the page. On your computer, the conversation only gets a one-line note.
 
 ![A handwritten page with Claude's notes in the margin](assets/demo-en.png)
 
@@ -65,6 +65,10 @@ Optional:
 
 ## Install
 
+**One-step install (Windows only):** clone this repository, then double-click `install.bat` in its root folder. It finds Python (3.10 or later), creates a virtual environment and installs the dependencies, installs and configures the plugin, checks the firewall (asking once for approval if a rule is needed), then starts the server and opens the pairing QR page. Each step reports its result, and steps already done are skipped when you run it again; to see what it would do without changing anything, run `.\install.bat --dry-run` from a terminal in the repository folder. When it is done, restart Claude Code and continue from step 5 below. Details are in the Install (安装) section of the [manual](inkthink/README.md), which is in Chinese.
+
+**Manual install:**
+
 1. Clone this repository.
 
 2. Start the server once from a terminal. This creates a virtual environment, installs the Python packages, and opens the pairing page:
@@ -89,7 +93,7 @@ Optional:
 
    Put a path that contains spaces in double quotes. If you leave this empty, start the server yourself with `start.bat`.
 
-5. Open a Claude Code session in the project you want to work on and run `/ink`. A panel will show a QR code. Scan it with your tablet and open the page in the browser.
+5. Open a Claude Code session in the project you want to work on and run `/ink`. A panel will show a QR code (in the CLI the panel shows only the address; open `http://127.0.0.1:8765/qr` in a browser on your computer to see the QR code). Scan it with your tablet and open the page in the browser.
 
    - If Windows asks about the firewall, allow access. If the tablet cannot connect, run `inkthink\open-firewall.ps1` in an administrator PowerShell. This opens port 8765 to your local subnet only.
    - On an iPad, use Share → Add to Home Screen. Opening the page from the home screen makes it full screen, with no address bar.
@@ -119,7 +123,7 @@ Claude answers in two layers:
 1. **What you asked in red** is handled item by item.
 2. **Beyond the red ink**, Claude reads the whole page and points out only real errors and omissions. Often, there are none. It may add at most one nudge, placed where it belongs, and it will not finish your work for you.
 
-Short responses appear in blue on the page (margin notes, correction marks, formulas, sketches); a longer answer stays off the paper, behind a numbered badge next to your red question, and you see the full text when you tap it. Erase what you do not want, draw a star next to what you adopt, and write your reply in red, on the page or on the card. All of this is sent along the next time you tap **AI**.
+Short responses appear in blue on the page (short notes, correction marks, formulas, sketches); a longer answer stays off the paper, behind a numbered badge next to your red question, and you see the full text when you tap it. Erase what you do not want, draw a star next to what you adopt, and write your reply in red, on the page or on the card. All of this is sent along the next time you tap **AI**.
 
 When Claude needs an answer from you before it can go on, a question card drops down from the top of the tablet: tap one of the options, or write your answer with the pen in the small patch of paper on the card. If you would rather not answer, tap **Ignore**.
 
@@ -178,7 +182,7 @@ Questions and bug reports are welcome as GitHub issues.
 
 ## More documentation
 
-[`README.md`](README.md) is this page in Chinese. A detailed manual is being rewritten for the new page.
+[`README.md`](README.md) is this page in Chinese. A detailed manual, in Chinese, is at [`inkthink/README.md`](inkthink/README.md).
 
 ## License
 

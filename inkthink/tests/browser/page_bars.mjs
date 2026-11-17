@@ -1,6 +1,6 @@
 // 页面上的开关：抽屉最上面两组——连续 / 单页、适配宽度 / 整页（本子再多也不用往下划）；
 // 全屏和退出全屏各有自己的按钮：全屏时右下角那一条上有「退出全屏」，退出后左侧工具栏最下面有「全屏」。
-// 全屏只有纸、左上角的本子名、右下角一条（能按住把手拖走）；退出全屏后顶栏和左侧工具栏回来，「检查」在顶栏上。
+// 全屏只有纸、左上角的本子名、右下角一条（能按住把手拖走）；退出全屏后顶栏和左侧工具栏回来，「AI」在顶栏上。
 // 全屏时左上角一排：[☰ 本子名 页码] [‹] [›]  [单页图标|连续图标]  [加页图标]——这本不止一页才有翻页和「单页 / 连续」（连续时也有）；
 // 「单页 / 连续」是并排的一对图标（像一个两格的开关），当前的那个白底加粗边框，点哪个就是哪个，点已选中的不变；
 // 和抽屉里那组开关、顶栏上那一对是同一个状态。这一对和旁边的按钮之间留出明显的间隔。
@@ -246,7 +246,7 @@ T.ok('往屏幕外拖：留在屏幕里', b3[0] >= 0 && b3[2] <= 834 && b3[3] <=
 await dragGrip(-200, -300); // 挪开一点，别压着后面要点的地方
 const b4 = await barAt();
 
-// 7. 点「退出全屏」：顶栏和左侧工具栏回来，本子名和右下角那一条收起；顶栏上是「检查」
+// 7. 点「退出全屏」：顶栏和左侧工具栏回来，本子名和右下角那一条收起；顶栏上是「AI」
 await tap('#toolsBars');
 s = await st();
 T.ok('点「退出全屏」：顶栏和左侧工具栏回来', s.collapsed === false && (await T.visible('#bar')) && (await T.visible('#rail')) && !(await T.visible('#drawer')), s);
@@ -259,14 +259,14 @@ T.ok('顶栏上那一对：连续时「连续」图标选中，「单页」图�
 g = await gaps('bar', '#next');
 T.ok('顶栏上那一对挨在一起，和左边的 ›、右边的加页图标之间的间隔明显大于这一对里面的间隔', apart(g), g);
 const railBtns = await shown('#rail button', 'b.dataset.tool || b.id');
-T.ok('左侧：黑笔、红笔、橡皮、撤销、全屏', railBtns === 'pen,red,eraser,undo,fsBtn', railBtns);
+T.ok('左侧：黑笔、红笔、橡皮、套索、撤销、重做、全屏', railBtns === 'pen,red,eraser,lasso,undo,redo,fsBtn', railBtns);
 const fsF = await fontOf('#fsBtn');
 T.ok('左侧的「全屏」字不小（≥ 14 像素）、颜色不淡、字在按钮里', fsF.size >= 14 && fsF.light <= 90 && fsF.fits, fsF);
 const stage = await js(`(() => { const r = document.querySelector('#stage').getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; })()`);
 T.ok('纸让开了顶栏和左侧工具栏', stage[0] >= 50 && stage[1] >= 44, stage);
 await T.shot('3-bars.png');
 
-// 8. 这时照样能写、能交：顶栏上的「检查」
+// 8. 这时照样能写、能交：顶栏上的「AI」
 await T.pen(T.line(120, 200, 260));
 await tap('#barCheck');
 const sub = await T.waitSub('S1');
@@ -293,7 +293,9 @@ T.ok('顶栏的 ☰ 打开抽屉，抽屉在顶栏下面，两组开关也在', 
 await tap('#drawerBtn');
 await tap('#menuBtn');
 const rows = await shown('#menu .row', `b.id || (b.querySelector('input') || {}).id || '?'`);
-T.ok('⋯ 菜单：显示批注、手指书写、回放、整页 / 适配宽度、清除批注', rows === 'optAi,optFinger,actReplay,actFit,actClearAi', rows);
+// 「画线停住变直」2026-11-16 夜起先藏着（app.js 的 STRAIGHT_SHOWN），菜单里没有它
+T.ok('⋯ 菜单：显示批注、Claude 读到了什么、手指书写、回放、整页 / 适配宽度、清除批注、再看一遍新手引导',
+  rows === 'optAi,optReads,optFinger,actReplay,actFit,actClearAi,actGuide', rows);
 await T.shot('4-menu.png');
 await tap('#menuBtn');
 
@@ -396,7 +398,7 @@ await T.openNotebook('scratch', 0);
 // 12. 英文界面：这些按钮都有英文；四个按钮一行放不下，各占一行，字不被截掉；
 //     左上角一排、右下角那一条（放回右下角）在 834 宽时也都在屏幕里、互不重叠
 await js(`localStorage.removeItem('inkthink.toolsPos')`);
-await T.go(`?k=${T.code}&notour=1&lang=en`, { raw: true });
+await T.go(`?k=${T.code}&lang=en`, { raw: true });
 T.ok('英文界面：右下角是 Exit full screen', (await T.text('#toolsBars')) === 'Exit full screen', await T.text('#toolsBars'));
 lay = await layout();
 const tbEn = await fontOf('#toolsBars');

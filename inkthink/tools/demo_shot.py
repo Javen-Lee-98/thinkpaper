@@ -8,7 +8,7 @@
 """
 import sys
 
-import fitz  # pymupdf
+import pymupdf as fitz  # pymupdf
 
 
 def main():

@@ -126,6 +126,7 @@ async function applyStatus($: Engine, d: Record<string, unknown>) {
     isTarget: Boolean(d.isTarget),
     targetLabel: typeof d.targetLabel === 'string' ? d.targetLabel : '',
     targetNb: typeof d.targetNb === 'string' ? d.targetNb : '',
+    targetLocal: Boolean(d.targetLocal),
     stableUrl: typeof d.stableUrl === 'string' ? d.stableUrl : undefined,
     sessions: typeof d.sessions === 'number' ? d.sessions : 0,
   })
@@ -329,6 +330,10 @@ async function deliver($: Engine, sub: { id: string; text: string }) {
     .catch(() => ctx.delivered.delete(sub.id))
 }
 
+// 确认卡片等不到回答时告诉 Claude 的话：等了多久、接下来怎么办（2026-11-16 规则瘦身：这几句从固定说明挪到这里，只在用到时出现）
+const CONFIRM_LATE =
+  '等了约 45 秒，用户暂时没有回答（确认卡片还留在平板上，回答后会作为一条新消息【草稿纸·确认】发来）。先按你的理解继续，并在回复里标明哪处是推测的。'
+
 async function waitConfirm($: Engine, id: string): Promise<string> {
   // 共等约 45 秒（25 + 20）：这一轮不久卡着；最后一次还没答，之后的回答作为新消息送进对话
   for (let k = 0; k < 2; k++) {
@@ -336,7 +341,7 @@ async function waitConfirm($: Engine, id: string): Promise<string> {
     if (!r.ok) return `没等到回答：${r.error}。先按你的理解继续，并在回复里标明哪处是推测的。`
     if (typeof r.data.text === 'string') return r.data.text
   }
-  return '用户暂时没有回答（确认卡片还留在平板上，回答后会作为新消息发来）。先按你的理解继续，并在回复里标明哪处是推测的。'
+  return CONFIRM_LATE
 }
 
 // 问话卡片（ink_ask）：一次最多挂 25 秒，连着等几次，共约一分半；最后一次还没答，之后的回答作为新消息送进对话
@@ -386,11 +391,19 @@ async function registerTools($: Engine) {
     name: 'ink_reply',
     isDeferred: false,
     description:
-      '把回答写回用户平板上的草稿纸，以蓝色手写体出现。write：长的回答（可多段，用 \\n 换行），用来代替在对话里回答：anchor 填所答的那条红笔（或它讲的那处笔迹），q 填问题原文；平板在那里标一个圈号，用户点圈号才看到全文，不占纸面；note/question：页边的短批注（每条不超过 40 字）；underline/circle/arrow：画在笔迹上的标记；read：对手写内容的转写。anchor/from/to 用消息图片里的笔迹编号（g1、g2……）；指向印刷文字或无编号处时用 box（消息里那一页的图里的像素坐标 [x0,y0,x1,y1]；不给 submission 时为页面坐标）。不给 submission 就写到平板当前打开的那一页。回答红笔问题：短的（约 40 字以内）用 note，anchor 填那个红笔问题的编号；长的用 write，anchor 也填那个红笔问题的编号。不要自己用 number 标圈号去配页末的 write，write 的 anchor 也不要写 end（number 仍可用来给步骤排顺序）。用户用红笔要你改写某条回答时，回一条新的 write（anchor 填那条红笔），旧的那条用户自己擦。用户在长回答的卡片上用红笔写了批注（消息里附那张卡片的图，写着「圈号 n 的卡片」）：回应用 write，card 填 n，q 填你读到的那句红字，这段接在那张卡片最下面，不出新的圈号；要改写整段，也把改好的写在下面。用户采纳了文档上的修改建议（消息里「修改建议的决定」）：先调 ink_edit（在平板上问用户覆盖还是另存，并先留底），按它返回的路径改，用 ink_import 导入改好的那个文件，最后用 result 逐条回报改成了没有。',
+      '把回答写回用户平板上的草稿纸，以蓝色手写体出现。放在哪由草稿纸定，你只要把 anchor 指对。' +
+      'write：长的回答（可多段，用 \\n 换行；单独一行写成 $$…$$ 的排成公式），用来代替在对话里回答：anchor 填所答的那条红笔（或它讲的那处笔迹），q 填问题原文；平板在那里标一个圈号，用户点圈号才看到全文，不占纸面；' +
+      'note/question：短批注（约 40 字以内；写长了草稿纸会把它收成圈号卡片，工具结果里会说），用细线连到所指的笔迹：空白本子里草稿纸在旁边找空白放下，后来被用户写的字压到就收成一个小蓝点（点一下浮出），书页和推送页上排在右边一栏；' +
+      'underline/circle/arrow：画在笔迹上的标记；read：你对一组手写的读法（照写的原样转写，不翻译、不解释），anchor 填组号，每次回都把红笔那几组和这次回应到的那几组的读法各交一条（用户打开「Claude 读到了什么」时，读法以灰色小字显示在那几笔下面；漏了的组，工具结果里会点名）。' +
+      'anchor/from/to 用消息图片里的笔迹编号（g1、g2……）；指向印刷文字或无编号处时用 box（消息里那一页的图里的像素坐标 [x0,y0,x1,y1]；不给 submission 时为页面坐标）。回某次投递就带上它的 submission；不给 submission 就写到平板当前打开的那一页（这时笔迹编号用不了，用 box），平板没打开时写到这个对话最近一次投递的那一页。' +
+      '回答红笔问题：短的（约 40 字以内）用 note，anchor 填那个红笔问题的编号；长的用 write，anchor 也填那个红笔问题的编号。圈号是平板自己标的，不用另画 number 去配，write 的 anchor 也不要写 end（number 仍可用来给步骤排顺序）。' +
+      '用户用红笔要你改写某条回答：红字写在卡片上的，照下一句接在卡片下面；写在纸上别处的，回一条新的 write（anchor 填那条红笔），旧的那条用户自己擦。' +
+      '用户在长回答的卡片上用红笔写了批注（消息里附那张卡片的图，写着「圈号 n 的卡片」）：回应用 write，card 填 n，q 填你读到的那句红字，这段接在那张卡片最下面，不出新的圈号；要改写整段，也把改好的写在下面。用户在纸上的短批注上直接写了红字时，那条短批注交上来时已收成圈号、变成这样一张卡片，回应的办法一样。' +
+      '用户采纳了文档上的修改建议（消息里「修改建议的决定」）：先调 ink_edit（在平板上问用户覆盖还是另存，并先留底），按它返回的路径改，用 ink_import 导入改好的那个文件，最后用 result 逐条回报改成了没有。',
     inputSchema: {
       type: 'object',
       properties: {
-        submission: { type: 'string', description: '【草稿纸】消息里给的 submission 编号；省略则写到这个对话最近一次投递的那一页' },
+        submission: { type: 'string', description: '【草稿纸】消息里给的 submission 编号；省略则写到平板当前打开的那一页（这时笔迹编号用不了，用 box 页面坐标），平板没打开时写到这个对话最近一次投递的那一页' },
         page: { type: 'number', description: '【草稿纸·整本】消息里的页码（第几页，从 1 起）；单页投递不用填' },
         items: {
           type: 'array',
@@ -401,12 +414,12 @@ async function registerTools($: Engine) {
               type: {
                 type: 'string',
                 enum: ['write', 'note', 'question', 'underline', 'circle', 'arrow', 'read', 'suggest', 'tick', 'cross', 'strike', 'insert', 'wavy', 'highlight', 'brace', 'number', 'label', 'node', 'link', 'group', 'sketch', 'figure', 'formula', 'result'],
-                description: 'write 长的回答（平板在 anchor 那处标一个圈号，用户点开看全文）；note 页边批注；question 以问题写的批注；underline 下划线；circle 圈出；arrow 箭头；read 对手写内容的转写（显示在顶部）；suggest 要用户同意才动的一处修改（框住 anchor/box 那块，text 写改成什么，用户点 ✓/×）。批改符号（都画在 anchor/box 那块上）：tick 对 ✓；cross 错 ✗（text 写一句为什么）；strike 删除线（text 可写改成什么）；insert 插入符 ^（text 写补的字）；wavy 波浪线表示存疑（text 可写一句疑问）；highlight 荧光笔；brace 大括号把那块括起来（text 写一句）；number 圈着的编号（text 写 1、2、3）。概念图上：label 给用户画的箭头补关系词（anchor 填那条箭头，text 两三个字）；以下三种是建议，画成虚线，用户点 ✓/×，同意的变实线：node 建议加一个概念（text 是概念，anchor 填放在哪个旁边，links 列出要连的组），link 建议加一条线（from、to 填组号，text 是关系词），group 建议把几个归成一类（anchors 列出那几组，text 是类名）。sketch 一张手绘风格的示意图或方框图：只给结构（nodes 节点、edges 连线、groups 分组），不写坐标，草稿纸排版；text 可写一句图注；放在 anchor/box 那块下面，anchor 写 end 或不写就接在页面最后。figure 一张你在电脑上生成的图（数据图、函数曲线，matplotlib 等画成 PNG 或 SVG）：path 填文件路径，text 写一句图注，放法和 sketch 一样。formula 一个排版好的公式（tex 写 LaTeX，不带 $），放法和 sketch 一样。result 回报一条采纳的修改改完了没有（在 ink_edit → 改文件 → ink_import 之后）：anchor 填 s 编号，ok 填 true / false，没改成时 text 写一句原因',
+                description: 'write 长的回答（平板在 anchor 那处标一个圈号，用户点开看全文）；note 短批注（约 40 字以内，写长了收成圈号卡片；用细线连到 anchor 指的笔迹，位置草稿纸自己找）；question 以问句写的短批注；underline 下划线；circle 圈出；arrow 箭头（from、to，连起两处）；read 你对一组手写的读法（anchor 填组号，照原样转写；用户打开「Claude 读到了什么」时显示在那几笔下面）；suggest 要用户同意才动的一处修改，只用在书页、推送页上印刷的内容（框住 anchor/box 那块，text 写改成什么，用户点 ✓/×；指着手写的字或写在空白本子上的，只画成一条短批注）。批改符号（都画在 anchor/box 那块上，只标要紧的）：tick 对 ✓（用户问对不对、或关键的一步才打）；cross 错 ✗（text 写一句为什么）；strike 删除线，该删的（text 写改成什么或为什么删）；insert 插入符 ^，该补的（text 写补的字）；wavy 波浪线表示存疑（text 写一句疑问）；highlight 荧光笔，标关键的；brace 大括号把几行括起来，要合并或归纳时用（text 写一句）；number 圈着的编号，给步骤排顺序（text 写 1、2、3）；cross、strike、wavy 不带 text 的那一条会被退回、不画（工具结果里写明第几条缺什么，同一次的别的照写）。概念图（用户把框、圈着的词用箭头连起来）上的四种都是建议，画成虚线，用户点 ✓/×，采纳的变实线：label 给用户画的箭头补关系词（anchor 填那条箭头，text 两三个字），node 建议加一个概念（text 是概念，anchor 填放在哪个旁边，links 列出要连的组），link 建议加一条线（from、to 填组号，text 是关系词），group 建议把几个归成一类（anchors 列出那几组，text 是类名）；概念图里连错的线用 cross 标在那条线上，有疑问用 question，中心概念用 circle。sketch 一张手绘风格的示意图或方框图（方框图、流程、因果关系）：只给结构（nodes 节点、edges 连线、groups 分组），不写坐标，草稿纸排版；text 可写一句图注；草稿纸把它放在 anchor/box 所指内容旁边不压字的地方（空白本子里先看右边再看下面，书页、推送页上在下面），anchor 写 end 或不写就接在页面内容后面。figure 一张你在电脑上生成的图（数据图、函数曲线这类要准确的，matplotlib 等画成 PNG 或 SVG）：path 填文件路径，text 写一句图注，放法和 sketch 一样。formula 一个排版好的公式（tex 写 LaTeX，不带 $），放法和 sketch 一样，平板上排成数学公式。result 回报一条采纳的修改改完了没有（在 ink_edit → 改文件 → ink_import 之后）：anchor 填 s 编号，ok 填 true / false，没改成时 text 写一句原因；没回报的，之后的消息里会列出来',
               },
               text: { type: 'string', description: 'write/note/question/read 的文字；suggest 写改成什么（如「改为：……」「删去这句」，最多 120 字）；批改符号旁边的一句话（不超过 40 字），insert 是补的字、number 是编号；arrow 可带不超过 8 字的标签' },
               q: { type: 'string', description: 'write 回答红笔问题时：那个问题的原文（照用户写的转写），显示在点开的卡片顶上，用户擦掉红字后也看得到；带 card 时填你读到的卡片上的那句红字，显示在接上的那一段前面' },
-              card: { type: 'number', description: 'write 回应用户在长回答卡片上写的红字时：那张卡片的圈号 n（消息里写着「圈号 n 的卡片」）。带了它，这段 text 接在那张卡片最下面，不出新的圈号' },
-              anchor: { type: 'string', description: '笔迹编号如 g3；一组分了几行（消息里写着「分 N 行」）时 g3:1 指它的第 1 行。write 填所答的那条红笔（或它讲的那处笔迹）：圈号标在它右边，不要写 end；sketch、figure、formula 可写 end 表示接在页面所有内容之后' },
+              card: { type: 'number', description: 'write 回应用户在长回答卡片（或短批注收成的卡片）上写的红字时：那张卡片的圈号 n（消息里写着「圈号 n 的卡片」）。带了它，这段 text 接在那张卡片最下面，不出新的圈号' },
+              anchor: { type: 'string', description: '笔迹编号如 g3；一组分了几行（消息里写着「分 N 行」）时 g3:1 指它的第 1 行。read 填读的那一组（或那一行）；write 填所答的那条红笔（或它讲的那处笔迹）：圈号标在它右边，不要写 end；sketch、figure、formula 可写 end 表示接在页面内容后面' },
               from: { type: 'string', description: 'arrow/link 的起点编号' },
               to: { type: 'string', description: 'arrow/link 的终点编号' },
               anchors: { type: 'array', items: { type: 'string' }, description: 'group：归成一类的那几组的编号' },
@@ -475,12 +488,12 @@ async function registerTools($: Engine) {
     name: 'ink_show',
     isDeferred: false,
     description:
-      '把一个文件推到用户平板的草稿纸上，成为「Claude 推送」本子里新的一页，让用户在上面手写、圈画后发回来。支持图片（png/jpg）、PDF（用 page 选页）、SVG，以及文本/代码文件（排成一页，page 表示第几个 70 行）。',
+      '把一个文件推到用户平板的草稿纸上，成为「Claude 推送」本子里新的一页，让用户在上面手写、圈画后发回来。支持图片（png/jpg）、PDF 和 Word、PPT（用 page 选页）、SVG，以及文本/代码文件（排成一页，page 表示第几个 70 行）。整份文档要让用户翻着写，用 ink_import。',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: '文件路径（相对路径按当前项目目录解析）' },
-        page: { type: 'number', description: 'PDF 的页码（从 1 起），或文本文件的第几段 70 行' },
+        page: { type: 'number', description: 'PDF、Word、PPT 的页码（从 1 起），或文本文件的第几段 70 行' },
         title: { type: 'string', description: '在平板上显示的标题' },
       },
       required: ['path'],
@@ -497,7 +510,7 @@ async function registerTools($: Engine) {
     name: 'ink_import',
     isDeferred: false,
     description:
-      '把一整份文档导入用户平板的草稿纸，成为一个可以翻页、手写的本子：PDF、PPT/PPTX、Word（DOC/DOCX，用本机 Office 转换）、EPUB、图片、Markdown。同一个文件再导入，会原地更新原来那本：页按内容对齐，用户的手写跟着对应的页走，平板上能对比新旧版、看到改动处。' +
+      '把一整份文档导入用户平板的草稿纸，成为一个可以翻页、手写的本子：PDF、PPT/PPTX、Word（DOC/DOCX，用本机 Office 转换）、EPUB、图片、Markdown 和纯文本。同一个文件再导入，会原地更新原来那本：页按内容对齐，用户的手写跟着对应的页走，平板上能对比新旧版、看到改动处。' +
       '改已导入的文档：动手前先调 ink_edit（它问用户覆盖还是另存，并先留底），按它返回的路径改完，再用这个工具导入改好的那个文件：覆盖的导入原文件；另存的导入 ink_edit 新建的那个文件，平板上那本自动换成它（不用 replace）。然后用 ink_reply 的 result 回报采纳的修改建议改成了没有。用户在对话里打字让你改已导入的文档也一样。' +
       '不经 ink_edit 另存成新文件名的新版本（如 v47 → v48）用 replace 指定替换哪本。只想推某一页让用户圈画时用 ink_show。',
     inputSchema: {
@@ -581,7 +594,8 @@ async function registerTools($: Engine) {
       '不带 mode：在用户平板顶上问「覆盖原文件，还是另存一份？」，等用户点选约一分半。用户还没选，就停在这里等着，不要替用户选，也不要先动这个文件；用户选了，会作为一条新消息送来，到时带上 mode 再调一次。用户点了「忽略」，这次就不改这个文件。平板没打开草稿纸时马上告诉你：在对话里问用户，再带上 mode 调。' +
       '带 mode 就不弹卡片，直接办：overwrite 先把原文件留底，然后你改原文件本身；saveas 在原文件旁边另存一份（如 v47 → v48），返回新文件的路径，你改这个新文件，原文件不要动。留了底，用户在平板上能撤回。' +
       '按返回的路径改完：用 ink_import 导入改好的那个文件（平板上那本原地换成新版；另存的，那本换成新文件），采纳的修改建议再用 ink_reply 的 result 逐条回报改成了没有。' +
-      '用户在对话里打字让你改已导入的文档也一样先调它：用户已经说了覆盖还是另存，就带上 mode；没说的，在对话里问用户。',
+      '用户在对话里打字让你改已导入的文档也一样先调它：用户已经说了覆盖还是另存，就带上 mode；没说的，在对话里问用户。' +
+      '留底在草稿纸数据文件夹（消息里图片所在 submissions 的上一层）的 keep 里：用户要找回旧版或第一次改之前的原件时去那里拿；拿回来要盖掉现在这份时，也算改文件，照样先调它，再拿留底的内容覆盖。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -597,8 +611,8 @@ async function registerTools($: Engine) {
   })
   await $.command.register({
     name: 'ink',
-    description: '手写草稿纸：显示平板二维码和连接状态；/ink here 让平板发到这个对话',
-    argumentHint: '[here]',
+    description: '手写草稿纸：显示平板二维码和连接状态；/ink here 让平板上开着的那本发到这个对话；/ink stop 停止服务',
+    argumentHint: '[here|stop]',
   })
 }
 
@@ -726,7 +740,9 @@ export const register: Register = (on, options) => {
     })
     if (!r.ok) return { deny: `没写成：${r.error}` }
     const later = r.data.tabletOnline ? '' : '（平板现在没打开草稿纸，下次打开那一页时会出现）'
-    return { result: `已写到草稿纸：${String(r.data.page ?? '')}，共 ${String(r.data.count)} 条${later}` }
+    // 服务把关时查出来的（短批注写长了收成圈号、缺理由的批改符号退回、还缺哪几组的读法……）：原样接在后面，一条一行
+    const notes = Array.isArray(r.data.notes) ? r.data.notes.filter((s): s is string => typeof s === 'string' && s !== '') : []
+    return { result: `已写到草稿纸：${String(r.data.page ?? '')}，共 ${String(r.data.count)} 条${later}${notes.map(s => `\n${s}`).join('')}` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'inkpad 插件出错，没有完成这次操作' }))
 
   on('tool.call', { tool: TOOL_SHOW }, async ($, e) => {
@@ -868,7 +884,10 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: '手写草稿纸' })
     const st = await read($, status)
     const nb = st.targetNb ? `《${st.targetNb}》` : ''
-    const where = st.isTarget
+    // 平板上开着的是「只在本地」的本子：这句话进的是对话，不带它的名字（2026-11-17 用户定）
+    const where = st.targetLocal
+      ? '平板上开着的这一本设成了「只在本地」，不发给 Claude；要发到对话，在平板抽屉里点「这本发往」选一个对话。'
+      : st.isTarget
       ? `平板上${nb}发送的内容会进入这个对话。`
       : `平板上${nb || '这本'}发往「${st.targetLabel || '（无）'}」，用 /ink here 改到这个对话（每本记住自己的对话）。`
     const stable = st.stableUrl ? `；换了网络 IP 会变，也可以用固定地址 ${st.stableUrl}（有的网络不支持）` : ''
@@ -880,7 +899,9 @@ export const register: Register = (on, options) => {
     const lines = [
       st.online ? '服务已连接' : '服务未连接',
       st.tabletOnline ? '平板在线' : '平板未打开',
-      st.isTarget
+      st.targetLocal
+        ? '平板上开着的这一本只在本地，不发给 Claude'
+        : st.isTarget
         ? `平板${st.targetNb ? `上《${st.targetNb}》` : ''}发送的内容会进入这个对话`
         : `平板上${st.targetNb ? `《${st.targetNb}》` : '这本'}发往：${st.targetLabel || '（无）'}`,
     ]
@@ -894,7 +915,7 @@ export const register: Register = (on, options) => {
           ))}
           {st.url ? <Text>平板打开：{st.url}</Text> : null}
           {st.stableUrl ? <Text>固定地址（IP 变了也能用）：{st.stableUrl}</Text> : null}
-          {st.online && !st.isTarget ? <Button key="claim" label="这本改发到这个对话" onPress={() => claim($)} /> : null}
+          {st.online && !st.isTarget && !st.targetLocal ? <Button key="claim" label="这本改发到这个对话" onPress={() => claim($)} /> : null}
         </Box>
       )
     }
@@ -908,7 +929,7 @@ export const register: Register = (on, options) => {
         {st.qr ? <Svg source={st.qr} alt={`扫码打开草稿纸：${st.url ?? ''}`} width={180} height={180} /> : null}
         {st.url ? <Text>{st.url}</Text> : null}
         {st.stableUrl ? <Text dimColor>固定地址（IP 变了也能用）：{st.stableUrl}</Text> : null}
-        {st.online && !st.isTarget ? <Button key="claim" label="这本改发到这个对话" onPress={() => claim($)} /> : null}
+        {st.online && !st.isTarget && !st.targetLocal ? <Button key="claim" label="这本改发到这个对话" onPress={() => claim($)} /> : null}
       </Box>
     )
   })

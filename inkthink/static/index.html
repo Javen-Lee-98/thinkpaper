@@ -19,14 +19,16 @@
 <body>
 <header id="bar">
   <div class="grp grow">
-    <button id="drawerBtn" aria-label="本子和页面">☰</button>
+    <button id="drawerBtn" aria-label="本子和页面">☰<span class="new-dot" hidden></span></button><!-- 小圆点：有没处理的新文件（抽屉最上面那一组） -->
     <!-- 名字长的可以左右滑着看全 -->
     <div id="nbTitle" class="nb-title" role="button" aria-label="本子和页面">草稿本</div>
   </div>
   <div class="grp">
     <button id="prev" aria-label="上一页">‹</button>
-    <span id="pageNo">–</span>
+    <span id="pageNo" role="button">–</span><!-- 页码：点了出输入页码的小框（#pageJump） -->
     <button id="next" aria-label="下一页">›</button>
+    <!-- 别的页有新回答：「● 第 3 页」点了翻过去；几页时「● 2 页有新回答 ▾」点了出小单子（和左上角的 #chipNew 一样，app.js 的 showNewAns） -->
+    <button id="barNew" class="new-ans-btn" hidden><span class="na-dot" aria-hidden="true"></span><span class="na-no"></span><span class="na-more" aria-hidden="true"></span></button>
     <!-- 单页 / 连续：并排的一对图标，当前的那个加框；点哪个就是哪个（和左上角那一对、抽屉里那组开关同一个状态）；只有一页的本子没有 -->
     <div class="pair" id="barPair" role="group" hidden>
       <button id="barSingle" data-v="single" data-icon="single" aria-label="单页：一页一页翻"></button>
@@ -41,14 +43,16 @@
   </div>
 </header>
 
-<!-- 左侧工具栏（图标；长按看说明） -->
+<!-- 左侧工具栏（图标；长按看说明）。黑笔、红笔、橡皮的说明和右下角那一条上的同一个工具一字不差（界面上对用户说「你」） -->
 <nav id="rail">
-  <button data-tool="pen" class="on" data-icon="pen" aria-label="笔：我自己的推导和草稿"></button>
-  <button data-tool="red" class="red-pen" data-icon="pen" aria-label="红笔：写给 Claude 的问题"></button>
-  <button data-tool="eraser" data-icon="eraser" aria-label="橡皮"></button>
+  <button data-tool="pen" class="on" data-icon="pen" aria-label="黑笔：你自己的推导和草稿"></button>
+  <button data-tool="red" class="red-pen" data-icon="pen" aria-label="红笔：明确要 Claude 处理的事"></button>
+  <button data-tool="eraser" data-icon="eraser" aria-label="橡皮：也能擦 Claude 的蓝字"></button>
+  <button data-tool="lasso" data-icon="lasso" aria-label="套索：圈住你的几笔，按住框里拖到别处"></button><!-- 画一圈选中笔迹、拖着挪（app.js 的 lassoDown，static/lasso.js） -->
   <button id="undo" data-icon="undo" aria-label="撤销"></button>
+  <button id="redo" data-icon="redo" aria-label="恢复" disabled></button><!-- 恢复（重做，英文 Redo；2026-11-16 夜以前叫「重做」）：撤销过才能点，否则是灰的（app.js 的 updateRedo） -->
   <span class="rail-gap"></span>
-  <button id="fsBtn" title="全屏：隐藏 Safari 界面、收起上栏和工具栏，只留纸">全屏</button>
+  <button id="fsBtn" title="全屏：隐藏浏览器界面、收起上栏和工具栏，只留纸">全屏</button>
 </nav>
 
 <main id="stage">
@@ -57,18 +61,21 @@
   <canvas id="live"></canvas>
   <svg id="ai" xmlns="http://www.w3.org/2000/svg"><g id="aiRoot"></g></svg>
   <div id="tex"></div><!-- 排好的公式（KaTeX），和批注层一起缩放 -->
-  <!-- 纸的四边：点一下往那个方向加一块纸（笔写到边上附近时会亮起来） -->
+  <!-- 纸的四边：点一下往那个方向加一块纸（笔写到边上附近时会亮起来）。只在书页、推送页；空白本子的纸跟着字长，没有这四个 -->
   <button id="extDown" class="ext" hidden>＋ 加长</button>
   <button id="extRight" class="ext" hidden>＋<br>加<br>宽</button>
-  <button id="extUp" class="ext" hidden>＋ 向上</button>
-  <button id="extLeft" class="ext" hidden>＋<br>向<br>左</button>
+  <button id="extUp" class="ext" hidden>＋ 向上加长</button>
+  <button id="extLeft" class="ext" hidden>＋<br>向<br>左<br>加<br>宽</button>
 </main>
 
 <!-- 长回答的卡片：点纸上的圈号，紧挨着它浮出来（不是画在纸上的）；点别处、黑笔落下、挪纸、翻页、开抽屉就收起。
-     红笔落在卡片里写在卡片上（acInk 那一层，和内容一起缩放、一起滑），橡皮擦卡片上的红字；手指在卡片里上下滑；没有按钮。
+     红笔落在卡片里写在卡片上（acInk 那一层，和内容一起缩放、一起滑），橡皮擦卡片上的红字；手指在卡片里上下滑。
      内容（acPage）按固定宽度排版，整体缩放到卡片的宽度：换屏幕大小红字不错位。Claude 接着回的各段在 acMore 里，之前的版本在最底下。
      Claude 写的字不翻译（data-lang-keep） -->
 <div id="answerCard" role="dialog" hidden>
+  <!-- 顶上的「上一条」「下一条」（2026-11-16 用户定，暂定）：按这一页圈号的顺序换到相邻那条回答的卡片，到头的那个变灰；
+       这一页只有一条回答时不出；不跨页。贴在卡片顶上，卡片里的内容滑动时它不动（不在 acPage 里：不影响红字的坐标） -->
+  <div id="acNav" hidden><button id="acPrev">‹ 上一条</button><button id="acNext">下一条 ›</button></div>
   <div id="acSizer">
     <div id="acPage">
       <div class="ac-blk" id="acMain" data-blk="a">
@@ -84,6 +91,12 @@
 
 <!-- 左侧抽屉：本子、页面缩略图、加页删页 -->
 <aside id="drawer" hidden>
+  <!-- 新文件（阶段 D2）：Claude 在对话里新生成、还没处理的文件，一个一行（文件名、哪个对话生成的、加入 / 更新《某本》/ 替换《某本》/ 另加一本、忽略）。
+       放在最上面；条数多时这一组限高、在里面滑，不把下面那两组开关挤到要往下划才看得到。没有待处理的就不出 -->
+  <div id="offerBox" hidden>
+    <div class="of-head"><span id="offerHead">新文件</span><button id="offerAll" hidden>全部忽略</button></div>
+    <div id="offerList"></div>
+  </div>
   <!-- 怎么翻页、纸多大。放在最上面，本子再多也不用往下划；当前选的那个加框 -->
   <div class="dr-row" id="viewRow">
     <div class="seg" id="segFlow"><button data-v="flow">连续</button><button data-v="single">单页</button></div>
@@ -110,7 +123,7 @@
       <button id="actTurnR" data-icon="rotr" aria-label="这一页连同写的字右转 90°"></button>
       <button id="actAddPortrait" data-icon="addv" aria-label="在这一页后面加一张竖版空白页"></button>
       <button id="actAddLandscape" data-icon="addh" aria-label="在这一页后面加一张横版空白页"></button>
-      <button id="actDelPage" data-icon="trash" aria-label="删除这一页（可以在「显示已删的页」里恢复）"></button>
+      <button id="actDelPage" data-icon="trash" aria-label="删除这一页（可以在「显示已删的页」里还原）"></button>
     </span>
   </div>
   <div id="thumbs"></div>
@@ -118,14 +131,32 @@
     <button id="actHidden">显示已删的页</button>
   </div>
   <div id="hiddenList" hidden></div>
+  <!-- 抽屉最下面（全屏时没有「⋯」菜单，这几样在这里也有）：「Claude 读到了什么」「画线停住变直」（先藏着）的开关（和菜单里的是同一个）、再看一遍新手引导。
+       再下面是语言切换（i18n.js 加在最后） -->
+  <div class="dr-row dr-checks">
+    <label class="dr-check"><input type="checkbox" id="drReads"> Claude 读到了什么</label>
+  </div>
+  <!-- 「画线停住变直」先藏着（2026-11-16 夜）：app.js 的 STRAIGHT_SHOWN 是 false 时这一行不在页面上（showStraight） -->
+  <div class="dr-row dr-checks" hidden>
+    <label class="dr-check"><input type="checkbox" id="drStraight"> 画线停住变直</label>
+  </div>
+  <div class="dr-row">
+    <button id="actGuide2">再看一遍新手引导</button>
+  </div>
 </aside>
 
 <div id="menu" class="panel" hidden>
   <label class="row"><input type="checkbox" id="optAi"> 显示 Claude 的批注</label>
+  <!-- 勾上后每组笔迹下面用小号灰字写出 Claude 读到的字（阶段 D2），再点一次关掉；记在这台设备上 -->
+  <label class="row"><input type="checkbox" id="optReads"> Claude 读到了什么</label>
   <label class="row"><input type="checkbox" id="optFinger"> 手指也能书写</label>
+  <!-- 画一条线后笔不抬、停住约半秒，变成直线（static/straight.js）；记在这台设备上，默认开。
+       2026-11-16 夜起先藏着：app.js 的 STRAIGHT_SHOWN 是 false 时这一行不在页面上、功能关着 -->
+  <label class="row" hidden><input type="checkbox" id="optStraight"> 画线停住变直</label>
   <button class="row" id="actReplay">回放本页书写过程</button>
   <button class="row" id="actFit">整页 / 适配宽度</button>
   <button class="row" id="actClearAi">清除本页 Claude 批注</button>
+  <button class="row" id="actGuide">再看一遍新手引导</button>
 </div>
 
 <!-- 这本发往哪个对话：每本记住自己的对话。按项目文件夹分组，每个对话写最近打的一句话、什么时候开的、多久前活跃；
@@ -136,7 +167,22 @@
   <button class="row" id="targetPickCancel">取消</button>
 </div>
 
-<!-- 一本旁边的文件夹图标点开：放进哪个文件夹、移出文件夹、新建文件夹 -->
+<!-- 输入页码翻页（2026-11-16 夜用户定，暂定）：点页码（顶栏上 ‹ › 中间的「3/12」、全屏时左上角的页码）出这个小框，放在页码下面、屏幕上方
+     （平板的数字键盘从下面弹出，挡不住它）。只输数字（平板上出数字键盘）；从别处跳过来的，多一行「回到第 N 页」（app.js 的 openPageJump） -->
+<div id="pageJump" class="panel" role="dialog" aria-label="输入页码翻页" hidden>
+  <div class="pj-row"><span>翻到第</span><input id="pjInput" type="text" inputmode="numeric" pattern="[0-9]*" enterkeyhint="go" maxlength="5" autocomplete="off" aria-label="页码"><span id="pjTotal"></span><button id="pjGo" class="primary">去</button></div>
+  <div id="pjErr" class="pj-err" role="alert" hidden></div>
+  <button class="row" id="pjBack" hidden></button>
+</div>
+
+<!-- 「几页有新回答」的小单子（2026-11-16 夜）：点左上角、顶栏上的那个记号出来，在它正下方（屏幕上方）；每页一行「第 3 页」，
+     点一行翻过去、收起；点外面收起（app.js 的 renderNewAnsList） -->
+<div id="newAnsList" class="panel" role="menu" aria-label="有新回答的页" hidden></div>
+
+<!-- 一本右边的「⋯」点开的小菜单：放进文件夹…、改名…、删除这本…，当前这本有原 PDF 时多一项存回 PDF（app.js 的 nbMenuItems 填） -->
+<div id="nbMenu" class="panel" role="menu" hidden></div>
+
+<!-- 一本「⋯」菜单里的「放进文件夹…」点开：放进哪个文件夹、移出文件夹、新建文件夹 -->
 <div id="folderPick" class="panel" hidden>
   <div class="row small">放进哪个文件夹</div>
   <div id="folderPickList"></div>
@@ -166,9 +212,27 @@
 <!-- 排着不止一张时，小条旁边的「全部忽略（N 张）」：一次清掉排着的所有卡片（2026-11-14 用户在 iPad 上试过后定） -->
 <button id="qbarAll" hidden></button>
 
+<!-- 新文件提示（阶段 D2）：Claude 在对话里生成了新文件，屏幕上方出一条「Claude 生成了某某 [加入] [忽略]」，约 8 秒后自己收起（没处理的进抽屉最上面那一组）。
+     一次来了几个合成一条；排在左上角那一排（顶栏）下面，问话卡片排在它下面（app.js 的 placeOfferBar、placeQ） -->
+<div id="offerBar" role="status" hidden><span id="obText"></span><span id="obBtns"></span></div>
+
+<!-- 新手引导（阶段 D2）：真实的按钮旁各一个小标签（app.js 的 layoutGuide 量好位置，细线连到按钮），中间一张短说明。
+     这一层不接点按，只有「知道了」接：落笔、点真实的按钮照常起作用，同时引导收起 -->
+<div id="guide" hidden>
+  <svg id="guideLines" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="guideTags"></div>
+  <div id="guideCard" role="dialog" aria-label="新手引导">
+    <div class="g-row"><span class="g-key g-black">黑笔</span><span>写你自己的草稿和推导</span></div>
+    <div class="g-row"><span class="g-key g-red">红笔</span><span>写给 Claude 的话：问题或要求</span></div>
+    <div class="g-row"><span class="g-key"><span class="g-ai">AI</span></span><span>写完点它，交给 Claude</span></div>
+    <div class="g-row"><span class="g-key g-blue">蓝字</span><span>Claude 回在纸上；长的收在圈号里，点圈号看</span><span class="g-badge" aria-hidden="true">1</span></div>
+    <div class="g-foot"><button id="guideOk" class="primary">知道了</button></div>
+  </div>
+</div>
+
 <div id="toast" hidden></div>
 
-<!-- 导入：浏览电脑上对话所在的文件夹，或搜 Zotero 里的文献，点一下导入；或从 iPad 上传 -->
+<!-- 导入：浏览电脑上对话所在的文件夹，或搜 Zotero 里的文献，点一下导入；或从平板上传 -->
 <div id="importSheet" class="overlay" hidden>
   <div class="card wide">
     <div class="is-top"><b>导入文档</b><button id="isClose" aria-label="关闭">×</button></div>
@@ -183,7 +247,7 @@
       <div id="zCrumbs"></div>
       <div id="zList"></div>
     </div>
-    <div class="card-btns"><button id="isUpload">从 iPad 上传…</button></div>
+    <div class="card-btns"><button id="isUpload">从平板上传…</button></div>
   </div>
 </div>
 
@@ -216,10 +280,15 @@
   </div>
 </div>
 
-<input type="file" id="pdfFile" accept=".pdf,.ppt,.pptx,.doc,.docx,.rtf,.odt,.odp,.epub,.png,.jpg,.jpeg,.svg,.webp,application/pdf,image/*" hidden>
-<!-- 全屏时（打开时的样子，只有纸）：左上角是本子名和页码，点开抽屉；右下角一条。退出全屏后换成上面的顶栏和左侧工具栏 -->
+<!-- 从平板上传：收的扩展名和电脑上的服务能导入的一样（server.py 的 IMPORT_EXT；tests/test_server.py 的 ImportKindsTest 守着） -->
+<input type="file" id="pdfFile" accept=".pdf,.ppt,.pptx,.doc,.docx,.rtf,.odt,.odp,.epub,.xps,.md,.txt,.png,.jpg,.jpeg,.svg,.webp,.gif,.bmp,.tif,.tiff,application/pdf,image/*,text/markdown,text/plain" hidden>
+<!-- 全屏时（打开时的样子，只有纸）：左上角是本子名和页码，点 ☰ 和本子名开抽屉，点页码出输入页码的小框（#pageJump，2026-11-16 夜起）；右下角一条。
+     退出全屏后换成上面的顶栏和左侧工具栏 -->
 <div id="chipRow">
-  <button id="nbChip" aria-label="本子和页面"><span class="chip-menu" aria-hidden="true">☰</span><span id="chipName"></span><span id="chipPage"></span></button>
+  <button id="nbChip" aria-label="本子和页面"><span class="chip-menu" aria-hidden="true">☰<span class="new-dot" hidden></span></span><span id="chipName"></span><span id="chipPage"></span></button>
+  <!-- 别的页有新回答（2026-11-16 用户定；夜里试过后改，暂定）：只有一页有——「● 第 3 页」，点了翻过去；几页都有——「● 2 页有新回答 ▾」，
+       点了在它下面出一张小单子（#newAnsList），每页一行；没有就不出 -->
+  <button id="chipNew" class="new-ans-btn" hidden><span class="na-dot" aria-hidden="true"></span><span class="na-no"></span><span class="na-more" aria-hidden="true"></span></button>
   <!-- 全屏时没有顶栏，在这里翻页：这本不止一页就有（连续时也有）；第一页 ‹、最后一页 › 不能点 -->
   <button id="chipPrev" aria-label="上一页" hidden>‹</button>
   <button id="chipNext" aria-label="下一页" hidden>›</button>
@@ -237,16 +306,21 @@
 <div id="tools">
   <span class="fb-grip" id="toolsGrip" role="button" aria-label="按住拖动工具条">⋮⋮</span>
   <button id="toolsBars" aria-label="退出全屏：显示顶栏和左侧工具栏">退出全屏</button>
-  <button data-tool="pen" class="on" data-icon="pen" aria-label="黑笔：你自己在想"></button>
+  <button data-tool="pen" class="on" data-icon="pen" aria-label="黑笔：你自己的推导和草稿"></button>
   <button data-tool="red" class="red-pen" data-icon="pen" aria-label="红笔：明确要 Claude 处理的事"></button>
   <button data-tool="eraser" data-icon="eraser" aria-label="橡皮：也能擦 Claude 的蓝字"></button>
+  <button data-tool="lasso" data-icon="lasso" aria-label="套索：圈住你的几笔，按住框里拖到别处"></button>
   <button id="toolsUndo" data-icon="undo" aria-label="撤销"></button>
+  <button id="toolsRedo" data-icon="redo" aria-label="恢复" disabled></button>
   <!-- 点了交给 Claude；交上去以后字跟着这一轮走：已交 / 排队中 / Claude 在看 / 在改文件，结束变回「AI」；这本只在本地时写「只在本地」 -->
   <button id="check">AI</button>
 </div>
 <script src="/static/katex/katex.min.js"></script>
 <script src="/static/gesture.js"></script>
 <script src="/static/turn.js"></script>
+<script src="/static/brush.js"></script>
+<script src="/static/straight.js"></script>
+<script src="/static/lasso.js"></script>
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>

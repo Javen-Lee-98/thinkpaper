@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # 上一行告诉 pip 这个文件是 UTF-8：老版本的 pip 在中文 Windows 上默认按 GBK 读，读到中文注释会出错
-pymupdf>=1.24,<2
+pymupdf>=1.24.3,<2
 qrcode>=7.4
 numpy>=1.26
 Pillow>=10

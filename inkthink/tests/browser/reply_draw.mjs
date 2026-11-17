@@ -1,5 +1,5 @@
 // Claude 画的三样：示意图（只给结构，电脑上的服务排版）、电脑上生成的图、排好的公式（KaTeX）。
-// 都显示出来、不压住已有的字、缩放后还对齐、存盘内容对、刷新后还在、再「检查」时发给 Claude 的图里有它们。
+// 都显示出来、不压住已有的字、缩放后还对齐、存盘内容对、刷新后还在、再点「AI」时发给 Claude 的图里有它们。
 // 跑法：node tests/browser/reply_draw.mjs [临时目录]；有一项不对退出码 1。
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -10,7 +10,7 @@ const T = await boot({ name: 'reply-draw' });
 const TEX = 'S = \\frac{a+b}{2} \\cdot h = 6 \\times 4';
 // 一张「电脑上生成的图」：600 × 300，左半绿、右半白（绿色和黑笔、红笔、蓝字都分得开）
 const PNG = join(T.OUT, 'curve.png');
-spawnSync(PY, ['-c', 'import sys, fitz; pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 600, 300), 0); pm.clear_with(255); pm.set_rect(fitz.IRect(0, 0, 300, 300), (30, 160, 60)); pm.save(sys.argv[1])', PNG]);
+spawnSync(PY, ['-c', 'import sys, pymupdf as fitz; pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 600, 300), 0); pm.clear_with(255); pm.set_rect(fitz.IRect(0, 0, 300, 300), (30, 160, 60)); pm.save(sys.argv[1])', PNG]);
 
 // 这一页上 Claude 画的每一样：页面数据，加上它在屏幕上画出来的样子（外框、图、字、线）；还有公式那一层
 const blocks = () => T.evalJS(`(() => { const S = window.__ink.S, out = { view: S.view.s }, rc = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; };
@@ -36,7 +36,7 @@ async function aligned(B) {
 }
 // 发给 Claude 的那张图里，几块地方各有多少绿色、蓝色的点（隔一个点数一个）：返回 [[数了几个点, 绿, 蓝], …]
 function colours(img, rects) {
-  const r = spawnSync(PY, ['-c', `import sys, json, fitz
+  const r = spawnSync(PY, ['-c', `import sys, json, pymupdf as fitz
 pm = fitz.Pixmap(sys.argv[1]); n, s, w, out = pm.n, pm.samples, pm.width, []
 for x0, y0, x1, y1 in json.loads(sys.argv[2]):
     t = g = b = 0
@@ -57,7 +57,7 @@ async function pinch(cx, cy, d0, d1) {
   await sleep(600);
 }
 
-// 1. 红笔问一句，黑笔写两行（第三行紧挨在第二行下面），点「检查」
+// 1. 红笔问一句，黑笔写两行（第三行紧挨在第二行下面），点「AI」
 await T.tap('#tools [data-tool=red]');
 await T.pen(T.line(120, 160, 300));
 await T.tap('#tools [data-tool=pen]');
@@ -70,7 +70,7 @@ T.ok('交上去了，三组笔迹', Boolean(meta1) && meta1.groups.length === 3,
 const before = colours(join(T.DATA, 'submissions', sub1.id, 'crop.jpg'), [[0, 0, 9999, 9999]])[0];
 T.ok('这时发给 Claude 的图里还没有蓝色和绿色', before[0] > 1000 && before[1] === 0 && before[2] === 0, before);
 
-// 2. Claude 写回：示意图只给结构（三个节点、两条连线、一个分组、一句图注），放在第二行下面；一张图；一个公式
+// 2. Claude 写回：示意图只给结构（三个节点、两条连线、一个分组、一句图注），指着第二行；一张图；一个公式
 const rep = await T.post('/bridge/reply', { sid: 'S1', submission: sub1.id, items: [
   { type: 'sketch', anchor: 'g2', text: '做晚饭', nodes: ['去超市', '洗蔬菜', '炒青菜'], edges: [{ from: '去超市', to: '洗蔬菜', text: '回家' }, { from: '洗蔬菜', to: '炒青菜' }],
     groups: [{ nodes: ['去超市', '洗蔬菜'], text: '准备' }] },
@@ -100,16 +100,20 @@ T.ok('图：图注写在图的正下方', Boolean(cap) && cap[2] >= fg.dom.img[1
 T.ok('公式：KaTeX 排出来了，有分数结构', Boolean(B.tex && B.tex.katex) && B.tex.frac === 1 && /KaTeX_Main/.test(B.tex.font), B.tex);
 T.ok('公式：排出来有宽有高（分数比一行字高），纸上看不到反斜杠源码', B.tex.katex[2] > 80 * B.view && B.tex.katex[3] > 26 * 1.5 * B.view && !B.tex.text.includes('\\frac'), [B.tex.katex, B.view, B.tex.text]);
 T.ok('公式：记下的占位和排出来的差不多（宽差不到一成，高放得下）', fm.tex === TEX && Math.abs(fm.lay.w * B.view - B.tex.katex[2]) < 0.1 * B.tex.katex[2] && fm.lay.h * B.view >= B.tex.katex[3] - 2, [fm.lay, B.tex.katex]);
-T.known('公式：记下的宽度放得下排出来的公式', fm.lay.w * B.view >= B.tex.katex[2] - 1,
-  '打开页面后的第一个公式是在 KaTeX 字体载入之前量的宽度，偏窄约 5%（这个公式记 277，排出来 292），量错的还会留在缓存里；static/app.js:3746–3758 measureTex，打开页面时只等了手写体（app.js:5558）',
+// 原来标着已知不过（阶段 D1 修的）：打开页面后的第一个公式是在 KaTeX 字体载入之前量的宽度，偏窄约 5%（这个公式记 277，排出来 292），
+// 量错的还会留在缓存里。现在 Claude 回的条目里有公式时，落下之前先等它用到的 KaTeX 字体载入（最多等 3 秒），字体还在载入时量的不记
+T.ok('公式：记下的宽度放得下排出来的公式（打开页面后的第一个公式也量得对）', fm.lay.w * B.view >= B.tex.katex[2] - 1 && fm.lay.w * B.view <= B.tex.katex[2] + 8 * B.view,
   [fm.lay.w, B.tex.katex[2] / B.view]);
 
-// 6. 不压住已有的字，三样之间也不叠着；示意图放在所指的第二行下面，而且让开了紧挨着的第三行
-const hits = [sk.hit, fg.hit, fm.hit];
+// 6. 不压住已有的字，三样之间也不叠着；示意图放在所指的第二行旁边。
+//    阶段 D1 第二部分起空白本子里图先找右边、再找下面（以前是「放在第二行下面，并且让到紧挨着的第三行下面」）；
+//    空白本子不留批注栏，整张纸（宽 S.TW，以前右边那一栏也算）都可以放（以前要求在正文区 x ≤ 1000 里）
+const hits = [sk.hit, fg.hit, fm.hit], TW = await T.evalJS('window.__ink.S.TW');
 T.ok('三样都没有压住我写的字', hits.every((h) => B.strokes.every((s) => !meets(h, s))), [hits, B.strokes]);
 T.ok('三样之间不叠着，从上到下依次排开', !meets(sk.hit, fg.hit) && !meets(fg.hit, fm.hit) && sk.hit[3] <= fg.hit[1] && fg.hit[3] <= fm.hit[1], hits);
-T.ok('示意图在第二行下面，并且让到了第三行下面', sk.hit[1] > B.strokes[1][3] && sk.hit[1] > B.strokes[2][3], [sk.hit, B.strokes]);
-T.ok('三样都在纸的正文区里、都在屏幕上', hits.every((h) => h[0] >= 0 && h[2] <= 1000) && [sk.dom.g, fg.dom.g, B.tex.rect].every((r) => r[0] >= 0 && r[1] >= 0 && r[0] + r[2] <= 834 && r[1] + r[3] <= 1194), [hits, sk.dom.g, fg.dom.g, B.tex.rect]);
+T.ok('示意图在第二行右边（右边放得下就先放右边），和第二行上沿差不多齐，离它不远', sk.hit[0] > B.strokes[1][2] && sk.hit[0] < B.strokes[1][2] + 60
+  && Math.abs(sk.hit[1] - B.strokes[1][1]) < 30, [sk.hit, B.strokes]);
+T.ok('三样都在纸上、都在屏幕上', hits.every((h) => h[0] >= 0 && h[2] <= TW) && [sk.dom.g, fg.dom.g, B.tex.rect].every((r) => r[0] >= 0 && r[1] >= 0 && r[0] + r[2] <= 834 && r[1] + r[3] <= 1194), [hits, TW, sk.dom.g, fg.dom.g, B.tex.rect]);
 const a1 = await aligned(B);
 T.ok('没缩放时：公式、图、示意图的字都落在各自的位置上', a1.formula && a1.figure && a1.sketch, a1);
 
@@ -142,7 +146,7 @@ T.ok('两指张开：纸放大了', B.view > s0 * 1.5, [s0, B.view]);
 T.ok('放大后：公式、图、示意图的字还是各自对齐', a3.formula && a3.figure && a3.sketch, a3);
 T.ok('放大后公式和图跟着变大', B.tex.katex[2] > 80 * s0 * 1.5 && Math.abs(B.figure.dom.img[2] - B.figure.fig.w * B.view) < 3, [B.tex.katex, B.figure.dom.img]);
 
-// 9. 再点「检查」：发给 Claude 的图里有这三样（图的那块是绿的，示意图和公式那两块有蓝色的线和字），消息里列着它们
+// 9. 再点「AI」：发给 Claude 的图里有这三样（图的那块是绿的，示意图和公式那两块有蓝色的线和字），消息里列着它们
 await T.tap('#check');
 const sub2 = await T.waitSub('S1'), meta2 = sub2 && T.metaOf(sub2);
 T.ok('又交上去了一次', Boolean(meta2) && sub2.id !== sub1.id, sub2 && sub2.id);

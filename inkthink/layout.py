@@ -1,5 +1,5 @@
 """本子的页面顺序：显示的第几页是什么（原文件的第几页 / 推送的第几页 / 一张空白纸），
-插空白页、删页、恢复，原文件更新后重排。
+插空白页、删页、恢复、挪页，原文件更新后重排。
 
 每页有一个不变的键：原文件或推送的页是 p0003（笔迹文件 page-0003.json，和以前一样），
 插入的空白纸是 b<随机串>（blank-<随机串>.json）。页码会因插页、删页而变，键不变。
@@ -90,6 +90,16 @@ class Layout:
         self.pages.insert(pos, new_blank(orient))
         return pos
 
+    def move(self, i, j):
+        """把显示的第 i 页挪到第 j 页（j 按挪完以后的位置算；抽屉里拖缩略图），返回 j。
+        只改页的先后：页的键不变，笔迹文件不用动；删掉的页记的「原来跟在哪一页后面」按键记，也不用改。"""
+        n = len(self.pages)
+        for k in (i, j):
+            if not 0 <= k < n:
+                raise KeyError(f"没有第 {k + 1} 页")
+        self.pages.insert(j, self.pages.pop(i))
+        return j
+
     def delete(self, i):
         if len(self.pages) <= 1:
             raise ValueError("最后一页不能删")
@@ -117,6 +127,8 @@ class Layout:
 
         空白纸跟着它前面那一页走；那一页在新版里没了，就跟到再往前最近的一页（都没有就放最前）；
         用户删掉的页如果新版里还在，仍然是删除状态。
+        在草稿纸里挪过页序（move）的：原文件的页回到新版里的先后，挪过的不保留；空白纸照上面的规矩，
+        跟着它在挪过的页序里前面那一页走（挪到最前面的空白纸留在最前）。
         """
         old_to_new = {i: j for j, i in enumerate(mapping) if i is not None}
         leading, trailing, last = [], {}, None

@@ -6,6 +6,9 @@
     .venv\\Scripts\\python.exe tools\\evalset.py cells               按发送时的字帖画法重画每组（cells/*.png）
     .venv\\Scripts\\python.exe tools\\evalset.py ocr    [--variants PP-OCRv5:server ...]  PP-OCR 识别各组，算 CER 和用时
     .venv\\Scripts\\python.exe tools\\evalset.py score  --hyp 文件.json  别的读法（{编号: 文字}，如 Claude 读图的结果）的 CER
+    .venv\\Scripts\\python.exe tools\\evalset.py reco   [--data 目录]  用现在的 Windows 识别（先判断中文还是英文）重新认一遍，算 CER
+
+分数按红笔 / 黑笔 / 含公式或符号，以及标准答案的语种（中文 / 英文 / 中英混写）分开列。
 
 读法来源，按可信度排：
 1. confirm：对话记录里 ink_confirm 的回答（用户在平板上亲手确认或更正的），标「已确认」；
@@ -535,7 +538,7 @@ def score(out, confirmed=False, hyp=None):
         t = norm(truth)
         cands = (hyp or {}).get(it["id"]) if hyp is not None else (it.get("reco") or [""])[0]
         cands = cands if isinstance(cands, list) else [cands or ""]
-        rows.append({"id": it["id"], "red": it["red"], "formula": has_formula(truth), "chars": len(t),
+        rows.append({"id": it["id"], "red": it["red"], "formula": has_formula(truth), "chars": len(t), "lang": lang_of(truth),
                      "edits": min(edit_distance(norm(h), t) for h in cands)})
 
     def agg(rs):
@@ -547,7 +550,24 @@ def score(out, confirmed=False, hyp=None):
     res = agg(rows)
     res["by"] = {"红笔": agg([r for r in rows if r["red"]]), "黑笔": agg([r for r in rows if not r["red"]]),
                  "含公式或符号": agg([r for r in rows if r["formula"]])}
+    for name in ("中文", "英文", "中英混写"):  # 按标准答案里的字分（2026-11-14 加语种判断时加的）
+        res["by"][name] = agg([r for r in rows if r["lang"] == name])
     return res
+
+
+def lang_of(text):
+    """标准答案是什么语种：有汉字也有拉丁字母是「中英混写」，只有汉字「中文」，只有拉丁字母「英文」，都没有「符号」。"""
+    han = bool(re.search(r"[㐀-鿿]", text or ""))
+    lat = bool(re.search(r"[A-Za-z]", text or ""))
+    return "中英混写" if han and lat else "中文" if han else "英文" if lat else "符号"
+
+
+def run_reco(data, out, reco=None):
+    """用现在的 Windows 识别（先判断中文还是英文，recognize.recognize_lang）重新认评测集的每组。
+    返回 ({编号: 最可能的读法}, {编号: 判出的语种})；笔迹找不到全的组（页删了）不在里面。"""
+    reco = reco or recognize.recognize_lang
+    got = reco(list(item_strokes(data, out).items()))
+    return {k: v["text"][0] for k, v in got.items()}, {k: v["lang"] for k, v in got.items()}
 
 
 def item_strokes(data, out):
@@ -608,7 +628,7 @@ def print_score(name, r):
 
 def main():
     ap = argparse.ArgumentParser(description="手写评测集：build / serve / score")
-    ap.add_argument("cmd", choices=["build", "serve", "score", "cells", "ocr"])
+    ap.add_argument("cmd", choices=["build", "serve", "score", "cells", "ocr", "reco"])
     ap.add_argument("--data", default=str(ROOT / "data"))
     ap.add_argument("--projects", nargs="*", default=[str(Path.home() / ".claude" / "projects")])
     ap.add_argument("--n", type=int, default=50)
@@ -633,6 +653,11 @@ def main():
             pass
     elif a.cmd == "cells":
         print(f"按字帖画法重画了 {cells(data, out)} 组：{out / 'cells'}")
+    elif a.cmd == "reco":
+        print_score("Windows 识别（生成评测集时存下的）", score(out, a.confirmed))
+        hyp, langs = run_reco(data, out)
+        print_score("Windows 识别（现在，先判断语种）", score(out, a.confirmed, hyp))
+        print("判出的语种：" + "，".join(f"{k} {sum(1 for v in langs.values() if v == k)} 组" for k in sorted(set(langs.values()))))
     elif a.cmd == "ocr":
         win = {it["id"]: (it.get("reco") or [""])[0] for it in load_items(out)}
         print_score("Windows 识别", score(out, a.confirmed))

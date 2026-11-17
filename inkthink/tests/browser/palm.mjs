@@ -92,5 +92,13 @@ if (fresh) {
 } else process.stderr.write('  （页面打开用了 0.8 秒以上，「刚打开手指就能挪纸」这一项这次没测到）\n');
 await T.ready();
 
+// 手指连点两下：画面大小、位置都不变（2026-11-16 用户定去掉「双击切换整页 / 适配宽度」：看不见的手势，碰巧撞上时画面突然跳变）
+await T.sleep(1200);
+const d0 = await view();
+for (let k = 0; k < 2; k++) { await touch('touchStart', 320, 760); await T.sleep(50); await touch('touchEnd'); await T.sleep(90); }
+await T.sleep(400);
+const d1 = await view();
+T.ok('手指连点两下：画面大小和位置都不变', same(d0, d1), [d0, d1]);
+
 T.ok('页面没有报错', !T.errors.length, T.errors);
 await T.finish();

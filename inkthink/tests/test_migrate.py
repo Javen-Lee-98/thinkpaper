@@ -238,7 +238,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(code, 0, text)
         [w] = self.writes()
         self.assertEqual(w["on"], ["q1", "r1"])  # 第 1 版上的意见记作回答过；最新一版上的不记
-        self.assertIn("以前藏着的批注笔迹 2 笔重新露出来，其中红笔 1 笔没有回答指着，下次「检查」会当红笔问题交给 Claude", text)
+        self.assertIn("以前藏着的批注笔迹 2 笔重新露出来，其中红笔 1 笔没有回答指着，下次点「AI」会当红笔问题交给 Claude", text)
 
     def test_revision_badge_goes_after_the_whole_question(self):
         # 一句红笔问题：前半句记在新版的 on 里，后半句是写在旧版上的批注（旧版收起时一起藏着）。圈号放在整句的后面

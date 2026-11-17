@@ -74,8 +74,8 @@ const look = await js(`(() => { const q = document.querySelector('#qcBody .qc-q'
     left: [...document.querySelectorAll('#qcFoot .qc-left button')].filter((b) => !b.hidden).map((b) => b.textContent) }; })()`);
 T.ok('卡片上：问的话是蓝色手写体，白底细框', look.q === '改动覆盖原文件，还是另存一份？' && /Xiaolai/.test(look.font) && look.color === 'rgb(47, 95, 174)'
   && look.bg === 'rgb(255, 255, 255)' && look.border === '1px', look);
-T.ok('两个选项是文字按钮；下面一小块纸可以手写，「重写」「交回答」在写之前是灰的；左下角是「忽略」（只有一张，没有「全部忽略」）',
-  JSON.stringify(look.opts) === '["覆盖","另存"]' && look.pad && look.hint === '或者用笔写在下面' && JSON.stringify(look.foot) === '["重写（灰）","交回答（灰）"]'
+T.ok('两个选项是文字按钮；下面一小块纸可以手写，「重写」「提交回答」在写之前是灰的；左下角是「忽略」（只有一张，没有「全部忽略」）',
+  JSON.stringify(look.opts) === '["覆盖","另存"]' && look.pad && look.hint === '或者用笔写在下面' && JSON.stringify(look.foot) === '["重写（灰）","提交回答（灰）"]'
   && JSON.stringify(look.left) === '["忽略"]', look);
 let at = await placed('#qcard');
 T.ok('卡片在顶上居中，在左上角那一排下面，不挡它、也不挡右下角那一条', at.ok, at);
@@ -104,7 +104,7 @@ await penScreen(Array.from({ length: 12 }, (_, i) => inPad(0.1 + i * 0.03, 0.3 +
 await T.tool('pen');
 await penScreen(Array.from({ length: 10 }, (_, i) => inPad(0.55 + i * 0.03, 0.7 - i * 0.03)));
 const padState = await js(`({ n: window.__ink.S.qPad.length, send: !document.querySelector('#qcSend').disabled, min: window.__ink.S.qMin })`);
-T.ok('写在那一小块纸上：两笔记下了，「交回答」能点了，卡片没缩', padState.n === 2 && padState.send && !padState.min, padState);
+T.ok('写在那一小块纸上：两笔记下了，「提交回答」能点了，卡片没缩', padState.n === 2 && padState.send && !padState.min, padState);
 T.ok('写在卡片里的不算纸上的笔迹', (await T.strokes()) === n0, await T.strokes());
 await T.shot('2-handwriting.png');
 const w2 = wait(q2.id);
@@ -200,7 +200,7 @@ const en = await js(`({ head: document.querySelector('#qcHead').textContent, lat
   foot: [...document.querySelectorAll('#qcFoot > button')].map((b) => b.textContent), hint: document.querySelector('#qcBody .qc-padhint').textContent,
   left: [...document.querySelectorAll('#qcFoot .qc-left button')].filter((b) => !b.hidden).map((b) => b.textContent),
   q: document.querySelector('#qcBody .qc-q').textContent, opts: [...document.querySelectorAll('#qcBody .qc-opts button')].map((b) => b.textContent) })`);
-T.ok('英文：头一行、「稍后」「重写」「交回答」「忽略」「全部忽略（2 张）」和提示是英文', en.head === 'idea asks you' && en.later === 'Later' && JSON.stringify(en.foot) === '["Clear","Send answer"]'
+T.ok('英文：头一行、「稍后」「重写」「提交回答」「忽略」「全部忽略（2 张）」和提示是英文', en.head === 'idea asks you' && en.later === 'Later' && JSON.stringify(en.foot) === '["Clear","Send answer"]'
   && en.hint === 'Or write your answer below with the pen' && JSON.stringify(en.left) === '["Ignore","Ignore all (2)"]', en);
 T.ok('英文：Claude 写的问题和选项不翻译', en.q === '刷新以后还在吗？' && JSON.stringify(en.opts) === '["选项甲","选项乙"]', en);
 await T.tap('#qcLater');

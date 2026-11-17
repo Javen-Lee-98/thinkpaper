@@ -18,10 +18,12 @@ type World = {
   asked: number // 问话卡片：还要等几次（ask-wait 回 pending）才答；Infinity 是一直不答
   askReply: Record<string, unknown> // ask-wait 答了时回什么
   tabletUp: boolean // 平板开着草稿纸（/bridge/ask 不在线时回 offline）
+  local?: boolean // 平板上开着的是「只在本地」的本子：状态里不带名字，带 targetLocal
   edited: number // 「覆盖还是另存」卡片：还要等几次（edit-wait 回 pending）才选；Infinity 是一直不选
   editReply: Record<string, unknown> // edit-wait 选了时回什么
   editFail: string // /bridge/edit 出错时的话（比如留底没做成）；空的不出错
   remind: string // /bridge/import 带的提醒
+  replyNotes: unknown // /bridge/reply 带的 notes（服务把关时查出来的话）
 }
 
 const HELLO = {
@@ -41,7 +43,7 @@ function world(on: On): World {
     calls: [], queue: [], prompts: [], tools: [], schemas: {}, descs: {}, up: true, runs: [], files: {}, answered: 2, cwd: 'E:\\proj\\idea',
     asked: 2, askReply: { answer: { choice: '另存' }, text: '我点了「另存」。' }, tabletUp: true,
     edited: 2, editReply: { done: true, mode: 'saveas', target: 'E:\\proj\\idea\\清单 v2.md', text: '已经另存了一份：E:\\proj\\idea\\清单 v2.md', chose: '另存' },
-    editFail: '', remind: '',
+    editFail: '', remind: '', replyNotes: undefined,
   }
   on('process.run', (_, e) => {
     w.runs.push([...e.argv])
@@ -55,11 +57,12 @@ function world(on: On): World {
     w.calls.push({ path: url.pathname, body })
     const json = (obj: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(obj) } })
     if (url.pathname === '/bridge/ping') return json({ ok: true, app: 'inkthink' })
-    if (url.pathname === '/bridge/hello' || url.pathname === '/bridge/status') return json(HELLO)
+    if (url.pathname === '/bridge/hello' || url.pathname === '/bridge/status')
+      return json(w.local ? { ...HELLO, isTarget: false, targetLabel: '', targetNb: '', targetLocal: true } : HELLO)
     if (url.pathname === '/bridge/poll') return json(w.queue.length ? { submission: w.queue.shift() } : {})
     if (url.pathname === '/bridge/reply') {
       const items = (body?.items as unknown[]) ?? []
-      return json({ ok: true, count: items.length, page: '草稿本第 1 页（空白草稿纸）', tabletOnline: true })
+      return json({ ok: true, count: items.length, page: '草稿本第 1 页（空白草稿纸）', tabletOnline: true, ...(w.replyNotes === undefined ? {} : { notes: w.replyNotes }) })
     }
     if (url.pathname === '/bridge/scan') return json({ id: 'scan1', pages: 2, text: '【草稿纸·整本】……' })
     if (url.pathname === '/bridge/import') {
@@ -140,7 +143,9 @@ test('平板发来的内容进入这个对话，批注能写回去（VS Code 宿
   expect(Object.keys(item).includes('revises')).toBe(false)
   const say = w.descs.ink_reply
   expect(say.includes('平板在那里标一个圈号，用户点圈号才看到全文，不占纸面')).toBe(true)
-  expect(say.includes('不要自己用 number 标圈号去配页末的 write，write 的 anchor 也不要写 end')).toBe(true)
+  // 阶段 E：长回答从不写在页末，那句说法改成「圈号是平板自己标的」
+  expect(say.includes('圈号是平板自己标的，不用另画 number 去配，write 的 anchor 也不要写 end')).toBe(true)
+  expect(say.includes('页末')).toBe(false)
   expect(say.includes('回一条新的 write（anchor 填那条红笔），旧的那条用户自己擦')).toBe(true)
   expect(say.includes('解释按圈号写在页末')).toBe(false)
   expect(item.anchor.description.includes('write 填所答的那条红笔')).toBe(true)
@@ -149,6 +154,9 @@ test('平板发来的内容进入这个对话，批注能写回去（VS Code 宿
   expect(item.card.type).toBe('number')
   expect(item.card.description.includes('那张卡片的圈号 n')).toBe(true)
   expect(say.includes('回应用 write，card 填 n，q 填你读到的那句红字，这段接在那张卡片最下面，不出新的圈号')).toBe(true)
+  // 纸上的短批注上写了红字（2026-11-14）：交上来时它已收成圈号、变成卡片，回应办法一样（同一个 card）
+  expect(say.includes('用户在纸上的短批注上直接写了红字时，那条短批注交上来时已收成圈号、变成这样一张卡片，回应的办法一样')).toBe(true)
+  expect(item.card.description.includes('长回答卡片（或短批注收成的卡片）')).toBe(true)
   await $.tool.call({ tool: 'mcp__inkpad__ink_reply', submission: 's1', items: [{ type: 'write', card: 2, q: '这句不对', text: '改成：和店家无关' }] })
   const replies = w.calls.filter(c => c.path === '/bridge/reply')
   expect(replies.length).toBe(2)
@@ -197,6 +205,26 @@ test('面板在每个界面都画得出来，VS Code 里有二维码', async ($,
     if (surface !== 'terminal') expect(await ui.find({ type: 'Svg' })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('平板上开着的是只在本地的本子：/ink 和面板说它只在本地，不说发往谁，也没有「改发到这个对话」', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  w.local = true
+  await $.session.start({ cwd: 'E:\\proj\\idea', surface: 'vscode', isInteractive: false })
+  await clock.settle()
+  const out = JSON.stringify(await $.command.run({ command: 'ink', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } }))
+  expect(out).toContain('平板上开着的这一本设成了「只在本地」，不发给 Claude')
+  expect(out).not.toContain('发往「')
+  expect(out).not.toContain('/ink here')
+  const ui = await $.ui.mount({
+    plugin: 'inkpad', component: 'Pane', requestId: 'inkpad', surface: 'vscode',
+    props: { title: '手写草稿纸', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect((await ui.find({ type: 'Text', text: /只在本地/ }))?.text).toBe('平板上开着的这一本只在本地，不发给 Claude')
+  expect(await ui.find({ type: 'Text', text: /发往：/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', label: '这本改发到这个对话' })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('服务没开时：开对话不自动启动，/ink 才启动', { options: { server_command: 'E:\\proj\\idea\\inkthink\\.venv\\Scripts\\python.exe E:\\proj\\idea\\inkthink\\launch.py' } }, async ($, on) => {
@@ -437,11 +465,34 @@ test('确认字迹最多等约 45 秒：没答就先按自己的理解继续', a
   await clock.settle()
   const ran = await $.tool.call({ tool: 'mcp__inkpad__ink_confirm', submission: 's1', questions: [{ anchor: 'g3', guess: 'p' }] })
   expect(String(ran.result)).toContain('用户暂时没有回答')
+  // 规则瘦身（2026-11-16）：等多久、等不到怎么办从固定说明挪到这句返回里，只在等不到时出现
+  expect(String(ran.result).startsWith('等了约 45 秒，')).toBe(true)
+  expect(String(ran.result)).toContain('先按你的理解继续，并在回复里标明哪处是推测的')
+  expect(String(ran.result)).toContain('【草稿纸·确认】')
   expect(w.calls.filter(c => c.path === '/bridge/confirm-wait').map(c => c.body?.wait)).toEqual([25, 20])
   // 说明里写的是实际等多久（以前写「最多约 100 秒」，实际 25 + 20 秒）
   const confirmSay = w.descs.ink_confirm ?? ''
   expect(confirmSay.includes('最多约 45 秒')).toBe(true)
   expect(confirmSay.includes('100 秒')).toBe(false)
+})
+
+test('写回时服务查出来的话（短批注收成圈号、退回的批改符号、缺的读法）一条一行接在工具结果后面', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  await $.session.start({ cwd: 'E:\\proj\\idea', surface: 'vscode', isInteractive: false })
+  await clock.settle()
+  w.replyNotes = ['第 1 条 cross 没写上：缺一句 text（为什么错）。', 7, '', '还缺 g2 的读法（红笔那几组和这次回应到的组都要交）：各补一条 read（anchor 填组号，text 照写的原样转写，不翻译、不解释）。']
+  const ran = await $.tool.call({ tool: 'mcp__inkpad__ink_reply', submission: 's1', items: [{ type: 'cross', anchor: 'g1' }, { type: 'tick', anchor: 'g1' }] })
+  expect(ran.result).toBe('已写到草稿纸：草稿本第 1 页（空白草稿纸），共 2 条\n第 1 条 cross 没写上：缺一句 text（为什么错）。\n还缺 g2 的读法（红笔那几组和这次回应到的组都要交）：各补一条 read（anchor 填组号，text 照写的原样转写，不翻译、不解释）。')
+  w.replyNotes = 'not a list' // 服务给的不对：不接
+  expect((await $.tool.call({ tool: 'mcp__inkpad__ink_reply', submission: 's1', items: [{ type: 'tick', anchor: 'g1' }] })).result).toBe('已写到草稿纸：草稿本第 1 页（空白草稿纸），共 1 条')
+  const say = w.descs.ink_reply ?? ''
+  expect(say.includes('写长了草稿纸会把它收成圈号卡片，工具结果里会说')).toBe(true)
+  expect(say.includes('漏了的组，工具结果里会点名')).toBe(true)
+  const type = w.schemas.ink_reply.properties.items.items.properties.type.description as string
+  expect(type.includes('cross、strike、wavy 不带 text 的那一条会被退回、不画')).toBe(true)
+  expect(type.includes('不带 text 的不画')).toBe(false)
+  expect((w.descs.ink_edit ?? '').includes('拿回来要盖掉现在这份时，也算改文件，照样先调它')).toBe(true)
 })
 
 test('问话卡片：发问题、等到用户点的选项；说明写清什么时候用、没答就停手等着', async ($, on) => {

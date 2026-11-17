@@ -1,5 +1,5 @@
 // 导入 Zotero 里的文献：导入面板的「Zotero」一栏，看最近添加和分类、搜标题、点一条导入成一本书；再点一次不多出一本；
-// 「检查」时告诉 Claude 这是哪篇文献。Zotero 用这里起的一个假的本机接口代替，不连真的 Zotero。
+// 点「AI」时告诉 Claude 这是哪篇文献。Zotero 用这里起的一个假的本机接口代替，不连真的 Zotero。
 // boot 起的服务不带配置（Zotero 的地址只在启动时从配置里读，不配就是真 Zotero 的端口），所以这里另起一个带配置的服务，
 // 页面只开在这个服务上；boot 的浏览器和小工具照用，boot 自己那个服务闲着不用。
 // 跑法：node tests/browser/zotero.mjs [临时目录]；有一项不对退出码 1。
@@ -16,7 +16,7 @@ const js = T.evalJS, Z = join(T.ROOT, 'z'), DATA = join(Z, 'data'), BOOKS = join
 for (const d of [DATA, BOOKS, LIB]) mkdirSync(d, { recursive: true });
 // 文献的 PDF（两页 A4），放在「Zotero 的文件夹」里
 const PDF = join(LIB, 'Li 等 - 2022 - Pythagorean theorem.pdf'), TITLE = 'A short proof of the Pythagorean theorem', BOOK = `Li 等 - 2022 - ${TITLE}`;
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 doc=fitz.open()
 for t in ("A short proof of the Pythagorean theorem", "Page two"):
     p=doc.new_page(width=595,height=842); p.insert_text((72,100),t,fontsize=20)
@@ -66,7 +66,7 @@ const api = async (path) => (await fetch(B + path, { headers: { 'X-Access': code
 const hello = () => fetch(`${B}/bridge/hello`, { method: 'POST', body: JSON.stringify({ sid: 'Z1', label: 'idea', cwd: LIB }) }).catch(() => {});
 await hello();
 const keep = setInterval(hello, 5000);
-await T.cdp('Page.navigate', { url: `${B}/?k=${code}&lang=zh&notour=1` });
+await T.cdp('Page.navigate', { url: `${B}/?k=${code}&lang=zh` });
 await T.ready();
 await T.cdp('Page.bringToFront');
 
@@ -152,7 +152,7 @@ const src4 = JSON.parse(readFileSync(join(BOOKS, '_sources.json'), 'utf8'))[`${B
 T.ok('电脑上记着这是 Zotero 的哪一篇、原文件在哪', Boolean(src4.zotero) && same([src4.zotero.item, src4.zotero.att, src4.zotero.title, src4.zotero.creators, src4.zotero.year, src4.zotero.type], ['K1', 'A1', TITLE, 'Li 等', '2022', '期刊文章'])
   && src4.src.toLowerCase() === realpathSync.native(PDF).toLowerCase(), src4); // 临时目录可能是 ABCDEF~1 这样的 8.3 短路径：展开了再比
 
-// 5. 在上面写一笔点「检查」：交上去的消息里说了是哪篇文献
+// 5. 在上面写一笔点「AI」：交上去的消息里说了是哪篇文献
 await T.pen(T.line(120, 300, 300));
 await tap('#check');
 let sub = null;

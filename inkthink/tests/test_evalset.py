@@ -100,6 +100,19 @@ class EvalsetTest(unittest.TestCase):
             r = evalset.score(out)
             self.assertEqual((r["n"], r["edits"], r["cer"]), (1, 1, 0.25))
 
+    def test_score_by_language_and_rerun(self):
+        """分数按标准答案的语种分开列；reco 用现在的识别（先判断语种）重新认一遍。"""
+        self.assertEqual([evalset.lang_of(t) for t in ("今天", "coffee", "买 coffee", "3.5")], ["中文", "英文", "中英混写", "符号"])
+        with tempfile.TemporaryDirectory() as tmp:
+            data, proj = fake_data(tmp)
+            evalset.build(data, [str(proj)], n=5, reco=fake_reco)
+            out = data / "evalset"
+            r = evalset.score(out, confirmed=True)
+            self.assertEqual((r["by"]["中文"]["n"], r["by"]["英文"]["n"], r["by"]["中英混写"]["n"]), (2, 0, 0))
+            hyp, langs = evalset.run_reco(data, out, reco=lambda gs: {gid: {"text": ["平均速度"], "lang": "zh"} for gid, _ in gs})
+            self.assertEqual((len(hyp), set(langs.values())), (2, {"zh"}))
+            self.assertEqual(evalset.score(out, confirmed=True, hyp=hyp)["edits"], 4)  # 「这步对吗」全错 4 个字，另一组全对
+
     def test_serve_saves_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             data, proj = fake_data(tmp)

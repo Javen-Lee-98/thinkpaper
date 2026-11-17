@@ -1,4 +1,5 @@
-"""在服务器上处理草稿纸页面：笔迹分组（规则与前端 computeGroups 一致），把任意一页连同笔迹画成图。
+"""在服务器上处理草稿纸页面：笔迹分组（_cluster；和平板 app.js 的 computeGroups 是同一套规则，tests/browser/grouping.mjs 拿
+tests/fixtures/grouping.json 比两边），把任意一页连同笔迹画成图。
 
 用于「整本检测」和「确认字迹」：平板没开着时，也能看到任何一页写了什么、某组笔迹在哪。
 """
@@ -9,9 +10,12 @@ import threading
 from pathlib import Path
 
 try:
-    import fitz
+    import pymupdf as fitz
 except ImportError:
-    fitz = None
+    try:
+        import fitz  # 1.24.3 以前的 PyMuPDF 只有这个旧名字
+    except ImportError:
+        fitz = None
 
 # PyMuPDF 不能在几个线程里同时用（会让整个进程崩掉）：服务里所有用到它的地方都先拿这把锁
 FITZ_LOCK = threading.RLock()
@@ -26,6 +30,14 @@ FIG_NAME = re.compile(r"^[0-9a-f]{16}\.png$")  # 图的文件名只认服务自�
 PAGE_W, MARGIN_W = 1000, 380
 TW = PAGE_W + MARGIN_W
 GROUP_GAP_MS, GROUP_DIST = 1800, 60
+# 分组的后两步（2026-11-14，见 _cluster）。量过的依据记在 _join_line、_late_target 的说明里。
+# 平板 static/app.js 里有同名的一组常数和同样的判据：改一边要两边一起改（tests/browser/grouping.mjs 会报两边不一致）
+LINE_PAUSE_MS = 15000  # 同一行接着写：前后两组之间停顿不到这么久
+LINE_GAP = 0.6         # 同一行接着写：横向间距不到这么多个字高
+LINE_RATIO = 2.2       # 两组的字高相差不到这么多倍（大字旁边的小字不并）
+TALL, LONG = 1.5, 2.5  # 一组里有高过 TALL 个字高的一笔（括号、竖线）或长过 LONG 个字高的直线（横线、箭头杆）：不当一行字
+LATE_SMALL = 0.6       # 回头补的小笔画：一两笔、不超过这么多个字高
+LATE_NEAR = 0.25       # 回头补的小笔画：离那组里某一笔不到这么多个字高
 INK = (0.106, 0.106, 0.106)
 RED = (0.824, 0.235, 0.18)
 AI = (0.184, 0.373, 0.682)
@@ -55,7 +67,8 @@ def union(a, b):
     return [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
 
 
-def _cluster(strokes):
+def _by_time(strokes):
+    """第一步（原来的规则）：按落笔先后，同色、和上一组相隔不到 GROUP_GAP_MS、相距不到 GROUP_DIST 的笔接进上一组。"""
     ss = sorted((s for s in strokes if s.get("pts")), key=lambda s: s["t0"])
     groups = []
     g = None
@@ -67,6 +80,113 @@ def _cluster(strokes):
             g["strokes"].append(s)
         else:
             g = {"t0": s["t0"], "t1": t1, "bbox": bb, "strokes": [s], "c": c}
+            groups.append(g)
+    for g in groups:
+        g["tw"] = g["t1"]  # 这组「写」完的时刻；回头补的笔画不算（书写过程按它说停顿和写了多久）
+    return groups
+
+
+def char_h(strokes):
+    """一组笔迹的字高：较高那几笔（第 75 百分位）的高度 ×1.3，和 inksheet 的算法一样。不到 3 笔说不准，返回 None。"""
+    if len(strokes) < 3:
+        return None
+    hs = sorted(stroke_box(s)[3] - stroke_box(s)[1] for s in strokes)
+    return max(8.0, hs[int(len(hs) * 0.75)]) * 1.3
+
+
+def _straight(s):
+    """这一笔差不多是直的（走过的路不到外框对角线的 1.25 倍）。"""
+    p = s["pts"]
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(p, p[1:]))
+    b = stroke_box(s)
+    return length <= 1.25 * math.hypot(b[2] - b[0], b[3] - b[1])
+
+
+def _one_line_of_text(g, ch):
+    """按字高 ch 看，这组像一行字：没有竖得很长的一笔（括号、竖线）、没有很长的直线（横线、箭头杆），整组不比一行高。"""
+    for s in g["strokes"]:
+        b = stroke_box(s)
+        if b[3] - b[1] > TALL * ch or (b[2] - b[0] > LONG * ch and _straight(s)):
+            return False
+    return g["bbox"][3] - g["bbox"][1] <= 1.6 * ch
+
+
+def _join_line(a, b):
+    """第二步的判据：b 是不是 a 在同一行上接着写的（b 紧接在 a 后面写）。都要满足：
+    同色、停顿不到 LINE_PAUSE_MS；两组都像一行字、字高相差不到 LINE_RATIO 倍；竖直方向对齐（重叠过半、中线差不到半个字高）；
+    b 在 a 的右边（起点过了 a 的一半）、横向间距不到 LINE_GAP 个字高。
+    依据（2026-11-14，在 41 页真实笔迹的副本上量的）：时间上相邻、同一行的组，间距绝大多数不到半个字高，停顿多在 15 秒以内；
+    这样并出 61 组，逐个看过图，没有把两行、两种颜色、括号和字并在一起的。"""
+    if a["c"] != b["c"] or b["t0"] - a["t1"] >= LINE_PAUSE_MS:
+        return False
+    ha, hb = char_h(a["strokes"]), char_h(b["strokes"])
+    if ha is None and hb is None:
+        return False
+    if ha and hb and max(ha, hb) > LINE_RATIO * min(ha, hb):
+        return False
+    ch = max(h for h in (ha, hb) if h)
+    if not (_one_line_of_text(a, ch) and _one_line_of_text(b, ch)):
+        return False
+    A, B = a["bbox"], b["bbox"]
+    if min(A[3], B[3]) - max(A[1], B[1]) < 0.5 * min(A[3] - A[1], B[3] - B[1]):
+        return False
+    if abs((A[1] + A[3]) / 2 - (B[1] + B[3]) / 2) > 0.5 * ch:
+        return False
+    return B[0] - A[2] <= LINE_GAP * ch and B[0] >= A[0] + 0.5 * (A[2] - A[0])
+
+
+def _late_target(g, earlier):
+    """第三步的判据：g 是不是回头补在之前某一组上的小笔画（i 的点、t 的横、漏写的一点一横）。返回那一组，不是就 None。
+    要求：g 只有一两笔、不超过 LATE_SMALL 个字高；那一组同色、像一行字；g 的中心落在那组的框里（上方可以高出半个字高，
+    给 i 的点）；离那组里最近的一笔不到 LATE_NEAR 个字高。几组都合适时取最近的。不看隔了多久。"""
+    if len(g["strokes"]) > 2:
+        return None
+    b = g["bbox"]
+    cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+    best = None
+    for t in earlier:
+        ch = char_h(t["strokes"])
+        if t["c"] != g["c"] or ch is None or max(b[2] - b[0], b[3] - b[1]) > LATE_SMALL * ch or not _one_line_of_text(t, ch):
+            continue
+        T = t["bbox"]
+        if not (T[0] <= cx <= T[2] and T[1] - 0.5 * ch <= cy <= T[3]):
+            continue
+        d = min(box_dist(b, stroke_box(s)) for s in t["strokes"])
+        if d <= LATE_NEAR * ch and (best is None or d < best[0]):
+            best = (d, t)
+    return best[1] if best else None
+
+
+def _absorb(g, h, late=False):
+    g["bbox"] = union(g["bbox"], h["bbox"])
+    g["t1"] = max(g["t1"], h["t1"])
+    g["strokes"].extend(h["strokes"])
+    if late:
+        g["late"] = g.get("late", 0) + len(h["strokes"])
+        g["lateAt"] = max(g.get("lateAt") or 0, h["t0"])
+    else:
+        g["tw"] = max(g["tw"], h["tw"])
+
+
+def _cluster(strokes):
+    """笔迹分组，三步：
+    1. 按时间：同色、相隔不到 GROUP_GAP_MS、相距不到 GROUP_DIST 的笔归一组（原来的规则）；
+    2. 同一行接着写：写到一半停了一会儿的词、一句话，并成一组（_join_line）；
+    3. 回头补的小笔画并回它压着的那一组（_late_target），这组记下 late（补了几笔）、lateAt（最后一次补的时刻）。
+    组按第一笔的时刻排，编号 g1、g2…… 照这个顺序。擦掉的笔迹也参加分组（编号不因擦除而变）。
+    平板 app.js 的 computeGroups 一步步照这里做（groupsByTime、joinsLine、lateTarget），同一页两边分出的组号和每组的笔迹一样。"""
+    out = []
+    for g in _by_time(strokes):
+        if out and _join_line(out[-1], g):
+            _absorb(out[-1], g)
+        else:
+            out.append(g)
+    groups = []
+    for g in out:
+        t = _late_target(g, groups)
+        if t is not None:
+            _absorb(t, g, late=True)
+        else:
             groups.append(g)
     return groups
 
@@ -81,19 +201,55 @@ def group_strokes(strokes):
     return out
 
 
+def sent_groups(groups, page):
+    """交上来的分组（平板发来的，或服务端算的）→ {组编号: 这组没擦掉的笔迹}，只要和服务器上存的这一页对得上的组。
+    带笔迹 id（ids）的按 id 取：这些笔都在、合起来的外框和交上来的差不到 3 才算——两边规则现在一样，但平板上可能还开着没刷新的旧页面
+    （分组只有第一步），按 id 取就不会对错组；
+    不带 id 的（服务端自己算的）按服务端分组的编号和外框对。对不上多半是平板上的这一页还没存到服务器。"""
+    by_id = {s.get("id"): s for s in ink(page) if s.get("pts")}
+    mine = boxes = None
+    out = {}
+    for g in groups:
+        gid, want = g.get("id"), g.get("bbox") or []
+        if g.get("ids"):
+            ss = [by_id.get(i) for i in g["ids"]]
+            if not ss or any(s is None for s in ss):
+                continue
+            bb = stroke_box(ss[0])
+            for s in ss[1:]:
+                bb = union(bb, stroke_box(s))
+            if any(abs(round(a) - b) > 3 for a, b in zip(bb, want)):
+                continue
+            vis = [s for s in ss if not s.get("erasedAt")]
+        else:
+            if mine is None:
+                mine = dict(group_strokes(ink(page)))
+                boxes = {x["id"]: x["bbox"] for x in compute_groups(ink(page))}
+            if gid not in mine or any(abs(a - b) > 3 for a, b in zip(boxes.get(gid, []), want)):
+                continue
+            vis = mine[gid]
+        if vis:
+            out[gid] = vis
+    return out
+
+
 def compute_groups(strokes):
-    """时间相近、位置相近、颜色相同的笔迹归为一组；返回的字段与前端发来的 groups 一致。"""
+    """笔迹分组（_cluster）；返回的字段与前端发来的 groups 一致。有回头补的笔画的组另带 late（补了几笔）、lateAt（最后一次补的
+    时刻）、tw（不算补的、写完的时刻）；t1 是连补的笔画在内最后一笔的时刻（「这组有没有新东西」按它算）。"""
     groups = _cluster(strokes)
     out = []
     for i, gr in enumerate(groups):
         erased = [s for s in gr["strokes"] if s.get("erasedAt")]
-        out.append({
+        g = {
             "id": f"g{i + 1}", "t0": gr["t0"], "t1": gr["t1"], "bbox": [round(v) for v in gr["bbox"]],
             "n": len(gr["strokes"]), "erased": len(erased),
             "erasedAt": max((s["erasedAt"] for s in erased), default=None),
-            "revisit": any(o["t1"] < gr["t0"] - 30000 and box_dist(o["bbox"], gr["bbox"]) < 24 for o in groups[:i]),
+            "revisit": any(o["tw"] < gr["t0"] - 30000 and box_dist(o["bbox"], gr["bbox"]) < 24 for o in groups[:i]),
             "red": gr["c"] == "r",
-        })
+        }
+        if gr.get("late"):
+            g.update(late=gr["late"], lateAt=gr["lateAt"], tw=gr["tw"])
+        out.append(g)
     return out
 
 
@@ -117,14 +273,98 @@ def widths(page):
     return w, w + MARGIN_W
 
 
-def paper_rect(page, base_h):
-    """整张纸的范围 [x0, y0, x1, y1]（页面坐标，x0、y0 可能是负数）。"""
+def paper_rect(page, base_h, blank=False):
+    """整张纸的范围 [x0, y0, x1, y1]（页面坐标，x0、y0 可能是负数）。blank：空白本子（见 blank_rect）。"""
+    if blank:
+        return blank_rect(page, base_h)
     ox, oy = origin(page)
     return [-ox, -oy, widths(page)[1], max(base_h, page.get("h") or 0)]
 
 
-def content_origin(page):
-    """有内容的范围的左上角：向左、向上扩出来的纸上写了东西才往负方向扩，否则是 (0, 0)。"""
+# -- 空白本子（草稿本、自己新建的本子）的图（阶段 E，2026-11-15）：平板上阶段 D1 起整屏是纸，没有右边那一栏的底色和分隔线，
+#    原来那一栏的地方也是纸（数据不变：纸照旧宽 PAGE_W + MARGIN_W，以前排在那一栏里的旧批注留在原处，x 大于 1000）。
+#    服务端画的图跟着这样：图里就是纸；范围把这一页上所有的东西都包进去——笔迹、Claude 的批注、圈号、小蓝点、图和公式，
+#    万一有东西在纸外面也把纸扩到包住它。书页、「Claude 推送」的页不变（有批注时右边照旧一栏），见 _draw_page。
+
+def _path_box(d):
+    """批注路径（只有绝对坐标的 M / L / Q / C，数字两两成对）的外框；读不出来返回 None。"""
+    nums = re.findall(r"-?\d*\.?\d+(?:[eE][-+]?\d+)?", str(d or ""))
+    xs, ys = [float(v) for v in nums[0::2]], [float(v) for v in nums[1::2]]
+    n = min(len(xs), len(ys))
+    return [min(xs[:n]), min(ys[:n]), max(xs[:n]), max(ys[:n])] if n else None
+
+
+def _box4(b):
+    return [float(v) for v in b] if isinstance(b, (list, tuple)) and len(b) == 4 and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in b) else None
+
+
+def ai_box(it, struck="skip"):
+    """一条 Claude 的东西在纸上画出来占的框（页面坐标），和 _draw_page 画的一样：长回答只有圈号；收成小蓝点的短批注
+    在给 Claude 的图、缩略图里只有那个点（struck="faded" 的往来稿照旧写字）；别的是字（lay）、整块（hit）、图（fig）、
+    示意图里的字（labels）和线（paths）的并。什么都没有返回 None。"""
+    at = badge_at(it)
+    if it.get("type") == "write":
+        return [at[0] - BADGE_R, at[1] - BADGE_R, at[0] + BADGE_R, at[1] + BADGE_R] if at else None
+    dot = dot_at(it)
+    if dot and struck != "faded":
+        return [dot[0] - DOT_R, dot[1] - DOT_R, dot[0] + DOT_R, dot[1] + DOT_R]
+    boxes = []
+    lay = it.get("lay")
+    if isinstance(lay, dict) and all(isinstance(lay.get(k), (int, float)) for k in ("x", "y")):
+        h = lay.get("h") or (len(lay.get("lines") or []) * (lay.get("lh") or 0) + (lay.get("fs") or 0) * 0.3)
+        boxes.append([lay["x"], lay["y"], lay["x"] + (lay.get("w") or 0), lay["y"] + (h or 0)])
+    hit = _box4(it.get("hit"))
+    if hit:
+        boxes.append(hit)
+    fig = it.get("fig")
+    if isinstance(fig, dict) and all(isinstance(fig.get(k), (int, float)) for k in ("x", "y", "w", "h")):
+        boxes.append([fig["x"], fig["y"], fig["x"] + fig["w"], fig["y"] + fig["h"]])
+    for lb in it.get("labels") or []:
+        if isinstance(lb, dict) and all(isinstance(lb.get(k), (int, float)) for k in ("x", "y")):
+            boxes.append([lb["x"], lb["y"], lb["x"] + (lb.get("w") or 0), lb["y"] + (lb.get("fs") or 0)])
+    for p in it.get("paths") or []:
+        b = _path_box(p.get("d")) if isinstance(p, dict) else None
+        if b:
+            boxes.append(b)
+    if not boxes:
+        return None
+    out = boxes[0]
+    for b in boxes[1:]:
+        out = union(out, b)
+    return out
+
+
+def ai_shown(page, struck="skip"):
+    """这一页图里画出来的 Claude 的东西：没擦掉、没落空；横划掉的只在往来稿（struck="faded"）里画（画淡）。和 _draw_page 挑的一样。"""
+    live = live_ids(page)
+    return [it for it in page.get("ai") or [] if isinstance(it, dict) and not it.get("erasedAt") and not ai_gone(it, live)
+            and (struck == "faded" or not it.get("dismissed"))]
+
+
+def blank_rect(page, base_h=0, struck="skip"):
+    """空白本子这一页的图画多大 [x0, y0, x1, y1]（页面坐标）：整张纸（PAGE_W + MARGIN_W 宽，原来那一栏也是纸），
+    有东西出了纸（不该有：平板写到纸外会把纸扩出去）就再扩到包住它，四周留 30。base_h：纸的底图高度（只管下边）。"""
+    ox, oy = origin(page)
+    r = [-ox, -oy, widths(page)[1], max(base_h, page.get("h") or 0)]
+    boxes = [stroke_box(s) for s in ink(page) if s.get("pts") and not s.get("erasedAt")]
+    boxes += [b for b in (ai_box(it, struck) for it in ai_shown(page, struck)) if b]
+    for b in boxes:
+        r = [min(r[0], b[0] - 30), min(r[1], b[1] - 30), max(r[2], b[2] + 30), max(r[3], b[3] + 30)]
+    return r
+
+
+def content_origin(page, blank=False):
+    """有内容的范围的左上角：向左、向上扩出来的纸上写了东西才往负方向扩，否则是 (0, 0)。
+    blank（空白本子）：Claude 的东西（批注、圈号、图……）也算，免得放在笔迹左边、上边的批注被裁掉。"""
+    if blank:
+        r = blank_rect(page)  # 只用左上角，和纸的高度无关
+        left = top = 0.0
+        boxes = [stroke_box(s) for s in ink(page) if s.get("pts") and not s.get("erasedAt")]
+        boxes += [b for b in (ai_box(it) for it in ai_shown(page)) if b]
+        for b in boxes:
+            left, top = min(left, b[0] - 30), min(top, b[1] - 30)
+        return max(r[0], left), max(r[1], top)
     ox, oy = origin(page)
     left = top = 0.0
     for s in ink(page):
@@ -219,9 +459,44 @@ def marks_of(it):
     return [m for m in it.get("marks") or [] if isinstance(m, dict) and isinstance(m.get("pts"), list) and m["pts"]]
 
 
+def dot_at(it):
+    """空白本子里收成小蓝点的短批注（阶段 D1，平板 app.js 的 isDot）：小蓝点的圆心 (x, y)；展开着的、不是短批注的为 None。
+    收起的状态记在那条批注的 dot 里（{at, t, why, by?}），lay 照旧是那几行字在纸上的排版。"""
+    d = it.get("dot") if it.get("type") in ("note", "question") else None
+    at = d.get("at") if isinstance(d, dict) else None
+    if isinstance(at, list) and len(at) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in at):
+        return float(at[0]), float(at[1])
+    return None
+
+
+DOT_R = 7  # 小蓝点的半径（页面单位），和平板 app.js 的 DOT_R 一样
+
+
+def dot_items(page):
+    """这一页收成小蓝点的短批注（纸上看得见的：没擦掉、没横划掉、指着的字还在、有字），按先后。"""
+    live = live_ids(page)
+    return [a for a in page.get("ai") or [] if isinstance(a, dict) and dot_at(a)
+            and not a.get("erasedAt") and not a.get("dismissed") and not ai_gone(a, live) and str(a.get("text") or "").strip()]
+
+
+def dot_notes(page):
+    """这一页收成小蓝点的短批注的原话，按先后。整本消息里说明图里那几个点是什么。"""
+    return [str(a.get("text")).strip() for a in dot_items(page)]
+
+
+def unsent_on_page(page):
+    """这一页上有还没交的红字、图里却看不到的：(长回答卡片的张数, 小蓝点的个数)。
+    服务端画的图（整本检测）、平板交的快照图里，长回答只画圈号、收起的短批注只画小蓝点，写在卡片上、浮出来的小卡片上的红字都不画
+    （阶段 E 查清的；整本检测另把长回答的卡片连同红字各画一张图交上去，见 server.card_images）。小蓝点要「指着的字还在」才算，
+    和平板点「AI」时把它收成卡片的条件一样（app.js 的 followupsToCards）。"""
+    cards = sum(1 for a in page.get("ai") or [] if isinstance(a, dict) and a.get("type") == "write" and unsent_marks(a))
+    return cards, sum(1 for a in dot_items(page) if unsent_marks(a))
+
+
 def unsent_marks(it):
-    """还没交给 Claude 的红字（没有 req、没擦掉）：平板上圈号带红点的就是这些；有它们的页算「有新东西」。"""
-    if it.get("type") != "write" or it.get("erasedAt") or it.get("dismissed") or not badge_at(it):
+    """还没交给 Claude 的红字（没有 req、没擦掉）：平板上圈号带红点的就是这些；有它们的页算「有新东西」。
+    收成小蓝点的短批注浮出来时上面写的红字也算（平板点「AI」时把它变成卡片再交，见 app.js 的 dotToCard）。"""
+    if it.get("erasedAt") or it.get("dismissed") or not (badge_at(it) if it.get("type") == "write" else dot_at(it)):
         return []
     return [m for m in marks_of(it) if not m.get("erasedAt") and not m.get("req")]
 
@@ -239,6 +514,15 @@ def cards_to_send(page):
     """这一页上要连同红字一起交的卡片，按圈号排：[(长回答, [红字])]。"""
     out = [(a, card_marks(a)) for a in page.get("ai") or [] if isinstance(a, dict)]
     return sorted([(a, ms) for a, ms in out if ms], key=lambda x: x[0].get("n") or 0)
+
+
+def from_note(it):
+    """这张卡片是不是纸上的短批注收成的（2026-11-14）：用户在一条短批注上写了红字，平板点「AI」交稿时把它收成了圈号，
+    原来那条批注原样留在 from 里（平板 app.js 的 noteToCard）。卡片的图照旧按 sheet 画，消息里说明它原来是短批注。"""
+    if not isinstance(it, dict):
+        return False
+    f = it.get("from")
+    return it.get("type") == "write" and isinstance(f, dict) and f.get("type") in ("note", "question")
 
 
 def _rough_sheet(it):
@@ -339,8 +623,21 @@ def group_on(page, bbox, base_h, has_bg):
     return "paper"
 
 
-def content_extent(page, base_h):
-    """有内容的范围（右边界、下边界）：页边没写东西就不要页边，加长出来的空白不要。"""
+def content_extent(page, base_h, blank=False):
+    """有内容的范围（右边界、下边界）：页边没写东西就不要页边，加长出来的空白不要。
+    blank（空白本子）：没有页边那一栏，右边到最右的东西为止（以前排在那一栏位置的旧批注也包进来），不再一写过 PAGE_W 就带上整栏；
+    Claude 的东西按它画出来占的地方算（ai_box：批注、圈号、小蓝点、图、公式、示意图）。"""
+    if blank:
+        r = blank_rect(page, base_h)
+        right, bottom = PAGE_W, base_h
+        for s in ink(page):
+            if s.get("pts") and not s.get("erasedAt"):
+                b = stroke_box(s)
+                right, bottom = max(right, b[2] + 30), max(bottom, b[3] + 60)
+        for b in (ai_box(it) for it in ai_shown(page)):
+            if b:
+                right, bottom = max(right, b[2] + 10), max(bottom, b[3] + 40)
+        return min(right, r[2]), min(bottom, r[3])
     w, tw = widths(page)
     right, bottom = PAGE_W, base_h
     for s in ink(page):
@@ -350,10 +647,13 @@ def content_extent(page, base_h):
             right = max(right, min(tw, b[2] + 30))
     live = live_ids(page)
     for it in page.get("ai") or []:
-        lay, at = it.get("lay"), badge_at(it)
+        lay, at, dot = it.get("lay"), badge_at(it), dot_at(it)
         if at and not it.get("erasedAt"):  # 长回答的圈号
             bottom = max(bottom, at[1] + BADGE_R + 40)
             right = max(right, min(tw, at[0] + BADGE_R + 10))
+        elif dot and not it.get("erasedAt") and not it.get("dismissed") and not ai_gone(it, live):  # 收成小蓝点的短批注：图里只有那个点
+            bottom = max(bottom, dot[1] + DOT_R + 40)
+            right = max(right, min(tw, dot[0] + DOT_R + 10))
         elif lay and not it.get("dismissed") and not ai_gone(it, live):
             bottom = max(bottom, lay["y"] + lay.get("h", 0) + 40)
             right = max(right, min(tw, lay["x"] + lay.get("w", 0) + 10))
@@ -544,23 +844,33 @@ def _answer_pages(doc, answers, no, width):
                 put(ln, ANSWER_FS - 2, Q_COLOR)
 
 
-def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip"):
+def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip", blank=False):
     """在 doc 里新开一页，画底图（书页/推送页）、笔迹（黑/红）、Claude 写回的批注；返回 (pg, P, R, ox, oy)。
 
     ai=False：只画我自己写的（原稿）。struck：横划掉的蓝字怎么画——"skip" 不画（发给 Claude 的图、缩略图，照旧），
     "faded" 画淡（导出的往来稿，同平板）。橡皮擦掉的蓝字（erasedAt）一律不画。
+    blank：空白本子（草稿本、自己新建的本子）——整页是纸，没有右边那一栏的底色和分隔线；这一页的大小是 blank_rect
+    （整张纸，有东西出了纸就扩到包住它）。原稿和往来稿用同一个大小（都按往来稿里画的东西算），两份的页对得齐。
+    返回的 ox、oy：页面坐标的原点在这一页 PDF 里的位置（页面坐标 + (ox, oy) = PDF 坐标）。
     """
     h = max(base_h, page.get("h") or 0)
     w, tw = widths(page)
-    ox, oy = origin(page)
+    if blank:
+        x0, y0, x1, y1 = blank_rect(page, base_h, "faded" if struck == "faded" else "skip")
+        ox, oy = -x0, -y0
+    else:
+        ox, oy = origin(page)
+        x1, y1 = tw, h
     P = lambda x, y: fitz.Point(x + ox, y + oy)  # noqa: E731 - 页面坐标 → PDF 坐标（纸可能向左、向上扩过）
     R = lambda x0, y0, x1, y1: fitz.Rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy)  # noqa: E731
-    pg = doc.new_page(width=tw + ox, height=h + oy)
+    pg = doc.new_page(width=x1 + ox, height=y1 + oy)
     pg.draw_rect(pg.rect, color=None, fill=(1, 1, 1))
-    pg.draw_rect(R(w, -oy, tw, h), color=None, fill=(0.98, 0.973, 0.953))
+    if not blank:  # 书页、推送页：右边一栏（平板上也只在这两种页上有）
+        pg.draw_rect(R(w, -oy, tw, h), color=None, fill=(0.98, 0.973, 0.953))
     if bg:  # base_h 是转后的高度；PyMuPDF 的 rotate 正角是逆时针
         pg.insert_image(R(0, 0, PAGE_W, base_h), stream=bg, rotate=(360 - (page.get("rot") or 0)) % 360)
-    pg.draw_line(P(w, -oy), P(w, h), color=(0.89, 0.86, 0.8), width=1.5)
+    if not blank:
+        pg.draw_line(P(w, -oy), P(w, h), color=(0.89, 0.86, 0.8), width=1.5)
 
     for s in ink(page):
         if not s.get("pts") or s.get("erasedAt"):
@@ -595,6 +905,13 @@ def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip"):
             if at:
                 draw_badge(pg, P(*at), str(it.get("n") or ""), col, bool(it.get("seen")), op)
             continue
+        dot = dot_at(it)
+        if dot and struck != "faded":  # 收成小蓝点的短批注：给 Claude 的图、缩略图里和平板上一样只画那个点；往来稿照旧写字（在 lay 那里）
+            shape = pg.new_shape()
+            shape.draw_circle(P(*dot), DOT_R)
+            shape.finish(color=None, fill=col, fill_opacity=op)
+            shape.commit()
+            continue
         fig = it.get("fig")
         if fig and FIG_DIR and FIG_NAME.match(str(it.get("img") or "")) and (FIG_DIR / it["img"]).is_file():  # Claude 放上来的图
             pg.insert_image(R(fig["x"], fig["y"], fig["x"] + fig["w"], fig["y"] + fig["h"]), filename=str(FIG_DIR / it["img"]))
@@ -617,14 +934,16 @@ def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip"):
     return pg, P, R, ox, oy
 
 
-def _render_page(page, out_png, base_h, bg=None, label_groups=(), scale=0.8, clip=None, mark=None):
+def _render_page(page, out_png, base_h, bg=None, label_groups=(), scale=0.8, clip=None, mark=None, blank=False):
     """把一页画成 PNG：底图（书页/推送页）、笔迹（黑/红）、Claude 写回的批注、笔迹分组编号。
 
     page：页面 JSON（strokes、ai、h、rot）；base_h：底图高度（页面坐标；页面转过时为转后的高度）；bg：底图字节；
-    clip：只画 [x0,y0,x1,y1] 这一块（页面坐标）；mark：在这个框外画一圈虚线。
+    clip：只画 [x0,y0,x1,y1] 这一块（页面坐标）；mark：在这个框外画一圈虚线；blank：空白本子（见 _draw_page）。
+    图里的像素 (px, py) 对应页面坐标 (clip[0] + px / scale, clip[1] + py / scale)——clip 在这一页里面时（调用的地方都按
+    content_origin / content_extent / paper_rect 取，都在里面）；Claude 回的 box 就按这个换回页面坐标（整本检测记下的 crop）。
     """
     doc = fitz.open()
-    pg, P, R, ox, oy = _draw_page(doc, page, base_h, bg)
+    pg, P, R, ox, oy = _draw_page(doc, page, base_h, bg, blank=blank)
 
     if mark:
         pg.draw_rect(R(mark[0] - 8, mark[1] - 8, mark[2] + 8, mark[3] + 8), color=(0.118, 0.42, 1), width=2.5, dashes="[8 5] 0")
@@ -645,10 +964,11 @@ def render_page(*args, **kwargs):
         return _render_page(*args, **kwargs)
 
 
-def export_pdf(items, out_pdf, ai=True):
+def export_pdf(items, out_pdf, ai=True, blank=False):
     """把几页画成一份矢量 PDF。items：[(page, base_h, bg, 页码)]（页码从 1 起，可以不给，不给就按顺序数）。
     ai=False 是原稿（只有我写的：黑字、红字），ai=True 是往来稿（再加上 Claude 的蓝字；横划掉的画淡，橡皮擦掉的不画）：
     纸面照平板上的样子画（长回答只有圈号），这一页有长回答时紧跟着加一页「第 N 页的回答」，按圈号列出问和全文。
+    blank：这是一本空白本子（草稿本、自己新建的本子），页面整页是纸、没有右边那一栏（见 _draw_page）。
     先写临时文件再换上；文件正被别的程序占着时抛错（调用方下次再试）。返回导出了几页纸（不算加在后面的回答页）。"""
     out_pdf = Path(out_pdf)
     tmp = out_pdf.with_name(out_pdf.stem + ".tmp.pdf")
@@ -657,7 +977,7 @@ def export_pdf(items, out_pdf, ai=True):
         try:
             for k, it in enumerate(items):
                 page, base_h, bg = it[:3]
-                pg = _draw_page(doc, page, base_h, bg, ai=ai, struck="faded")[0]
+                pg = _draw_page(doc, page, base_h, bg, ai=ai, struck="faded", blank=blank)[0]
                 answers = answers_of(page) if ai else []
                 if answers:
                     _answer_pages(doc, answers, it[3] if len(it) > 3 else k + 1, pg.rect.width)

@@ -105,17 +105,14 @@ def sheet(cells):
 
 
 def pick(groups, page):
-    """要上字帖的组：圈选范围内的和红笔的，没全擦掉，按服务器上存的这一页重新分组、编号和位置都对得上的。
+    """要上字帖的组：圈选范围内的和红笔的，没全擦掉，和服务器上存的这一页对得上的（pages.sent_groups）。
     返回 [(编号, 笔迹)]，红笔在前，最多 MAX_GROUPS 组。"""
-    mine = dict(pages.group_strokes(pages.ink(page)))
-    boxes = {g["id"]: g["bbox"] for g in pages.compute_groups(pages.ink(page))}
+    mine = pages.sent_groups([g for g in groups if g.get("inSel") or (g.get("red") and not g.get("answered"))], page)
     out = []
     for g in groups:
         gid = g.get("id")
-        if gid not in mine or not (g.get("inSel") or (g.get("red") and not g.get("answered"))):
+        if gid not in mine:
             continue
-        if any(abs(a - b) > 3 for a, b in zip(boxes.get(gid, []), g.get("bbox") or [])):
-            continue  # 平板上的这一页还没存到服务器，分组对不上
         out.append((gid, mine[gid], bool(g.get("red"))))
     out.sort(key=lambda x: not x[2])  # 太多时红笔优先留下
     return sorted(((gid, ss) for gid, ss, _ in out[:MAX_GROUPS]), key=lambda x: int(x[0][1:]))

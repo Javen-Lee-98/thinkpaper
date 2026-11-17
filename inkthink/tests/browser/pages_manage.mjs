@@ -1,4 +1,4 @@
-// 页面管理（抽屉里「页面」那一行右边的图标和缩略图）：在这一页后面加竖版 / 横版空白页；删除这一页、在「显示已删的页」里恢复（笔迹还在）；
+// 页面管理（抽屉里「页面」那一行右边的图标和缩略图）：在这一页后面加竖版 / 横版空白页；删除这一页、在「显示已删的页」里还原（笔迹还在）；
 // 这一页连同写的字左转 / 右转 90°（转四次回到原样）；点缩略图跳到那一页；在导入的 PDF 中间加空白页，后面的页号顺延、各页的笔迹不串。
 // 跑法：node tests/browser/pages_manage.mjs [临时目录]；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
@@ -11,7 +11,7 @@ import { boot, PY } from '../browser_lib.mjs';
 const T = await boot({ name: 'pages-manage', open: false });
 const js = T.evalJS, SRC = join(T.ROOT, 'src'), NB = join(T.DATA, 'notebooks');
 mkdirSync(SRC, { recursive: true });
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 doc=fitz.open()
 for i,t in enumerate(['Title','Method','Result','Outlook']):
     p=doc.new_page(width=960,height=540); p.insert_text((200,300),t,fontsize=40)
@@ -90,7 +90,7 @@ T.ok('点第 2 页的缩略图：跳到第 2 页，上面是第二笔', s.idx ==
 // 4. 删除这一页（写过字的先问一句）；后面的页顶上来
 await answer(false);
 await tap('#actDelPage');
-T.ok('删写过字的页先问一句（说了可以恢复）；点取消就不删', same((await js(`window.__asked`)).map((m) => /写过字/.test(m) && /恢复/.test(m)), [true]) && (await st()).pages === 3, await js(`window.__asked`));
+T.ok('删写过字的页先问一句（说了可以还原）；点取消就不删', same((await js(`window.__asked`)).map((m) => /写过字/.test(m) && /还原/.test(m)), [true]) && (await st()).pages === 3, await js(`window.__asked`));
 await answer(true);
 await tap('#actDelPage', 200);
 await at(1, 2);
@@ -100,17 +100,19 @@ T.ok('删掉了：剩两页，后面那张横版页顶上来，抽屉里写着�
   && /2 页，已删 1 页/.test(await T.text('#thumbCount')), [s, await T.text('#thumbCount')]);
 T.ok('电脑上没真删：那一页记在已删的名单里，字的文件还在', L4.pages.length === 2 && L4.hidden.length === 1 && L4.hidden[0].entry.key === keyB && same(inkOf('scratch', keyB), B), L4);
 
-// 5. 「显示已删的页」里恢复
+// 5. 「显示已删的页」里还原（2026-11-16 夜以前那个按钮叫「恢复」）
 await tap('#actHidden');
 const rows = await js(`[...document.querySelectorAll('#hiddenList .hr span')].map((x) => x.textContent)`);
 T.ok('点「显示已删的页」：列出那一页，标着写过字', (await T.visible('#hiddenList')) && same(rows, ['空白页（写过字）']), rows);
+const restoreTxt = await js(`[...document.querySelectorAll('#hiddenList .hr button')].map((b) => b.textContent).join()`);
+T.ok('那一页右边的按钮写「还原」（「恢复」留给撤销旁边那个）', restoreTxt === '还原', restoreTxt);
 await tap('#hiddenList .hr button', 200);
 await at(1, 3);
 s = await st();
 T.ok('点「恢复」：回到原来的位置（第 2 页），上面的笔迹还在', s.pages === 3 && s.hidden === 0 && s.idx === 1 && same(s.ink, B) && s.h[1] === 1414 && Math.abs(s.h[2] - 707.2) < 1
   && !(await T.visible('#hiddenList')) && lay('scratch').hidden.length === 0 && same(lay('scratch').pages.map((p) => p.key), L2.pages.map((p) => p.key)), s);
 
-// 没写过字的页（第 3 页）：不问就删；名单里不标「写过字」；恢复回来还在最后
+// 没写过字的页（第 3 页）：不问就删；名单里不标「写过字」；还原回来还在最后
 await thumb(2, 3);
 await answer(true);
 await tap('#actDelPage', 200);
@@ -121,7 +123,7 @@ T.ok('没写过字的页不问就删；已删的名单里不标「写过字」',
 await tap('#hiddenList .hr button', 200);
 await at(2, 3);
 s = await st();
-T.ok('恢复回来还在最后（第 3 页，横版）', s.idx === 2 && s.pages === 3 && s.hidden === 0 && Math.abs(s.h[2] - 707.2) < 1 && s.ink.length === 0, s);
+T.ok('还原回来还在最后（第 3 页，横版）', s.idx === 2 && s.pages === 3 && s.hidden === 0 && Math.abs(s.h[2] - 707.2) < 1 && s.ink.length === 0, s);
 
 // 6. 右转 90°：纸变成横的，笔迹的坐标跟着转；一共转四次回到原样；左转再右转也回到原处
 await thumb(0, 3);

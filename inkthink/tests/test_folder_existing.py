@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
-import fitz  # noqa: E402
+import pymupdf as fitz  # noqa: E402
 
 import folder_existing as fe  # noqa: E402
 import folders  # noqa: E402

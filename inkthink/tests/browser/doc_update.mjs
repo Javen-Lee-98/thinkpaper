@@ -14,7 +14,7 @@ const T = await boot({ name: 'doc-update' });
 const SRC = join(T.ROOT, 'src'), PDF = join(SRC, '例会.pdf');
 mkdirSync(SRC, { recursive: true });
 // 现场生成 PDF：每页一行大字，slides 是 [[字, x, y], …]（页面 1000 × 562.5）
-const makePdf = (slides, path = PDF) => execFileSync(PY, ['-c', `import fitz,sys,json
+const makePdf = (slides, path = PDF) => execFileSync(PY, ['-c', `import pymupdf as fitz,sys,json
 doc=fitz.open()
 for t,x,y in json.loads(sys.argv[2]):
     p=doc.new_page(width=1000,height=562.5); p.insert_text((x,y),t,fontsize=40)
@@ -120,7 +120,7 @@ await T.sleep(1200);
 makePdf([['Intro: weekend trip planners, second draft', 60, 120], NEW, P2B, P4]);
 await T.reload();
 c = await chip();
-T.ok('平板提示原文件改过了，带「更新到草稿纸」', c.shown && c.kind === 'source' && /原文件「例会\.pdf」改过了/.test(c.text) && c.act === '更新到草稿纸', c);
+T.ok('平板提示原文件改过了，带「更新这本」', c.shown && c.kind === 'source' && /原文件「例会\.pdf」改过了/.test(c.text) && c.act === '更新这本', c);
 T.ok('电脑上也认出原文件改过了，这本还没换', (await T.apiJson('/api/notebook?nb=' + encodeURIComponent(imp.id))).sourceChanged === true);
 await T.tap('#verAct');
 T.ok('点一下就更新了', await T.waitFor(`window.__ink.S.nb.sourceChanged === false && window.__ink.S.page`, 15000), await chip());

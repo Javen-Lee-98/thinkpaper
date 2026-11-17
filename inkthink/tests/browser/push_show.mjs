@@ -1,5 +1,5 @@
 // Claude 推送页面到平板：推一张图片、一个文本文件、一份 PDF 的某一页 →「Claude 推送」本子里多出一页，
-// 平板上有提示能点开；打开后底图是推的东西，可以在上面写字、点「检查」交回推它的那个对话。
+// 平板上有提示能点开；打开后底图是推的东西，可以在上面写字、点「AI」交回推它的那个对话。
 // 跑法：node tests/browser/push_show.mjs [临时目录]；有一项不对退出码 1。
 import { boot, PY } from '../browser_lib.mjs';
 import { execFileSync } from 'node:child_process';
@@ -15,7 +15,7 @@ await T.go();
 const SRC = join(T.ROOT, 'src');
 mkdirSync(SRC, { recursive: true });
 const png = join(SRC, 'photo.png'), txt = join(SRC, 'notes.txt'), pdf = join(SRC, 'doc.pdf');
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 d=fitz.open(); p=d.new_page(width=800,height=600)
 p.draw_rect(fitz.Rect(0,0,200,200),color=None,fill=(1,0,0)); p.insert_text((300,400),'photo',fontsize=40)
 p.get_pixmap(alpha=False).save(sys.argv[1])
@@ -106,7 +106,7 @@ T.ok('抽屉里有「Claude 推送」这本（当前），3 页，发往推它�
   && drawer.thumbs === 3 && drawer.target.includes('这本发往：proj-a'), drawer);
 await T.tap('#nbChip');
 
-// 4. 在推送页上写字，点「检查」交回去
+// 4. 在推送页上写字，点「AI」交回去
 await T.tap('#tools [data-tool=red]');
 await T.pen(T.line(120, 620, 300));
 const inked = (await T.strokes()) === 1 && (await T.saved()) && T.pageFile('board', 2);

@@ -8,7 +8,9 @@
 // Claude 用带 card 的 write 回：接在卡片下面一段，前面写着那句红字，上面的字和红字不动，圈号变回实心、跳两下、上方说一句，
 // 点开滑到新的那一段，不出新圈号；再交一次时那些红字不再交；
 // 只在卡片上写了红字、纸上没新笔迹的页，几页一起交时也交出去（整本消息里有那张卡片，红点没了）；
-// 带「之前的版本」的卡片：在旧版上写红字，接上新的一段后「之前的版本」还在最底下，旧版上的红字没错位；页面没有报错。
+// 带「之前的版本」的卡片：在旧版上写红字，接上新的一段后「之前的版本」还在最底下，旧版上的红字没错位；
+// 手指在卡片里滑过之后手掌落在卡片外（几个略晃的触点、一个短促的触点、接触面大的触点、被系统取消的触点）不收卡片，搭着时红笔照样写在卡片上；
+// 干净的轻点、明确的挪纸和缩放、笔落在卡片外照旧收起，点工具条不收；页面没有报错。
 // 手指和手掌是用 CDP 的触摸事件模拟的（不是 iPad 上真的手掌），笔是 pointerType 为 pen 的鼠标事件。
 // 跑法：node tests/run_browser.mjs <临时目录> --only card_marks；有一项不对退出码 1。
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -349,6 +351,130 @@ T.ok('「之前的版本」还在卡片最底下（在新的一段下面）', Bo
 T.ok('旧版上的红字没错位：相对旧版那一行和原来一样', Boolean(C) && near(relTo(C.marks[0], LO, C.k), relD), [relD, C && relTo(C.marks[0], LO, C.k)]);
 await waitPen();
 await T.fingerTapAt(px, py + 60);
+
+// ================= 12. 手指在卡片里滑过之后，手掌、手环落在卡片外（2026-11-16 用户在平板上碰到：「需要先用手指上划来翻动，
+// 但如果接下来是手触碰到屏幕在小标展开外的内容时，还没来得及书写就又关闭了」）。手掌、手环用 CDP 的触摸事件模拟：
+// 几个同时按下、略晃的触点，一个很短的触点，一个接触面很大的触点，一个被系统取消的触点——iPad 上真的手掌是几个点、多大、先后隔多久，没在真机上量过
+const PALM_GAP = 1700; // 等这么久再试：笔刚用过的一秒里落下的手指一律当手掌（PALM_MS），要让它过去，测到的才是别的几条
+const touchEv = (type, pts) => T.cdp('Input.dispatchTouchEvent', { type, touchPoints: pts });
+const tp = (p, id, r) => Object.assign({ x: p[0], y: p[1], id }, r ? { radiusX: r, radiusY: r } : {});
+const onPaper = (x, y) => js(`(() => { const e = document.elementFromPoint(${x}, ${y}), c = document.querySelector('#answerCard').getBoundingClientRect();
+  return Boolean(e) && document.querySelector('#stage').contains(e) && !(${x} >= c.left && ${x} <= c.right && ${y} >= c.top && ${y} <= c.bottom); })()`);
+const viewNow = () => S('[S.view.tx, S.view.ty, S.view.s]');
+// 手指在卡片里往上滑一段（先滑回顶上，好有地方滑）；返回滑之前和之后的卡片
+// 前一项把卡片收了（没修好时）：重新打开，后面几项照样能测
+const ensureOpen = async () => { if (!(await card())) await openBadge(w1.id); };
+const scrollCard = async () => {
+  await ensureOpen();
+  await js(`document.querySelector('#answerCard').scrollTop = 0`);
+  await sleep(80);
+  const c0 = await card();
+  await fingerDrag((c0.l + c0.r) / 2, c0.b - 40, 0, -80);
+  return [c0, await card()];
+};
+await js(`(window.__pw = [], document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') window.__pw.push(Math.max(e.width, e.height)); }, true), 1)`);
+await T.tool('red');
+C = await openBadge(w1.id);
+const vh12 = await js('innerHeight');
+const palmY = Math.min(vh12 - 60, C.b + 150), P1 = [C.l + 40, palmY], P2 = [C.l + 110, palmY + 30];
+T.ok('（前提）卡片开着；模拟手掌的两点在卡片下面、在纸上', Boolean(C) && (await onPaper(...P1)) && (await onPaper(...P2)), [C, P1, P2]);
+
+// 12.1 手指在卡片里滑 → 紧接着手掌（两个触点同时落下、各晃几个像素、按住）落在卡片外 → 卡片还开着 → 红笔落在卡片里写一笔 → 卡片还开着、这一笔在卡片上
+let [c0, c1] = await scrollCard();
+T.ok('（前提）手指在卡片里往上滑：内容滑上去了，卡片开着', Boolean(c1) && c1.st > c0.st + 40, [c0.st, c1 && c1.st]);
+let v12 = await viewNow(), n12 = await strokeCount(), m12 = (await answerN(1)).marks.length;
+await touchEv('touchStart', [tp(P1, 21), tp(P2, 22)]);
+for (let k = 1; k <= 4; k++) { await touchEv('touchMove', [tp([P1[0] + k * 2, P1[1] - k], 21), tp([P2[0] + k, P2[1] + k * 2], 22)]); await sleep(40); }
+await sleep(300);
+T.ok('手指刚在卡片里滑过，手掌（两个触点、略晃）落在卡片外：卡片不收，纸不动', Boolean(await card()) && JSON.stringify(await viewNow()) === JSON.stringify(v12), [Boolean(await card()), v12, await viewNow()]);
+let Cw = await card();
+if (Cw) await penAt(hline(Cw.l + 40, (Cw.t + Cw.b) / 2, 90));
+T.ok('手掌搭着，红笔落在卡片里写一笔：卡片还开着，这一笔在卡片上，纸上没多笔迹', Boolean(await card()) && (await answerN(1)).marks.length === m12 + 1 && (await strokeCount()) === n12,
+  [Boolean(await card()), (await answerN(1)).marks.length, m12, await strokeCount(), n12]);
+await touchEv('touchMove', [tp([P1[0] + 40, P1[1] - 30], 21), tp([P2[0] + 40, P2[1] - 30], 22)]);
+await sleep(60);
+await touchEv('touchEnd', []);
+await sleep(300);
+T.ok('写完手掌挪开、抬起：卡片还开着，纸不动', Boolean(await card()) && JSON.stringify(await viewNow()) === JSON.stringify(v12), [Boolean(await card()), v12, await viewNow()]);
+
+// 12.2 手指在卡片里滑 → 马上用手指在卡片外干净地点一下 → 卡片立刻收起。
+// 试过「滑过后 1.5 秒内卡片外的手指一律当手掌、不收」，用户在平板上说不好：「如果是希望收起时用手指点卡片外面无法收起可能会怀疑卡顿或者延迟问题」
+await waitPen(); // 笔刚用过的一秒里手指在卡片里滑不动（当手掌），等它过去
+[c0, c1] = await scrollCard();
+T.ok('（前提）手指又在卡片里滑了一段', Boolean(c1) && c1.st > c0.st + 40, [c0.st, c1 && c1.st]);
+await touchEv('touchStart', [tp(P1, 23)]);
+await sleep(60);
+await touchEv('touchEnd', []);
+await sleep(300);
+T.ok('手指刚在卡片里滑过，马上用手指干净地点一下卡片外：卡片立刻收起，不用等', (await card()) === null);
+
+// 12.3 没先滑卡片：手掌（两个触点）落下、略晃，卡片也不收、纸不动；搭着时红笔照样写在卡片上
+await ensureOpen();
+await sleep(PALM_GAP);
+v12 = await viewNow(); n12 = await strokeCount(); m12 = (await answerN(1)).marks.length;
+await touchEv('touchStart', [tp(P1, 24), tp(P2, 25)]);
+for (let k = 1; k <= 5; k++) { await touchEv('touchMove', [tp([P1[0] + k * 2, P1[1] - k * 2], 24), tp([P2[0] - k, P2[1] + k], 25)]); await sleep(40); }
+await sleep(400);
+T.ok('没先滑卡片，手掌（两个触点，晃 10 来个像素）落在卡片外：卡片不收，纸不动', Boolean(await card()) && JSON.stringify(await viewNow()) === JSON.stringify(v12), [Boolean(await card()), v12, await viewNow()]);
+Cw = await card();
+if (Cw) await penAt(hline(Cw.l + 40, (Cw.t + Cw.b) / 2 + 30, 90));
+await touchEv('touchEnd', []);
+await sleep(300);
+T.ok('手掌搭着时红笔照样写在卡片上；抬起后卡片还开着', Boolean(await card()) && (await answerN(1)).marks.length === m12 + 1 && (await strokeCount()) === n12,
+  [Boolean(await card()), (await answerN(1)).marks.length, m12, await strokeCount(), n12]);
+
+// 12.4 接触面很大的一个触点（像手掌，宽约 120 像素）短促碰一下卡片外：不算轻点；12.5 被系统取消的触点（pointercancel）也不算轻点
+await ensureOpen();
+await sleep(PALM_GAP);
+await js(`(window.__pw = [], 1)`);
+await touchEv('touchStart', [tp(P1, 26, 60)]);
+await sleep(60);
+await touchEv('touchEnd', []);
+await sleep(300);
+const pw = await js('window.__pw');
+T.ok('（前提）浏览器给出了这个触点的接触面（宽或高至少 100 像素）', pw.length === 1 && pw[0] >= 100, pw);
+T.ok('接触面很大的触点（像手掌）短促碰一下卡片外：不算轻点，卡片不收', Boolean(await card()));
+await ensureOpen();
+await touchEv('touchStart', [tp(P1, 27)]);
+await sleep(60);
+await touchEv('touchCancel', []);
+await sleep(300);
+T.ok('系统取消的触摸（pointercancel，比如系统认出是手掌）：不算轻点，卡片不收', Boolean(await card()));
+
+// 12.6 原来的不变：手指在卡片里滑过、隔一会儿，手指干净地点一下纸上别处，收起
+[c0, c1] = await scrollCard();
+await sleep(PALM_GAP);
+await T.fingerTapAt(...P1);
+T.ok('手指在卡片里滑过、隔一会儿，手指轻点纸上别处：卡片收起', (await card()) === null);
+// 单指明确地挪纸：收起，纸挪了
+C = await openBadge(w1.id);
+v12 = await viewNow();
+await fingerDrag(P1[0], P1[1], 0, -60);
+T.ok('单指明确地挪纸（60 像素）：卡片收起，纸挪了', (await card()) === null && (await viewNow())[1] !== v12[1], [v12, await viewNow()]);
+// 笔落在卡片外：收起，那一笔照常写在纸上（手指刚在卡片里滑过也一样）
+C = await openBadge(w1.id);
+await scrollCard();
+n12 = await strokeCount();
+const [qx, qy] = [C.l + 60, Math.min(vh12 - 80, C.b + 60)];
+T.ok('（前提）落笔的地方在卡片外、在纸上', await onPaper(qx, qy), [qx, qy, await card()]);
+await penAt(hline(qx, qy, 100));
+T.ok('手指刚在卡片里滑过，笔落在卡片外：卡片收起，那一笔照常写在纸上', (await card()) === null && (await strokeCount()) === n12 + 1, [await strokeCount(), n12]);
+// 点工具条换笔：卡片不收
+C = await openBadge(w1.id);
+await scrollCard();
+const bar = (await T.visible('#rail')) ? '#rail [data-tool=pen]' : '#tools [data-tool=pen]';
+await T.tap(bar);
+T.ok('手指刚在卡片里滑过，点工具条换黑笔：卡片不收，换上了黑笔', Boolean(await card()) && (await S('S.tool')) === 'pen', [Boolean(await card()), await S('S.tool')]);
+// 两指明确地缩放：收起，纸缩放了
+await ensureOpen();
+await sleep(PALM_GAP);
+v12 = await viewNow();
+await touchEv('touchStart', [tp(P1, 28), tp([P1[0] + 100, P1[1]], 29)]);
+for (let k = 1; k <= 10; k++) { await touchEv('touchMove', [tp([P1[0] - k * 10, P1[1]], 28), tp([P1[0] + 100 + k * 10, P1[1]], 29)]); await sleep(16); }
+await touchEv('touchEnd', []);
+await sleep(400);
+T.ok('两指明确地缩放（间距 100 → 300 像素）：卡片收起，纸放大了', (await card()) === null && (await viewNow())[2] > v12[2] * 1.3, [v12, await viewNow()]);
+await T.openPage(0);
 
 console.error('截图：\n' + [SHOT1, join(T.OUT, '2-badge-dot.png'), SHOT3, SHOT4, join(T.OUT, '5-card-image-for-claude.png')].join('\n'));
 T.ok('页面没有报错', !T.errors.length, T.errors);

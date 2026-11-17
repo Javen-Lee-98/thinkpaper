@@ -5,9 +5,12 @@ import hashlib
 import numpy as np
 
 try:
-    import fitz
+    import pymupdf as fitz
 except ImportError:
-    fitz = None
+    try:
+        import fitz  # 1.24.3 以前的 PyMuPDF 只有这个旧名字
+    except ImportError:
+        fitz = None
 
 PAGE_W = 1000
 DIFF_PX = 600        # 比较时渲染的宽度（像素）

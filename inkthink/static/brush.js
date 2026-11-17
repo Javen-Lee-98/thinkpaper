@@ -1,31 +1,24 @@
-// 笔触：把一笔的点（位置、轻重、时刻）画成像钢笔写的样子——线条是顺的，粗细有起伏，起笔收笔有笔锋。
-// 一笔的数据不变，还是 [[x, y, 轻重 0–1, 离落笔多少毫秒], …]；这里只管怎么画。
-// 平板页面和 node 测试共用（tests/test_brush.mjs）。
+// 笔触：把一笔的点（位置、轻重、时刻）画成顺的、够黑的线，收笔略尖。只管平板上怎么显示，一笔的数据不变，
+// 还是 [[x, y, 轻重 0–1, 离落笔多少毫秒], …]。发给 Claude 的图、服务端画的图（整本检测、往来稿、存回 PDF）不用它，照旧。
+// 平板页面（static/app.js）和 node 测试（tests/test_brush.mjs）共用。
 //
-// 2026-11-13 查用户的真实笔迹（2520 笔）：他的笔不报轻重，每个点都是 0.12，所以原来的线从头到尾一样粗、
-// 只有约 1.2 个单位（屏幕上不到 1 像素），看着发灰；在这么细的线上加笔锋也看不出来。
-// 所以：轻重没有变化的笔，粗细改由快慢来定（慢处粗、快处细，像钢笔出水）；线的主体比原来粗一些，才黑、才显得出笔锋。
-// 笔会报轻重的（比如 Apple Pencil），轻重照样算进去。
+// 2026-11-13 查用户的真实笔迹（2520 笔）：他的笔不报轻重，每个点都是 0.12，原来的线从头到尾一样粗、只有约 1.2 个单位
+// （屏幕上不到 1 像素），看着发灰。用户在临时的试写页上比了三种候选，选定「笔触 1（匀：线条顺，从头到尾一样粗，收笔略尖）、细」：
+// 线主体是笔的基本粗细（2.1）的 0.85 × 0.8 倍，不看快慢；收笔的尖在抬笔以后才有。2026-11-14（阶段 D1）做进正式页面，
+// 试写页和没选中的两种候选删了。笔会报轻重的（比如 Apple Pencil），轻重照样算进粗细。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.Brush = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
-  // 三种候选（用户在试写页上选一种）。长度都是页面坐标（纸宽 1000）。
-  //   w        线主体的粗细是「笔的基本粗细」的几倍（基本粗细 2.1；原来的线实际是 0.56 倍）
-  //   slow / fast  写得很慢、很快的地方，粗细各是主体的几倍（都是 1 就是不看快慢）
-  //   inLen / outLen  入笔、收笔的笔锋最长多长（短的一笔里按比例缩，入笔不超过全长的 20%，收笔不超过 30%）
-  //   inTip / outTip  笔锋最细处是主体的几分之几
-  const KINDS = {
-    even: { w: 0.85, slow: 1, fast: 1, inLen: 0, outLen: 5, inTip: 1, outTip: 0.55 },        // 匀：只是变顺、变粗变黑（约是原来的 1.5 倍粗），收笔略尖
-    pen: { w: 1.0, slow: 1.45, fast: 0.72, inLen: 5, outLen: 14, inTip: 0.6, outTip: 0.25 },  // 钢笔：慢处粗快处细，有笔锋
-    bold: { w: 1.3, slow: 1.6, fast: 0.68, inLen: 6, outLen: 18, inTip: 0.5, outTip: 0.18 },  // 钢笔·重：更粗、起伏和笔锋更明显
+  // 长度都是页面坐标（纸宽 1000）
+  const PEN = {
+    w: 0.68,      // 线主体的粗细是「笔的基本粗细」的几倍（试写页上的「笔触 1」0.85 × 「细」0.8；原来的画法实际是 0.56 倍）
+    outLen: 5,    // 收笔的尖最长多长（再按抬笔前的快慢缩放：甩出去的长、顿住的短；不超过全长的 30%）
+    outTip: 0.55, // 收笔最细处是主体的几分之几
   };
   const STEP = 1.2;     // 中心线每隔这么远取一个点
   const V_MID = 0.15;   // 平常写字的快慢（页面单位 / 毫秒；用户真实笔迹的中位数）
-  const V_SLOW = 0.04, V_FAST = 0.45;
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  // 原来的画法：粗细只随轻重变
-  const pressWidth = (base, p) => base * (0.45 + 0.9 * (p || 0.5));
 
   // 去掉挨得太近的点（笔停住时会堆在一起），免得方向算不出来
   function clean(pts) {
@@ -38,7 +31,8 @@
     return out;
   }
 
-  // 每个原始点上的快慢（页面坐标 / 毫秒），前后各三个点取平均（时刻只精确到毫秒、一帧一报，不抹平会一跳一跳）
+  // 每个原始点上的快慢（页面坐标 / 毫秒），前后各三个点取平均（时刻只精确到毫秒、一帧一报，不抹平会一跳一跳）。
+  // 只用来定收笔的尖有多长
   function speeds(p) {
     const v = new Array(p.length).fill(0);
     for (let i = 1; i < p.length; i++) {
@@ -55,12 +49,6 @@
     return s;
   }
 
-  // 快慢 → 粗细的倍数：很慢是 K.slow，平常是 1，很快是 K.fast
-  function speedFactor(v, K) {
-    if (v <= V_MID) return K.slow + (1 - K.slow) * clamp((v - V_SLOW) / (V_MID - V_SLOW), 0, 1);
-    return 1 + (K.fast - 1) * clamp((v - V_MID) / (V_FAST - V_MID), 0, 1);
-  }
-
   // 这支笔报不报轻重：一笔里每个点的轻重都一样，就是不报
   function flatPressure(p) {
     let lo = Infinity, hi = -Infinity;
@@ -69,14 +57,14 @@
   }
 
   // 过这些点的一条顺的线（Catmull-Rom），每隔 STEP 取一个点；点稀（写得快、采样少）的地方也是弯的，不是折线。
-  // 返回 [{x, y, w 粗细, s 离起点多远, v 快慢}]，w 这时还没加笔锋。
-  function centerline(pts, base, kind) {
-    const p = clean(pts), K = KINDS[kind] || KINDS.pen;
+  // 返回 [{x, y, w 粗细, s 离起点多远, v 快慢}]，w 这时还没收尖。
+  function centerline(pts, base) {
+    const p = clean(pts);
     if (p.length === 0) return [];
     const v = speeds(p), flat = flatPressure(p);
     // 报轻重的笔：轻的 0.7 倍到重的 1.4 倍；不报的不算
-    const wOf = (i) => base * K.w * speedFactor(v[i], K) * (flat ? 1 : clamp(0.7 + 0.7 * p[i][2], 0.7, 1.4));
-    if (p.length === 1) return [{ x: p[0][0], y: p[0][1], w: base * K.w, s: 0, v: 0 }];
+    const wOf = (i) => base * PEN.w * (flat ? 1 : clamp(0.7 + 0.7 * p[i][2], 0.7, 1.4));
+    if (p.length === 1) return [{ x: p[0][0], y: p[0][1], w: base * PEN.w, s: 0, v: 0 }];
     const out = [];
     let s = 0;
     // 第一段、最后一段外面没有点：照着头三个（末三个）点的弯法往外补一个，两头才不会被拉直
@@ -98,7 +86,8 @@
     const e = p[p.length - 1], q = out[out.length - 1];
     s += Math.hypot(e[0] - q.x, e[1] - q.y);
     out.push({ x: e[0], y: e[1], w: wOf(p.length - 1), s, v: v[p.length - 1] });
-    // 粗细前后抹平（前后各约 5 个单位），起伏是缓的，不出一节一节的疙瘩
+    if (flat) return out; // 不报轻重：处处一样粗，不用抹平
+    // 报轻重的：粗细前后抹平（前后各约 5 个单位），起伏是缓的，不出一节一节的疙瘩
     const r = Math.max(1, Math.round(5 / STEP)), w = out.map((o) => o.w);
     for (let i = 0; i < out.length; i++) {
       let acc = 0, n = 0;
@@ -108,35 +97,26 @@
     return out;
   }
 
-  // 加上笔锋：入笔由细到粗；done（抬笔了）时收笔由粗到尖。还在写的时候笔尖处不收（是圆头）。
-  // 笔锋只占一笔的两头：入笔不超过全长的 20%，收笔不超过 30%，中间一大段是足粗的，线才黑。
-  function taper(line, kind, done) {
-    const K = KINDS[kind] || KINDS.pen, n = line.length;
-    if (n < 2) return line;
+  // 收笔：done（抬笔了）时由粗到略尖；还在写的时候笔尖处不收（是圆头），抬笔那一刻才收。起笔不收。
+  function taper(line, done) {
+    const n = line.length;
+    if (n < 2 || !done) return line;
     const L = line[n - 1].s;
-    const lin = Math.min(K.inLen, L * 0.2);
-    let lout = done ? K.outLen : 0;
-    if (lout > 0) {
-      // 抬笔前最后一小段的快慢：甩出去的（撇、捺、钩）长，顿住的短
-      let vEnd = 0, cnt = 0;
-      for (let i = n - 1; i >= 0 && L - line[i].s < 8; i--) { vEnd += line[i].v; cnt++; }
-      vEnd = cnt ? vEnd / cnt : 0;
-      lout = Math.min(lout * clamp(vEnd / V_MID, 0.35, 1.6), L * 0.3);
-    }
+    // 抬笔前最后一小段的快慢：甩出去的（撇、捺、钩）长，顿住的短
+    let vEnd = 0, cnt = 0;
+    for (let i = n - 1; i >= 0 && L - line[i].s < 8; i--) { vEnd += line[i].v; cnt++; }
+    vEnd = cnt ? vEnd / cnt : 0;
+    const lout = Math.min(PEN.outLen * clamp(vEnd / V_MID, 0.35, 1.6), L * 0.3);
+    if (lout <= 0) return line;
     const ease = (u) => Math.pow(clamp(u, 0, 1), 0.7);
-    for (const o of line) {
-      let f = 1;
-      if (lin > 0) f *= K.inTip + (1 - K.inTip) * ease(o.s / lin);
-      if (lout > 0) f *= K.outTip + (1 - K.outTip) * ease((L - o.s) / lout);
-      o.w *= f;
-    }
+    for (const o of line) o.w *= PEN.outTip + (1 - PEN.outTip) * ease((L - o.s) / lout);
     return line;
   }
 
   // 一笔的轮廓：左边一串点、右边一串点（两头各有一个圆头），外加拐急弯处补的圆点。
   // 画的时候把轮廓填实，粗细怎么变都没有接痕。
-  function outline(pts, base, kind, done) {
-    const line = taper(centerline(pts, base, kind), kind, done), n = line.length;
+  function outline(pts, base, done) {
+    const line = taper(centerline(pts, base), done), n = line.length;
     if (n === 0) return { line, left: [], right: [], dots: [] };
     if (n === 1 || line[n - 1].s < 0.6) return { line, left: [], right: [], dots: [[line[0].x, line[0].y, Math.max(line[0].w, line[n - 1].w) / 2]] };
     const left = [], right = [], dots = [];
@@ -156,46 +136,62 @@
     return { line, left, right, dots };
   }
 
-  // 画一笔。ctx 已经换算到页面坐标。done 为 false 是正在写的这一笔（笔尖处先不收）。
-  function draw(ctx, pts, base, kind, color, done) {
-    const o = outline(pts, base, kind, done !== false);
-    ctx.fillStyle = color;
-    if (o.left.length) {
-      ctx.beginPath();
-      ctx.moveTo(o.left[0][0], o.left[0][1]);
-      for (let i = 1; i < o.left.length; i++) ctx.lineTo(o.left[i][0], o.left[i][1]);
-      for (let i = o.right.length - 1; i >= 0; i--) ctx.lineTo(o.right[i][0], o.right[i][1]);
-      ctx.closePath();
-      ctx.fill();
-    }
+  // 轮廓画进路径（canvas 的 ctx 或 Path2D）。身子一块、圆点另一块，各自填实：放在同一块里，绕向相反的地方会被挖空
+  function traceBody(o, p) {
+    if (!o.left.length) return;
+    p.moveTo(o.left[0][0], o.left[0][1]);
+    for (let i = 1; i < o.left.length; i++) p.lineTo(o.left[i][0], o.left[i][1]);
+    for (let i = o.right.length - 1; i >= 0; i--) p.lineTo(o.right[i][0], o.right[i][1]);
+    p.closePath();
+  }
+  function traceDots(o, p) {
     for (const d of o.dots) {
-      ctx.beginPath();
-      ctx.arc(d[0], d[1], Math.max(d[2], 0.05), 0, Math.PI * 2);
-      ctx.fill();
+      const r = Math.max(d[2], 0.05);
+      p.moveTo(d[0] + r, d[1]);
+      p.arc(d[0], d[1], r, 0, Math.PI * 2);
     }
   }
 
-  // 现在的画法（对照用）：一小段一小段直线，每段各自的粗细，圆头
-  function legacy(ctx, pts, base, color) {
-    ctx.strokeStyle = color;
+  // 抬了笔的笔迹记住它的路径，重画整页时不再从头算：按点的数组认，点数或粗细变了就重算（笔迹数据不改，改了也认得出）
+  const cache = typeof WeakMap === 'function' && typeof Path2D === 'function' ? new WeakMap() : null;
+
+  // 画一笔。ctx 已经换算到页面坐标；base 是这一笔记下的笔的粗细（笔迹数据里的 w）。done 为 false 是正在写的这一笔（笔尖处先不收）。
+  function draw(ctx, pts, base, color, done) {
+    done = done !== false;
     ctx.fillStyle = color;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    if (pts.length === 1) {
-      ctx.beginPath();
-      ctx.arc(pts[0][0], pts[0][1], pressWidth(base, pts[0][2]) / 2, 0, Math.PI * 2);
-      ctx.fill();
+    if (done && cache) {
+      let c = cache.get(pts);
+      if (!c || c.n !== pts.length || c.base !== base) {
+        const o = outline(pts, base, true);
+        c = { n: pts.length, base, body: new Path2D(), dots: new Path2D() };
+        traceBody(o, c.body);
+        traceDots(o, c.dots);
+        cache.set(pts, c);
+      }
+      ctx.fill(c.body);
+      ctx.fill(c.dots);
       return;
     }
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1], b = pts[i];
-      ctx.lineWidth = pressWidth(base, (a[2] + b[2]) / 2);
-      ctx.beginPath();
-      ctx.moveTo(a[0], a[1]);
-      ctx.lineTo(b[0], b[1]);
-      ctx.stroke();
-    }
+    const o = outline(pts, base, done);
+    ctx.beginPath();
+    traceBody(o, ctx);
+    ctx.fill();
+    ctx.beginPath();
+    traceDots(o, ctx);
+    ctx.fill();
   }
 
-  return { KINDS, pressWidth, centerline, taper, outline, draw, legacy };
+  // 同一个轮廓写成 SVG 的 path（卡片上的红字用）：圆点和身子绕同一个方向，放在一条路径里按 nonzero 填实不会被挖空
+  function svgPath(pts, base, done) {
+    const o = outline(pts, base, done !== false), f = (v) => (Math.round(v * 100) / 100).toString();
+    let d = '';
+    if (o.left.length) d += 'M' + o.left.concat(o.right.slice().reverse()).map((q) => `${f(q[0])} ${f(q[1])}`).join(' L') + ' Z';
+    for (const c of o.dots) { // 轮廓（左边往前、右边往回）的绕向和逆时针的圆一致
+      const r = Math.max(c[2], 0.05), R = f(r);
+      d += ` M${f(c[0] + r)} ${f(c[1])} A${R} ${R} 0 1 0 ${f(c[0] - r)} ${f(c[1])} A${R} ${R} 0 1 0 ${f(c[0] + r)} ${f(c[1])} Z`;
+    }
+    return d.trim();
+  }
+
+  return { PEN, centerline, taper, outline, draw, svgPath };
 });

@@ -85,6 +85,7 @@ await cdp('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceSca
 await cdp('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
   const add = () => { const s = document.createElement('style'); s.id = 'demoIntro'; s.textContent = '#ink,#live,#ai,#tex{visibility:hidden!important}'; document.documentElement.appendChild(s); };
   if (document.documentElement) add(); else new MutationObserver((m, o) => { if (document.documentElement) { o.disconnect(); add(); } }).observe(document, { childList: true });
+  try { localStorage.setItem('inkthink.guideSeen', 'true'); } catch (e) {} // 片子里不要新手引导
 })()` });
 
 // 帧：每张图配一个时长，最后交给 ffmpeg 的 concat
@@ -96,7 +97,7 @@ function put(data, seconds) {
 }
 async function shot(seconds) { put((await cdp('Page.captureScreenshot', { format: 'png' })).data, seconds); }
 
-const URL0 = `${B}/?k=${code}&lang=${LANG}&notour=1`;
+const URL0 = `${B}/?k=${code}&lang=${LANG}`;
 if (opt.intro) { // 片头：还没打开时的一张白页，然后按真实的快慢拍下页面载入（画面没变就不重复存）
   await shot(INTRO_BLANK);
   const seen = [];

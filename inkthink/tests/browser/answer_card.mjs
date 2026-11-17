@@ -1,10 +1,10 @@
 // 长回答（2026-11-13）：纸上只留一个圈号，点开是浮出的卡片。查：
-// 圈号落在所答笔迹右边、不压东西；没看过实心、看过空心；到达时跳两下、不自己打开、上方说一句；
+// 圈号落在所答笔迹右边、不压东西（没指明答哪句时落在这一轮最后一句红笔问题旁边，没有红笔问题才落在最后写的那组旁边）；没看过实心、看过空心；到达时跳两下、不自己打开、上方说一句；
 // 点圈号（手指、笔）开卡片：紧挨圈号、整个在屏幕里、靠右下时翻过去，宽高有限、内容能滑、「问：」那行、KaTeX 公式、之前的版本；
 // 点别处 / 落笔（那一笔照常写上）/ 挪纸 / 缩放 / 翻页 / 开抽屉都收起（笔刚用过一秒内落在纸上的手指当手掌，不收），再点同一个圈号是收起；笔点圈号不留笔迹；
 // 橡皮擦掉圈号、撤销找回；红笔问题擦掉后圈号还在、还能点开；编号（擦掉的也占着号）；星号采纳；
 // 存盘是新格式、刷新后还在、看过的记住了；连续模式下回在看得见的相邻页上的直接落下；
-// 发给 Claude 的图里只有圈号、没有回答文字，下一次「检查」的消息里有「圈号 1（问：…）」；往来稿里多出「第 N 页的回答」。
+// 发给 Claude 的图里只有圈号、没有回答文字，下一次点「AI」的消息里有「圈号 1（问：…）」；往来稿里多出「第 N 页的回答」。
 // 跑法：node tests/browser/answer_card.mjs [临时目录]；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -146,7 +146,9 @@ T.ok('顶上一行较淡的「问：为什么是线性的？」', C.q === '问�
 T.ok('单独一行的 $$…$$ 用 KaTeX 排成了公式', C.tex > 30 && (await js(`Boolean(document.querySelector('#acBody .ac-tex .katex .mfrac, #acBody .ac-tex .katex .accent, #acBody .ac-tex .katex .mord'))`)) && !C.body.includes('$$'), [C.tex, C.body.slice(0, 60)]);
 T.ok('全文都在（最后一条理由也在）', C.body.includes('第 30 条理由') && C.body.includes('先说结论'), C.body.slice(-40));
 T.ok('蓝色手写体、白底、细框、轻微阴影', /Xiaolai/.test(C.font) && C.color === 'rgb(47, 95, 174)' && C.bg === 'rgb(255, 255, 255)' && C.border === '1px' && C.shadow !== 'none', [C.font, C.color, C.bg, C.border, C.shadow]);
-T.ok('卡片上没有按钮、没有输入框（在卡片上写红字见 card_marks.mjs）',(await T.count('#answerCard button, #answerCard input, #answerCard textarea, #answerCard [contenteditable]')) === 0);
+// 2026-11-16 起卡片顶上有「上一条」「下一条」两个按钮（这一页有两条回答；怎么换见 card_nav.mjs），别的按钮、输入框没有
+T.ok('卡片上除了顶上的「上一条」「下一条」，没有别的按钮、没有输入框（在卡片上写红字见 card_marks.mjs）',
+  (await T.count('#answerCard button:not(#acPrev):not(#acNext), #answerCard input, #answerCard textarea, #answerCard [contenteditable]')) === 0);
 const SHOT2 = await T.shot('2-card-open.png');
 await T.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: C.l + C.w / 2, y: C.t + C.h / 2, deltaX: 0, deltaY: 400 });
 await sleep(400);
@@ -218,7 +220,7 @@ C = await card();
 T.ok('有之前的版本：下面一条分隔线、「之前的版本」，依次列出旧版', Boolean(C && C.older) && C.older.line === 'solid 1px' && /^之前的版本旧的说法：和店家有关。更早的说法$/.test(C.older.text), C && C.older);
 await T.fingerTapAt(ex, ey);
 
-// ================= 8. 再「检查」：消息里有「圈号 1（问：…）：前 200 个字…」；发给 Claude 的图里圈号处有蓝色、没有回答文字
+// ================= 8. 再点「AI」：消息里有「圈号 1（问：…）：前 200 个字…」；发给 Claude 的图里圈号处有蓝色、没有回答文字
 await T.saved();
 await T.tap('#check');
 const sub2 = await T.waitSub('S1'), meta2 = sub2 && T.metaOf(sub2);
@@ -354,7 +356,7 @@ T.ok('刷新后：看过的记住了（空心）', B.every((b) => b.seen && b.fi
 
 // ================= 14. 往来稿：纸面只有圈号，紧跟着「第 N 页的回答」，按圈号列出问和全文；把那一页渲染成 PNG
 const PDF = join(PAPER, '草稿本', '往来.pdf');
-const pdfText = () => (existsSync(PDF) ? JSON.parse(execFileSync(PY, ['-c', 'import fitz,sys,json; d=fitz.open(sys.argv[1]); print(json.dumps([p.get_text() for p in d]))', PDF]).toString('utf8')) : []);
+const pdfText = () => (existsSync(PDF) ? JSON.parse(execFileSync(PY, ['-c', 'import pymupdf as fitz,sys,json; d=fitz.open(sys.argv[1]); print(json.dumps([p.get_text() for p in d]))', PDF]).toString('utf8')) : []);
 let pt = [];
 for (let k = 0; k < 40; k++) { try { pt = pdfText(); } catch (e) { pt = []; } if (pt.some((t) => t.startsWith('第 2 页的回答')) && pt.some((t) => t.includes('第三条回答'))) break; await sleep(500); }
 const ia = pt.findIndex((t) => t.startsWith('第 1 页的回答')), ib = pt.findIndex((t) => t.startsWith('第 2 页的回答'));
@@ -364,11 +366,58 @@ T.ok('回答页按圈号列出问和全文（擦掉的不列）；纸面那一�
 T.ok('第 2 页的长回答在回答页上自动换行，放不下接着下一页（续）', ib > 0 && pt[ib].includes('问：靠右下角的问题') && pt[ib].includes('第二页的回答')
   && (pt[ib].includes('第 30 条理由') || (pt[ib + 1] || '').startsWith('第 2 页的回答（续）')), pt.slice(ib, ib + 2).map((t) => t.slice(0, 40)));
 const PNG4 = join(T.OUT, '4-pdf-answer-page.png'), PNG4b = join(T.OUT, '4b-pdf-answer-page-2.png');
-const render = (i, out) => execFileSync(PY, ['-c', 'import fitz,sys; d=fitz.open(sys.argv[1]); d[int(sys.argv[2])].get_pixmap(matrix=fitz.Matrix(1, 1)).save(sys.argv[3])', PDF, String(i), out]);
+const render = (i, out) => execFileSync(PY, ['-c', 'import pymupdf as fitz,sys; d=fitz.open(sys.argv[1]); d[int(sys.argv[2])].get_pixmap(matrix=fitz.Matrix(1, 1)).save(sys.argv[3])', PDF, String(i), out]);
 if (ib >= 0) render(ib, PNG4);
 if (ia >= 0) render(ia, PNG4b);
 T.ok('「第 2 页的回答」「第 1 页的回答」两页渲染成了 PNG', existsSync(PNG4) && existsSync(PNG4b), PNG4);
 
-console.error('截图：\n' + [SHOT1, join(T.OUT, '1-two-badges-zoom.png'), SHOT2, SHOT3, PNG4, PNG4b].join('\n'));
+// ================= 15. 长回答没指明答的是哪句（2026-11-16 照《产品定义》第 3 节改）：圈号放在这一轮交上去的红笔问题里最后一句旁边，
+// 不是最后写的那一组；之前几轮回答过的红笔不算问题；同一轮先落下的短批注指着的红笔仍是这一轮的问题；这一轮没有红笔问题，才放在最后写的那一组旁边。
+// 在一个新建的空白本子里做（前面几页上的东西不挡着，「AI」也只交这一页）
+const pad15 = await T.apiJson('/api/notebook/new', { method: 'POST', body: JSON.stringify({ title: '圈号放哪' }) });
+await T.openNotebook(pad15.id, 0);
+T.ok('（前提）打开了新建的空白本子', (await S('S.nb.id')) === pad15.id && (await S('S.page.strokes.length')) === 0, await S('S.nb.id'));
+const write15 = async (red, y, len) => { await T.tap(`#tools [data-tool=${red ? 'red' : 'pen'}]`); await T.pen(T.line(120, y, len)); };
+const writes15 = async (n) => (await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === ${n}`, 10000)) && (await sleep(300), answers());
+const rightOf = (a, b) => Math.abs(a.at[0] - (b[2] + 16 + 13)) < 2.5 && Math.abs(a.at[1] - mid(b)) < 2; // 紧挨着那一行的右端外侧、一样高
+// 第一轮：红笔问题 g1，黑字 g2，红笔问题 g3（这一轮最后一句），黑字 g4（最后写的一组，在下面一行）
+await write15(true, 150, 300);
+await write15(false, 260, 300);
+await write15(true, 370, 180);
+await write15(false, 480, 400);
+await T.tap('#check');
+const s15a = await T.waitSub('S1'), m15a = s15a && T.metaOf(s15a);
+T.ok('（前提）第一轮交上去四组：红、黑、红、黑', Boolean(m15a) && m15a.groups.map((g) => (g.red ? 'r' : 'k')).join('') === 'rkrk', m15a && m15a.groups);
+await T.post('/bridge/reply', { sid: 'S1', submission: s15a.id, items: [{ type: 'write', text: '没指明答哪句的回答' }, { type: 'write', anchor: 'end', text: 'anchor 写了 end 的回答' }] });
+const A15 = (await writes15(2)) || [];
+const q3 = bbox(m15a, 'g3'), k4 = bbox(m15a, 'g4');
+T.ok('没给 anchor：圈号在这一轮最后一句红笔问题 g3 的右端外侧、和它一样高，不在最后写的黑字 g4 旁边', A15.length === 2 && rightOf(A15[0], q3), [A15[0] && A15[0].at, q3, k4]);
+T.ok('anchor 写成 end：也算没指明，圈号也在 g3 那一行（让开前一个圈号，往右挪）', A15.length === 2 && Math.abs(A15[1].at[1] - mid(q3)) < 2 && A15[1].at[0] > A15[0].at[0], [A15[1] && A15[1].at, q3]);
+T.ok('这一轮交上去的红笔问题 g1、g3 都记成它回答了（照旧）', A15.length === 2 && A15[0].on.slice().sort().join() === m15a.groups[0].ids.concat(m15a.groups[2].ids).sort().join(), A15[0] && A15[0].on);
+// 第二轮：只写了黑字 g5。g1、g3 上一轮答过了，这一轮没有红笔问题：放在最后写的那组 g5 旁边
+await write15(false, 590, 300);
+await T.tap('#check');
+const s15b = await T.waitSub('S1'), m15b = s15b && T.metaOf(s15b);
+T.ok('（前提）第二轮交上去五组，g1、g3 标着回答过，最后一组 g5 是黑字', Boolean(m15b) && m15b.groups.length === 5 && m15b.groups[0].answered && m15b.groups[2].answered && !m15b.groups[4].red,
+  m15b && m15b.groups.map((g) => [g.id, g.red, g.answered]));
+await T.post('/bridge/reply', { sid: 'S1', submission: s15b.id, items: [{ type: 'write', text: '这一轮没有红笔问题' }] });
+const B15 = (await writes15(3)) || [], k5 = bbox(m15b, 'g5');
+T.ok('这一轮没有红笔问题（回答过的红笔不算）：圈号放在最后写的那组 g5 旁边', B15.length === 3 && rightOf(B15[2], k5), [B15[2] && B15[2].at, k5, q3]);
+// 第三轮：红笔问题 g6，黑字 g7。Claude 先回一条指着 g6 的短批注，再回一条没给 anchor 的长回答（两次回写，同一轮）
+await write15(true, 700, 180);
+await write15(false, 810, 400);
+await T.tap('#check');
+const s15c = await T.waitSub('S1'), m15c = s15c && T.metaOf(s15c);
+T.ok('（前提）第三轮交上去七组，g6 是红笔问题、g7 是黑字', Boolean(m15c) && m15c.groups.length === 7 && m15c.groups[5].red && !m15c.groups[5].answered && !m15c.groups[6].red,
+  m15c && m15c.groups.map((g) => [g.id, g.red, g.answered]));
+await T.post('/bridge/reply', { sid: 'S1', submission: s15c.id, items: [{ type: 'note', anchor: 'g6', text: '先到的短答' }] });
+T.ok('（前提）指着 g6 的短批注先落下了', await T.waitFor(`window.__ink.S.page.ai.some((a) => a.text === '先到的短答')`, 10000));
+await T.post('/bridge/reply', { sid: 'S1', submission: s15c.id, items: [{ type: 'write', text: '后到的长答' }] });
+const C15 = (await writes15(4)) || [], q6 = bbox(m15c, 'g6'), k7 = bbox(m15c, 'g7');
+T.ok('同一轮先到的短批注不算「之前回答过」：圈号仍在这一轮最后一句红笔问题 g6 那一行、在它右边，不在 g7 旁边',
+  C15.length === 4 && Math.abs(C15[3].at[1] - mid(q6)) < 2 && C15[3].at[0] > q6[2], [C15[3] && C15[3].at, q6, k7]);
+const SHOT5 = await T.shot('5-badge-no-anchor.png');
+
+console.error('截图：\n' + [SHOT1, join(T.OUT, '1-two-badges-zoom.png'), SHOT2, SHOT3, PNG4, PNG4b, SHOT5].join('\n'));
 T.ok('页面没有报错', !T.errors.length, T.errors);
 await T.finish();

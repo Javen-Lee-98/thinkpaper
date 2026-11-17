@@ -16,7 +16,7 @@ const SRC = join(T.ROOT, 'docs'), V1 = join(SRC, '旅行计划_v1.pdf'), V2 = jo
 mkdirSync(SRC, { recursive: true });
 const py = (code, ...args) => execFileSync(PY, ['-c', code, ...args], { encoding: 'utf8' });
 // 一页 16:9 的「幻灯片」：标题、右上角一个小标签（幻灯片右上角常有页码、标志：以前全屏时提示条正压在这里）和三行行程
-const slide = (file, lines) => py(`import fitz,sys,json
+const slide = (file, lines) => py(`import pymupdf as fitz,sys,json
 doc=fitz.open(); p=doc.new_page(width=1000,height=562.5)
 p.insert_text((60,90),'Autumn trip plan',fontsize=34)
 p.insert_text((800,100),'Plan A',fontsize=30)

@@ -93,6 +93,25 @@ test('长回答的圈号跟着页面转（圆心和笔迹一样换算），转�
   nearPt(ans.at, [529, 300]);
 });
 
+test('收成小蓝点的短批注：点跟着页面转（圆心换算），浮出来时记下的换算跟着那几行字挪；转回来都回到原处', () => {
+  const lay = { x: 420, y: 290, w: 200, h: 37, lines: ['车票要提前买'], fs: 21, lh: 29 };
+  const n = { id: 'n', type: 'note', text: '车票要提前买', on: ['s'], lay: { ...lay }, hit: [414, 286, 620, 331], box: [100, 290, 400, 310],
+    paths: [{ d: 'M402 300 L418 300', cls: 'leader', w: 1.3 }], dot: { at: [410, 300], t: 1, why: 'ink' }, popMap: { x0: 414, y0: 286, w: 200, h: 80, u: 1 } };
+  const st = { id: 's', t0: 1, w: 2, pts: [[100, 300, 0.5, 0], [400, 300, 0.5, 30]] };
+  const p = page({ strokes: [st], ai: [n] });
+  T.turnPage(p, 1, { h0: 562.5, mainW: 1000 });
+  const k = 1000 / 562.5;
+  nearPt(n.dot.at, [k * (562.5 - 300), k * 410]);
+  near(n.dot.at[1] - st.pts[1][1], k * 10); // 和所指那一笔的相对位置跟着转
+  near(n.popMap.x0 - n.lay.x, 414 - 420); // 换算和那几行字的相对位置不变
+  near(n.popMap.y0 - n.lay.y, 286 - 290);
+  assert.equal(n.popMap.w, 200);
+  T.turnPage(p, -1, { h0: 562.5, mainW: 1000 });
+  nearPt(n.dot.at, [410, 300]);
+  nearPt([n.lay.x, n.lay.y], [420, 290]);
+  nearPt([n.popMap.x0, n.popMap.y0], [414, 286]);
+});
+
 test('修改建议在页边：文字留在页边，正文上的虚线框跟着页面转', () => {
   const sg = { id: 's', type: 'suggest', text: '改为：ρ', lay: { x: 1044, y: 300, w: 336, h: 37, lines: ['改为：ρ'], fs: 21, lh: 29 },
     paths: [{ d: 'M106 120 L1036 316', cls: 'leader', w: 1.3 }, { d: 'M94 104 L206 104 L206 136 L94 136 L94 104', cls: 'sbox', w: 1.6 }],

@@ -1,5 +1,5 @@
 // 修改建议：文档上的虚线框带 ✓ ×；手指点、笔点、用笔在框里打勾 / 横划都能定，撤销能收回；
-// 决定跟着下一次「检查」带给 Claude（没有「发送决定」按钮）；Claude 回报改成了没有，纸上标出来。
+// 决定跟着下一次点「AI」带给 Claude（没有「发送决定」按钮）；Claude 回报改成了没有，纸上标出来。
 // 另外：普通蓝字旁画星号＝采纳（深蓝带 ★）；从蓝字上横划不再是手势（2026-11-12 去掉），以前划掉过的照旧是淡的；
 // 空白本子里对我自己的字提的建议只是一条页边批注。
 // 跑法：node tests/browser/reply_suggest.mjs [临时目录]；有一项不对退出码 1。
@@ -40,7 +40,7 @@ function blues(subId, crop, b) {
     im.onerror = () => res(null); im.src = 'data:image/jpeg;base64,${jpg}'; })`);
 }
 
-// 1. Claude 推送一页文档到平板；点提示上的「打开」，在文档上用红笔画一道，点「检查」
+// 1. Claude 推送一页文档到平板；点提示上的「打开」，在文档上用红笔画一道，点「AI」
 const shown = await T.post('/bridge/show', { sid: 'S1', path: DOC, title: '提纲' });
 T.ok('平板上提示 Claude 推送了一页', shown.ok === true && (await T.waitFor(`/推送了一页：提纲/.test(document.querySelector('#toast').textContent) && !document.querySelector('#toast').hidden`)), [shown, await toastText()]);
 await T.tap('#toast button');
@@ -134,14 +134,14 @@ await T.pen(seg([[160, 622], [440, 624]]));
 T.ok('横划在我自己写的字上：照旧是一笔笔迹，不当手势', (await strokeCount()) === n0 + 1 && !(await note('这个记号留着')).dismissed, await strokeCount());
 await T.tap('#toolsUndo');
 
-// 6. 没有「发送决定」按钮，也不会自己发；退出全屏后顶栏上也没有，只有「检查」
+// 6. 没有「发送决定」按钮，也不会自己发；退出全屏后顶栏上也没有，只有「AI」
 await sleep(1500);
 const early = await T.poll('S1');
 T.ok('定了以后没有自己发出去', !early, early && early.id);
 await T.tap('#toolsBars');
 T.ok('退出全屏：顶栏上没有「发送决定」「批量回应」，有「AI」', (await T.visible('#bar')) && !(await T.visible('#sendDecisions')) && !(await T.visible('#batchVote')) && (await T.visible('#barCheck')), await T.evalJS(`document.body.className`));
 
-// 7. 点顶栏的「检查」：三条决定随这一次带给 Claude（消息里有采纳 / 不采纳那一段），没定的那条不带；划掉的蓝字不再提
+// 7. 点顶栏的「AI」：三条决定随这一次带给 Claude（消息里有采纳 / 不采纳那一段），没定的那条不带；划掉的蓝字不再提
 await T.saved();
 await T.tap('#barCheck');
 const sub2 = await T.waitSub('S1'), meta2 = sub2 && T.metaOf(sub2), vs = (meta2 && meta2.verdicts) || [];

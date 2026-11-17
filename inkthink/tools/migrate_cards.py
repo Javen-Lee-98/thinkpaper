@@ -440,7 +440,7 @@ def migrate_page(page, nbdir, entry, data):
         newest = ch[-1]
         q = next((v.get("q") for v in reversed(ch) if v.get("q")), None)
         # 所答的笔迹：每一版的 on，后来被改写过的那几版上写的批注（改写就是在回答它们），画在回答上的建议的 on。
-        # 都记进来，平板就照旧把它们当「回答过」，下次「检查」不会把这些红笔当新问题再交一遍
+        # 都记进来，平板就照旧把它们当「回答过」，下次点「AI」不会把这些红笔当新问题再交一遍
         on = []
         for v in list(reversed(ch)) + sugs[id(ch)]:
             ids = list(v.get("on") or [])
@@ -532,7 +532,7 @@ def migrate_page(page, nbdir, entry, data):
             continue
         out.append(replace.get(id(a), a))
     new["ai"] = out
-    # 重新露出来的红笔里，没有哪一条标注指着的（平板据此当作「还没回答的红笔问题」，下次「检查」会交给 Claude）
+    # 重新露出来的红笔里，没有哪一条标注指着的（平板据此当作「还没回答的红笔问题」，下次点「AI」会交给 Claude）
     answered = {x for a in out if isinstance(a, dict) and not a.get("dismissed") for x in (a.get("on") or []) + (a.get("on2") or [])}
     for r in rec["answers"]:
         r["open_red"] = sum(1 for x in r.pop("_reshown") if st_by[x].get("c") == "r" and x not in answered)
@@ -809,7 +809,7 @@ def render(nbs, plans):
                         if a["clash"]:
                             s += f"（其中 {a['clash']} 笔和后来写在那里的别的笔迹叠在一起）"
                         if a.get("open_red"):
-                            s += f"，其中红笔 {a['open_red']} 笔没有回答指着，下次「检查」会当红笔问题交给 Claude"
+                            s += f"，其中红笔 {a['open_red']} 笔没有回答指着，下次点「AI」会当红笔问题交给 Claude"
                     if a["shown"]:
                         s += f"；回答上本来看得见的批注笔迹 {a['shown']} 笔照旧"
                     if a["erased"]:

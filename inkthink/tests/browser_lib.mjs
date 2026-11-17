@@ -23,12 +23,23 @@ const BROWSERS = [process.env.INK_BROWSER, 'C:\\Program Files (x86)\\Microsoft\\
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'];
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function freePort() {
+// 系统给的空闲端口偶尔落在 fetch 和浏览器都不肯连的那几个上（6000、6665–6669 等，fetch 规范里的「坏端口」）：
+// 服务起得来，但测试这头永远连不上，表现成「等不到 …/bridge/ping」（2026-11-15 碰到过一次 6000）。碰到就再要一个
+const BAD_PORTS = new Set([1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080]);
+
+function onePort() {
   return new Promise((res, rej) => {
     const s = createServer();
     s.on('error', rej);
     s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
   });
+}
+
+async function freePort() {
+  for (;;) {
+    const p = await onePort();
+    if (p >= 1024 && !BAD_PORTS.has(p)) return p;
+  }
 }
 
 async function waitHttp(u, ms) {
@@ -45,10 +56,11 @@ async function waitHttp(u, ms) {
  *   name      这个测试的名字（临时目录里用它分开）
  *   pages     草稿本一共几页（默认 1）
  *   sessions  连着的对话，默认 [{ sid: 'S1', label: 'idea' }]；cwd 不写就是临时目录
- *   query     打开页面时地址后面再带的参数，比如 '&lang=en'；默认带 lang=zh 和 notour=1
+ *   query     打开页面时地址后面再带的参数，比如 '&lang=en'；默认带 lang=zh
  *   width / height  屏幕大小，默认 834 × 1194（竖着的 iPad）
  *   open      false 时不打开页面（只要服务），之后自己调 T.go()
  *   config    测试服务的配置（会写成一个 config.json），比如 { zotero: 'http://127.0.0.1:端口' }
+ *   guide     true 时第一次打开照常出新手引导（测引导用）；默认先在这台「设备」上记下「看过了」，免得引导挡着别的测试
  */
 export async function boot(opts = {}) {
   const name = opts.name || 'test';
@@ -134,6 +146,9 @@ export async function boot(opts = {}) {
   await cdp('Page.enable');
   await cdp('Emulation.setDeviceMetricsOverride', { width: opts.width || 834, height: opts.height || 1194, deviceScaleFactor: 1, mobile: true });
   await cdp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  // 新手引导第一次打开时出来、盖在纸上面：别的测试先记下「看过了」（和点过「知道了」一样存在这台设备上）。
+  // 页面本身不看测试参数，真的第一次打开照样出引导；测引导的用 guide: true
+  if (!opts.guide) await cdp('Page.addScriptToEvaluateOnNewDocument', { source: "try { localStorage.setItem('inkthink.guideSeen', 'true'); } catch (e) {}" });
 
   // 等页面开好：本子和这一页都载入了、连上了服务
   T.ready = async (ms = 30000) => {
@@ -147,13 +162,13 @@ export async function boot(opts = {}) {
   // 打开（或重新打开）页面。query 是地址后面再带的参数；带 raw: true 时 query 就是整个查询串（不自动加访问码等）
   T.go = async (query = '', o = {}) => {
     // 页面取地址里第一个 lang：query 里自己带了 lang 就不再加 lang=zh
-    const q = o.raw ? query : `?k=${code}${/(^|[?&])lang=/.test(query) ? '' : '&lang=zh'}&notour=1${query}`;
+    const q = o.raw ? query : `?k=${code}${/(^|[?&])lang=/.test(query) ? '' : '&lang=zh'}${query}`;
     const url = `${B}/${o.path || ''}${q}`;
     await cdp('Page.navigate', { url });
     // 不等页面开好的（比如故意用旧访问码打开、等着出「需要访问码」）：纸那一页至少等它的脚本跑起来（window.__ink 有了）。
     // 2026-11-14 整套跑时 devices 几次卡在这一步，单独跑都好；卡住那次查到：页面和各个文件都取到了，app.js 却没跑完
     // （没有 window.__ink、没发任何 /api 请求、也没报错）。原因没查清，先照下面开纸的办法：15 秒还没跑起来就重新打开一次。
-    // 别的页（path 不空，比如 brush.html、qr）没有 window.__ink，不等。
+    // 别的页（path 不空，比如 qr）没有 window.__ink，不等。
     if (o.wait === false) {
       await cdp('Page.bringToFront').catch(() => {});
       if (o.path) return;

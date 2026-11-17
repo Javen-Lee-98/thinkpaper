@@ -89,7 +89,9 @@
     }
 
     // 页边上的批注另外摆；长回答的圈号跟着页面转（圆心换算）；其余（下划线、圈、箭头）整体换算，文字保持正着
-    const margin = [];
+    // 收成小蓝点的短批注（阶段 D1，空白本子）：点和圈号一样按圆心换算；它那几行字（lay）照下面的办法挪，
+    // 浮出来写过红字时记下的换算（popMap）跟着那几行字一起挪，红字不错位
+    const margin = [], lay0 = new Map();
     for (const a of page.ai) {
       if (a.type === 'write') {
         if (Array.isArray(a.at) && a.at.length === 2) {
@@ -98,6 +100,11 @@
         }
         continue;
       }
+      if (a.dot && Array.isArray(a.dot.at) && a.dot.at.length === 2) {
+        a.dot.at = apply(m, a.dot.at[0], a.dot.at[1]).map(r1);
+        if (!a.erasedAt && !a.dismissed) grow([a.dot.at[0] - 10, a.dot.at[1] - 10, a.dot.at[0] + 10, a.dot.at[1] + 10]);
+      }
+      if (a.lay && a.popMap) lay0.set(a, [a.lay.x, a.lay.y]);
       if (a.lay && a.lay.x >= o.mainW - 1) { margin.push(a); continue; }
       if (a.box) a.box = box(m, a.box).map(r1);
       for (const p of a.paths || []) p.d = path(m, p.d);
@@ -144,6 +151,10 @@
       if (a.box) a.box = box(m, a.box).map(r1);
       a.hit = [r1(x - 6), r1(y - 4), r1(x + L.w), r1(y + L.h + 4)];
       if (!a.dismissed) grow([B[0], a.hit[1], B[2], a.hit[3]]);
+    }
+    for (const [a, p0] of lay0) {
+      a.popMap.x0 = r1(a.popMap.x0 + a.lay.x - p0[0]);
+      a.popMap.y0 = r1(a.popMap.y0 + a.lay.y - p0[1]);
     }
 
     page.rot = nr;

@@ -1,6 +1,6 @@
-// 现在的页面（只有这一套）：只有纸、左上角的本子名和页码（点开抽屉）、右下角一条（退出全屏、黑笔、红笔、橡皮、撤销、检查）；
-// 上下页接在一起；抽屉里「这本发往」换对话；「检查」只有这一页新写就整页交、别的页也有新写的就一起交，
-// 不带档位、不带补一句；空页不交；旧的试用页地址跳到这里；电脑上的服务停了，顶上写出来。
+// 现在的页面（只有这一套）：只有纸、左上角的本子名和页码（点开抽屉）、右下角一条（退出全屏、黑笔、红笔、橡皮、撤销、AI）；
+// 上下页接在一起；抽屉里「这本发往」换对话；「AI」只有这一页新写就整页交、别的页也有新写的就一起交，
+// 不带档位、不带补一句；空页不交；旧的试用页地址删了（只有一个入口）；电脑上的服务停了，顶上写出来。
 // 跑法：node tests/browser/page_simple.mjs [临时目录]；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
 import { boot } from '../browser_lib.mjs';
@@ -21,7 +21,7 @@ async function gotoPage(i) {
 T.ok('只有这一套页面：没有区分新旧界面的标记', await js(`!document.body.classList.contains('simple') && !('SIMPLE' in window.__ink) && document.querySelectorAll('.full-only, .simple-only').length === 0`));
 T.ok('没有顶栏、左侧工具栏、全屏浮动条', !(await T.visible('#bar')) && !(await T.visible('#rail')) && !(await T.visible('#floatbar')));
 const btns = await js(`[...document.querySelectorAll('#tools button')].map((b) => b.dataset.tool || b.id).join(',')`);
-T.ok('右下角一条：退出全屏、黑笔、红笔、橡皮、撤销、AI', (await T.visible('#tools')) && btns === 'toolsBars,pen,red,eraser,toolsUndo,check', btns);
+T.ok('右下角一条：退出全屏、黑笔、红笔、橡皮、套索、撤销、重做、AI', (await T.visible('#tools')) && btns === 'toolsBars,pen,red,eraser,lasso,toolsUndo,toolsRedo,check', btns);
 const nb0 = await js(`({ title: window.__ink.S.nb.title, pages: window.__ink.S.nb.pages, idx: window.__ink.S.idx })`);
 T.ok('左上角是本子名和页码', (await T.visible('#nbChip')) && (await T.text('#chipName')) === nb0.title && nb0.pages === 3
   && (await T.text('#chipPage')) === `${nb0.idx + 1}/${nb0.pages}`, [nb0, await T.text('#chipName'), await T.text('#chipPage')]);
@@ -41,7 +41,7 @@ T.ok('抽屉还开着，那一行跟着变', (await T.visible('#drawer')) && (aw
 await T.tap('#nbChip');
 T.ok('再点本子名收起抽屉', !(await T.visible('#drawer')));
 
-// 3. 写一笔，点「检查」：整页交给 MY_PAPER，不带档位、不带补一句
+// 3. 写一笔，点「AI」：整页交给 MY_PAPER，不带档位、不带补一句
 await T.tap('#tools [data-tool=red]');
 T.ok('红笔选中', (await js(`window.__ink.S.tool`)) === 'red' && (await js(`document.querySelector('#tools [data-tool=red]').classList.contains('on')`)));
 await T.tap('#tools [data-tool=pen]');
@@ -75,7 +75,7 @@ await T.tap('#check'); // 这三笔先交掉，下面第 5 步只看第 2、3 �
 const sub4 = await T.waitSub('S2');
 T.ok('交上去的也是一组三笔', Boolean(sub4) && (T.metaOf(sub4).groups || []).some((g) => g.n === 3), sub4 && (T.metaOf(sub4).groups || []).map((g) => g.n));
 
-// 5. 第 2、3 页各写一笔，停在第 3 页点「检查」：两页一起交（只交新写的），不问
+// 5. 第 2、3 页各写一笔，停在第 3 页点「AI」：两页一起交（只交新写的），不问
 await gotoPage(1);
 await T.pen(T.line(120, 300, 300));
 await gotoPage(2);
@@ -91,8 +91,8 @@ T.ok('两页一起交', Boolean(sub) && sub.text.startsWith('【草稿纸·整�
   sub && sub.text.slice(0, 200));
 T.ok('整本消息也不带档位', Boolean(sub) && !/档位/.test(sub.text));
 
-// 5b. 第 1 页上有一条修改建议，用笔点它旁边的 ✓（那一页没写新字）：提示说下次「检查」带上，不提已经没有的「发送决定」；
-//     换到第 2 页写一笔再检查：第 1 页连同这条决定一起交上去。
+// 5b. 第 1 页上有一条修改建议，用笔点它旁边的 ✓（那一页没写新字）：提示说下次点「AI」带上，不提已经没有的「发送决定」；
+//     换到第 2 页写一笔再点「AI」：第 1 页连同这条决定一起交上去。
 //     这条建议是直接放进页面数据的（准备工作）：空白纸上真回一条 suggest，页面会把它画成普通批注，不出 ✓ ×
 await gotoPage(0);
 await js(`(() => { const S = window.__ink.S;
@@ -113,7 +113,7 @@ sub = await T.waitSub('S2');
 T.ok('没写新字的那一页连同决定一起交', Boolean(sub) && sub.text.startsWith('【草稿纸·整本】') && /── 第 1 页/.test(sub.text) && /── 第 2 页/.test(sub.text)
   && /「改为：平均速度」：采纳/.test(sub.text) && !/── 第 3 页/.test(sub.text), sub && sub.text.slice(0, 300));
 
-// 6. 在抽屉里新建一本空白的：左上角换成它的名字；空页点「检查」不交
+// 6. 在抽屉里新建一本空白的：左上角换成它的名字；空页点「AI」不交
 await T.tap('#nbChip');
 await T.tap('#actNewNb');
 await T.tap('#newNbTitle', 200);
@@ -127,10 +127,11 @@ await T.tap('#check');
 T.ok('空页不交', !(await T.poll('S2')) && !(await T.poll('S1')));
 T.ok('提示还没写字', (await T.visible('#toast')) && (await T.text('#toast')).includes('还没写字'), await T.text('#toast'));
 
-// 7. 旧的试用页地址跳到这里，访问码等参数照带
-await T.go('', { path: 'static/plain.html' });
-T.ok('试用页地址跳到现在的页面', (await js(`location.pathname + '|' + new URLSearchParams(location.search).get('notour')`)) === '/|1'
-  && (await js(`Boolean(window.__ink && document.querySelector('#check') && document.querySelector('#nbChip'))`)), await js(`location.pathname`));
+// 7. 只有一个入口（2026-11-16 用户定）：旧的试用页地址（static/plain.html，原来跳到这里）删了，打开是找不到页面；
+//    现在的页面照旧在根地址
+const st7 = {};
+for (const p of ['/static/plain.html', '/plain.html', '/']) st7[p] = (await fetch(T.B + p)).status;
+T.ok('旧的试用页地址删了：/static/plain.html、/plain.html 都是找不到页面（404），根地址照旧打开', st7['/static/plain.html'] === 404 && st7['/plain.html'] === 404 && st7['/'] === 200, st7);
 
 // 8. 电脑上的服务停了：顶上写出来，新写的字没存上也说明白（没有状态栏，不写就什么都看不到）
 await T.go();

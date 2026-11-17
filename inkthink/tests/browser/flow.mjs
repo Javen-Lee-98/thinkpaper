@@ -9,7 +9,7 @@ import { boot, PY } from '../browser_lib.mjs';
 
 const T = await boot({ name: 'flow', pages: 3, open: false });
 // 一本 7 页的书：每页比屏幕矮（下一页露得出来）；每页的大黑字在不同的横向位置，看画面就认得出是哪一页
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 doc=fitz.open()
 for k in range(7):
     p=doc.new_page(width=595,height=520); p.insert_text((60+70*k,100),"P%d"%(k+1),fontsize=40)

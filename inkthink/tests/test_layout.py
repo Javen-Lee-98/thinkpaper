@@ -99,6 +99,44 @@ class LayoutTest(unittest.TestCase):
         # C 没了：它后面的空白纸跟到前一页 B 的空白纸之后；D 在新版里是第 5 页，仍然是删除状态
         self.assertEqual([h["entry"] for h in lay.hidden], [{"key": "p0004", "pdf": 4}])
 
+    def test_move(self):
+        """挪页（抽屉里拖缩略图，2026-11-16）：只改先后，页的键不变；j 按挪完以后的位置算。"""
+        lay = layout.Layout(self.path, "book", 4)          # A B C D
+        blank = lay.pages[lay.insert_blank(0)]["key"]    # A _ B C D
+        self.assertEqual(lay.move(4, 0), 0)              # D A _ B C
+        self.assertEqual(keys(lay), ["p0003", "p0000", blank, "p0001", "p0002"])
+        self.assertEqual(lay.move(0, 4), 4)              # 挪回去
+        self.assertEqual(keys(lay), ["p0000", blank, "p0001", "p0002", "p0003"])
+        self.assertEqual(lay.move(2, 2), 2)              # 原地不动
+        self.assertEqual(keys(lay), ["p0000", blank, "p0001", "p0002", "p0003"])
+        for i, j in ((0, 5), (5, 0), (-1, 0)):
+            with self.assertRaises(KeyError):
+                lay.move(i, j)
+        lay.save()
+        self.assertEqual(keys(layout.Layout(self.path, "book", 4)), ["p0000", blank, "p0001", "p0002", "p0003"])
+
+    def test_restore_follows_the_page_it_was_after_when_that_page_moved(self):
+        """删掉的页记着原来跟在哪一页后面（按键记）：那一页挪了地方，恢复时跟着它。"""
+        lay = layout.Layout(self.path, "book", 4)          # A B C D
+        lay.delete(lay.index_of("p0002"))                # 删 C（跟在 B 后面）：A B D
+        lay.move(lay.index_of("p0001"), 0)               # B A D
+        self.assertEqual(lay.restore("p0002"), 1)        # B C A D
+        self.assertEqual(keys(lay), ["p0001", "p0002", "p0000", "p0003"])
+
+    def test_document_update_after_moving_pages(self):
+        """挪过页序以后原文件更新（按内容对齐）：书页回到新版里的先后，挪过的不保留；
+        空白纸跟着它在挪过的页序里前面那一页走，挪到最前面的留在最前。"""
+        lay = layout.Layout(self.path, "book", 3)          # A B C
+        blank = lay.pages[lay.insert_blank(0)]["key"]    # A _ B C
+        lay.move(lay.index_of("p0002"), 0)               # C A _ B
+        lay.move(lay.index_of(blank), 1)                 # C _ A B：空白纸跟在 C 后面
+        lay.remap_pdf([0, 1, 2], 3)                      # 新版的内容和旧版一样
+        self.assertEqual(keys(lay), ["p0000", "p0001", "p0002", blank])
+        first = lay.pages[lay.insert_blank(-1)]["key"]   # 最前面再插一张：_ A B C _
+        lay.move(lay.index_of("p0002"), 1)               # _ C A B _：后一张空白纸现在跟在 B 后面
+        lay.remap_pdf([0, 1, 2], 3)
+        self.assertEqual(keys(lay), [first, "p0000", "p0001", blank, "p0002"])
+
 
 if __name__ == "__main__":
     unittest.main()

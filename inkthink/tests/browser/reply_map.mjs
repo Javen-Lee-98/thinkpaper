@@ -1,6 +1,8 @@
 // 概念图：Claude 给我画的箭头补关系词（label），建议加概念（node）、连线（link）、分组（group），都画成虚线带 ✓ ×；
-// 同意的变实线、不同意的变淡；新概念放在空处不压字；决定随下一次「检查」带回（带着是哪一种）；擦掉箭头，关系词跟着不画。
+// 同意的变实线、不同意的变淡；新概念放在空处不压字；决定随下一次点「AI」带回（带着是哪一种）；擦掉箭头，关系词跟着不画。
 // 跑法：node tests/browser/reply_map.mjs [临时目录]；有一项不对退出码 1。
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { boot, sleep } from '../browser_lib.mjs';
 
 const T = await boot({ name: 'reply-map' });
@@ -69,12 +71,10 @@ T.ok('连线：从 A 指到 C 的虚线箭头，关系词「包含」写在旁�
 T.ok('分组：虚线框把 A 和 C 框在一起，没把 B 框进去，类名「源头」写在框的上边', M.group.words === '源头' && inside(A, M.group.pb, 2) && inside(C, M.group.pb, 2) && !meets(M.group.pb, Bx)
   && M.group.pb[2] - M.group.pb[0] < A[2] - A[0] + 50 && M.group.lay[3] <= M.group.box[1] + 2 && M.group.lay[0] >= M.group.box[0], [M.group.pb, M.group.lay, A, C]);
 T.ok('四条都在屏幕里', kinds.every((k) => M[k].yes && M[k].yes[0] > 0 && M[k].yes[0] < 834 && M[k].yes[1] > 0 && M[k].yes[1] < 1194), kinds.map((k) => M[k].yes));
-// 连线的关系词写在线的左边还是右边是随机的（跟着这条批注的编号）。落在右边时，它的 ✓ × 钮和分组框的 ✓ × 钮正好叠在同一处，
-// 手指点到的只会是连线那条。所以下面分组用笔在框角上打勾来定；叠上的那几次在这里记一笔（大约一半的次数会出现）
-if (Math.hypot(M.link.yes[0] - M.group.yes[0], M.link.yes[1] - M.group.yes[1]) < 18) {
-  T.known('分组框的 ✓ × 钮和框里那条连线的 ✓ × 钮不叠在一起', false,
-    '两条建议的钮各算各的位置，不互相让开（static/app.js:1703–1711 verdictButtons）；叠上时点按只认最近的、排在前面的那条（app.js:1713–1725 voteButtonAt）。只在关系词落在连线右边时出现', [M.link.yes, M.group.yes]);
-}
+// 一页上几组 ✓ × 钮互不相叠（阶段 D1 修的，原来标着已知不过）。连线的关系词写在线的左边还是右边是随机的（跟着这条批注的编号），
+// 落在右边时它的钮原本和分组框的钮在同一处；这里不管落在哪边都查，必定会叠的那种布局在第 8 步固定出来查
+const vscale = await T.evalJS('window.__ink.S.view.s'), circles = kinds.flatMap((k) => [M[k].yes, M[k].no].map((c) => [k, c]));
+T.ok('四条建议的 ✓ × 钮互不相叠', circles.every(([k, c], i) => circles.every(([k2, c2], j) => j <= i || Math.hypot(c[0] - c2[0], c[1] - c2[1]) >= 30 * vscale - 1)), circles);
 
 // 3. 手指点新概念的 ✓：变实线；用笔在连线的关系词上横划：变淡，还是虚线；这一笔不留
 const n0 = await strokeCount();
@@ -101,7 +101,7 @@ await sleep(1500);
 const early = await T.poll('S1');
 T.ok('定了以后没有自己发出去', !early, early && early.id);
 
-// 5. 再点「检查」：四条决定带回给 Claude，各带着是哪一种；消息里按种类写着采纳 / 不采纳
+// 5. 再点「AI」：四条决定带回给 Claude，各带着是哪一种；消息里按种类写着采纳 / 不采纳
 await T.saved();
 await T.tap('#check');
 const sub2 = await T.waitSub('S1'), vs = (sub2 && T.metaOf(sub2).verdicts) || [];
@@ -129,5 +129,59 @@ await T.reload();
 M = await mapItems();
 T.ok('刷新后四条还在：同意的实线、不同意的虚线，字没变', kinds.every((k) => M[k] && M[k].drawn) && M.node.dash === 'none' && M.group.dash === 'none' && M.link.dash !== 'none'
   && M.label.words === '导致' && M.node.words === '作业太多' && M.link.words === '包含' && M.group.words === '源头', kinds.map((k) => M[k] && [k, M[k].drawn, M[k].dash, M[k].words]));
+
+// 8. 固定出一个会叠的布局（阶段 D1 修「分组框和框里连线的 ✓ × 钮叠在一起」时加的）：第 2 页上再画两个圈，Claude 建议从上面那个连到
+//    下面那个（带关系词）、把两个归一类；把连线关系词那一块挪到分组框右边那条边的正中——原来两组钮的位置算出来正好是同一处。
+//    查：两组钮不叠，先来的连线在原处，后来的分组让开、仍紧挨着分组框；手指点哪个钮就是哪个
+await T.api('/api/notebook/addpage?nb=scratch', { method: 'POST', body: '' });
+await T.reload();
+if (await T.evalJS('window.__ink.S.flow')) { await T.evalJS('window.__ink.toggleFlow()'); await sleep(600); }
+await T.openPage(1);
+await T.pen(ring(160, 160, 50, 30));
+await T.pen(ring(160, 420, 50, 30));
+await T.tap('#check');
+const sub3 = await T.waitSub('S1'), meta3 = sub3 && T.metaOf(sub3);
+T.ok('（前提）第 2 页交上去了：两个圈', Boolean(meta3) && meta3.groups.length === 2, meta3 && meta3.groups);
+const rep3 = await T.post('/bridge/reply', { sid: 'S1', submission: sub3.id, items: [
+  { type: 'link', from: 'g1', to: 'g2', text: '包含' },
+  { type: 'group', anchors: ['g1', 'g2'], text: '水果' }] });
+T.ok('（前提）两条都落下了', rep3.ok === true && (await landed(2)), rep3);
+const fixed = await T.evalJS(`(() => { const S = window.__ink.S, L = S.page.ai.find((a) => a.type === 'link'), G = S.page.ai.find((a) => a.type === 'group');
+  const R = G.vbox || G.box, cy = (R[1] + R[3]) / 2, w = L.vbox[2] - L.vbox[0], h = L.vbox[3] - L.vbox[1], v = [R[2] - w, cy - h / 2, R[2], cy + h / 2];
+  L.vbox = v.slice(); L.box = v.slice(); if (L.lay) { L.lay.x = v[0] + 6; L.lay.y = v[1] + 4; } L.hit = [Math.min(L.hit[0], v[0]), Math.min(L.hit[1], v[1]), Math.max(L.hit[2], v[2]), Math.max(L.hit[3], v[3])];
+  window.__ink.renderAI();
+  // 原来的算法（各算各的）：框右边放得下就放在右边、和框竖直居中
+  const home = (b) => [b[2] + 8 + 15, (b[1] + b[3]) / 2];
+  return { link: L.id, group: G.id, L: v, R, homeL: home(v), homeG: home(R), TW: S.TW }; })()`);
+T.ok('（前提）这个布局下两组钮原来算出来是同一处', fixed.homeL[0] === fixed.homeG[0] && fixed.homeL[1] === fixed.homeG[1] && fixed.R[2] + 8 + 60 + 8 <= fixed.TW - 6, fixed);
+const btns = () => T.evalJS(`(() => { const out = {}; for (const id of [${JSON.stringify(fixed.link)}, ${JSON.stringify(fixed.group)}]) { const g = document.querySelector('#aiRoot [data-id="' + id + '"]');
+  out[id] = ['yes', 'no'].map((v) => { const c = g.querySelector('.vbtn.' + v + ' circle'), r = c.getBoundingClientRect(); return { x: +c.getAttribute('cx'), y: +c.getAttribute('cy'), sx: r.left + r.width / 2, sy: r.top + r.height / 2 }; }); } return out; })()`);
+const Bt = await btns(), lb = Bt[fixed.link], gb = Bt[fixed.group], all4 = lb.concat(gb);
+T.ok('两组 ✓ × 钮不叠（四个圆两两隔开一个圆的宽度以上）', all4.every((c, i) => all4.every((d, j) => j <= i || Math.hypot(c.x - d.x, c.y - d.y) >= 30)), Bt);
+T.ok('先来的连线那组在原处（关系词右边、竖直居中）', Math.abs(lb[0].x - fixed.homeL[0]) < 0.01 && Math.abs(lb[0].y - fixed.homeL[1]) < 0.01, [lb[0], fixed.homeL]);
+const pr = [gb[0].x - 15, gb[0].y - 15, gb[1].x + 15, gb[1].y + 15], R = fixed.R, sep = Math.max(pr[0] - R[2], R[0] - pr[2], pr[1] - R[3], R[1] - pr[3]);
+T.ok('后来的分组那组让开了，仍紧挨着分组框（隔不到 12）、离原处不远', sep >= 0 && sep <= 12 && Math.hypot(gb[0].x - fixed.homeG[0], gb[0].y - fixed.homeG[1]) < 120, { pr, R, sep, home: fixed.homeG });
+// 看得出哪一对属于哪条建议（D1 第二部分加的）：让开的那组不和别的钮上下挨着排，还有一条细虚线连到自己的框，线头的小点落在框边上
+const minApart = Math.min(...lb.flatMap((c) => gb.map((d) => Math.hypot(c.x - d.x, c.y - d.y))));
+T.ok('两组钮不再上下挨着（相隔 60 以上）', minApart >= 60, minApart);
+const links = await T.evalJS(`(() => { const out = {}; for (const id of [${JSON.stringify(fixed.link)}, ${JSON.stringify(fixed.group)}]) { const e = document.querySelector('#aiRoot [data-id="' + id + '"] .vlink circle');
+  out[id] = e ? [+e.getAttribute('cx'), +e.getAttribute('cy')] : null; } return out; })()`);
+const end = links[fixed.group], onEdge = (p, b) => Boolean(p) && ((Math.abs(p[0] - b[0]) < 1 || Math.abs(p[0] - b[2]) < 1) && p[1] >= b[1] - 1 && p[1] <= b[3] + 1
+  || (Math.abs(p[1] - b[1]) < 1 || Math.abs(p[1] - b[3]) < 1) && p[0] >= b[0] - 1 && p[0] <= b[2] + 1);
+const Lb = fixed.L;
+T.ok('让开的那组（分组）有一条细线连到分组框，线头落在分组框的边上、不在连线那块关系词的框上', onEdge(end, R) && !(end[1] >= Lb[1] - 1 && end[1] <= Lb[3] + 1 && end[0] >= Lb[0] - 1 && end[0] <= Lb[2] + 1), { end, R, L: Lb });
+T.ok('在原处的那组（连线）不画这条线', links[fixed.link] === null, links);
+{ const z = await T.cdp('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: 834, height: 1194, scale: 2 } }); // 两倍大，看得清那条细线
+  writeFileSync(join(T.OUT, '8-vote-owners.png'), Buffer.from(z.data, 'base64')); console.error('截图：\n' + join(T.OUT, '8-vote-owners.png')); }
+const decided = () => T.evalJS(`(() => { const S = window.__ink.S; return { link: (S.page.ai.find((a) => a.id === ${JSON.stringify(fixed.link)}) || {}).verdict || null, group: (S.page.ai.find((a) => a.id === ${JSON.stringify(fixed.group)}) || {}).verdict || null }; })()`);
+await sleep(1200);
+await T.fingerTapAt(gb[0].sx, gb[0].sy);
+let dd = await decided();
+T.ok('手指点分组的 ✓：定的是分组，连线没动', dd.group === 'yes' && dd.link === null, dd);
+await toastGone();
+const Bt2 = await btns();
+await T.fingerTapAt(Bt2[fixed.link][1].sx, Bt2[fixed.link][1].sy);
+dd = await decided();
+T.ok('手指点连线的 ×：定的是连线，分组还是同意', dd.link === 'no' && dd.group === 'yes', dd);
 
 await T.finish();

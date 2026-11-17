@@ -115,7 +115,7 @@ writeFileSync(MD, mine, 'utf8');
 await T.sleep(2500);
 T.ok('（对照）还在前台、没有别的动静时，平板不知道原文件改了', (await js(`document.querySelector('#verchip').dataset.kind`)) !== 'source', await T.text('#verchip'));
 await js(`(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }); document.dispatchEvent(new Event('visibilitychange')); return 1; })()`);
-T.ok('回到前台：提示条写「原文件改过了」，带「更新到草稿纸」', await T.waitFor(`!document.querySelector('#verchip').hidden && document.querySelector('#verchip').dataset.kind === 'source'
+T.ok('回到前台：提示条写「原文件改过了」，带「更新这本」', await T.waitFor(`!document.querySelector('#verchip').hidden && document.querySelector('#verchip').dataset.kind === 'source'
   && document.querySelector('#verText').textContent === '原文件「会议纪要.md」改过了'`, 8000), await T.text('#verchip'));
 await openDrawer();
 await T.tap('#actUndoEdit', 800);

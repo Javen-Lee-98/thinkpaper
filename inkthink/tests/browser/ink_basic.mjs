@@ -1,4 +1,4 @@
-// 最基本的一条线：用笔写、橡皮擦、撤销、自己存到电脑上、刷新后还在、点「检查」交上去。
+// 最基本的一条线：用笔写、橡皮擦、撤销、自己存到电脑上、刷新后还在、点「AI」交上去。
 // 跑法：node tests/browser/ink_basic.mjs [临时目录]；有一项不对退出码 1。
 import { boot } from '../browser_lib.mjs';
 
@@ -33,7 +33,7 @@ T.ok('电脑上的页面文件里有这三笔', Boolean(onDisk) && onDisk.stroke
 await T.reload();
 T.ok('刷新后三笔还在', (await T.strokes()) === 3, await T.strokes());
 
-// 4. 点「检查」：这一页交给连着的对话
+// 4. 点「AI」：这一页交给连着的对话
 await T.tap('#check');
 const sub = await T.waitSub('S1');
 T.ok('交上去了，是一条【草稿纸】消息', Boolean(sub) && sub.text.startsWith('【草稿纸】'), sub && sub.text.slice(0, 60));

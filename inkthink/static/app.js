@@ -9,14 +9,27 @@
   const PEN_W = 2.1;
   const TOP_SAFE = 44; // 全屏时屏幕顶端这一条碰了会让 Safari 退出全屏：标签、右下角那一条都不放在这里
   const NOTE_W = M - 44, NOTE_FS = 21, NOTE_LH = 29;
-  const noteX = () => S.W + 22; // 页边批注的位置：页面拉宽后页边跟着往右挪
+  const noteX = () => S.W + 22; // 书页、推送页的页边批注的位置：页面拉宽后页边跟着往右挪
+  // 空白本子里 Claude 的东西自己找空白（阶段 D1，《产品定义》第 3 节；具体的数是用户不在时暂定的）：
+  // 短批注最宽 NOTE_MAXW（约 14 个字，按字折行后再按实际字宽收窄），离所指的笔迹 NOTE_GAP，和别的笔迹、蓝字至少隔 NOTE_CLEAR；
+  // 往右、下、左、上各最多找出 NOTE_REACH 远，再远就算「周围满了」。几个方向按 SIDE_COST 加价：右边（往右挪不到 40）优先，
+  // 再是下面；左边、上面只在右边和下面找出 NOTE_REACH 都放不下时才用。压到「接着往下写的地方」（最后写的那一行、
+  // 最底下那一行的下面一行）再加 ZONE_COST：软的——下面那一行被占着时往下再让一行，近处都没有地方才放到那里
+  const NOTE_MAXW = 300, NOTE_GAP = 16, NOTE_CLEAR = 8, NOTE_REACH = 260, ZONE_COST = 120;
+  const SIDE_COST = { right: 0, below: 40, left: 320, above: 360 };
+  const BLOCK_GAP = 30, BLOCK_REACH = 200; // 图、公式、示意图：离所指内容 BLOCK_GAP，往右、往下各最多找出 BLOCK_REACH 远
+  const ROOM_TYPES = new Set(['note', 'question', 'suggest', 'sketch', 'figure', 'formula']); // 空白本子里自己找空白落下的几种
+  // 收成的小蓝点（短批注被后来写的黑笔压到，或到的时候旁边放不下）：半径、外面一圈淡的光晕、离字多远
+  const DOT_R = 7, DOT_HALO = 3, DOT_GAP = 8;
   const FONT = '"Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif';
   const PALM_MS = 1000; // 笔落下、抬起后这么久里手指轻点不算（多半是手掌）
   // 按钮上的线条图标（24×24，描边用 currentColor）；按钮写 data-icon="名字"，说明写在 aria-label 里（长按看）
   const ICONS = {
     pen: '<path d="M4 20l1.2-4.6L15.6 5a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z"/><path d="M14 6.6l3.4 3.4"/>',
     eraser: '<path d="M9 20h11"/><path d="M5.2 14.8l8.6-8.6a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11.1 19a2 2 0 0 1-1.4.6H8.4a2 2 0 0 1-1.4-.6l-1.8-1.8a1.6 1.6 0 0 1 0-2.4z"/><path d="M9.4 10.6l4 4"/>',
+    lasso: '<ellipse cx="12.5" cy="9.5" rx="8.5" ry="5.8" stroke-dasharray="3 2.6"/><path d="M6.6 14.2c-1 1.5-.6 3.1 1 3.5 1.5.4 1.6 1.9-.2 2.8"/>', // 套索：一个虚线圈拖着一截绳子
     undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+    redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>', // 重做：撤销那个图左右翻过来
     edit: '<path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 8.5l3 3"/>',
     lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
     trash: '<path d="M4 7h16"/><path d="M9 7V4.5h6V7"/><path d="M6.5 7l1 12.5h9l1-12.5"/><path d="M10 11v5M14 11v5"/>',
@@ -31,15 +44,39 @@
   };
   const FLOW_GAP = 40, FLOW_MAX = 3, FLOW_KEEP = 4; // 连续阅读：页缝、上下各画几页、缓存留前后几页
   const GROUP_GAP_MS = 1800, GROUP_DIST = 60;
+  // 笔迹分组的后两步（2026-11-14）：和服务端 pages.py 同一套判据、同一组常数（名字也一样），改一边要两边一起改；
+  // tests/browser/grouping.mjs 拿同一份夹具（tests/fixtures/grouping.json）让两边各分一次、逐组比
+  const LINE_PAUSE_MS = 15000; // 同一行接着写：前后两组之间停顿不到这么久
+  const LINE_GAP = 0.6;        // 同一行接着写：横向间距不到这么多个字高
+  const LINE_RATIO = 2.2;      // 两组的字高相差不到这么多倍（大字旁边的小字不并）
+  const TALL = 1.5, LONG = 2.5; // 一组里有高过 TALL 个字高的一笔（括号、竖线）或长过 LONG 个字高的直线（横线、箭头杆）：不当一行字
+  const LATE_SMALL = 0.6;      // 回头补的小笔画：一两笔、不超过这么多个字高
+  const LATE_NEAR = 0.25;      // 回头补的小笔画：离那组里某一笔不到这么多个字高
   const TAP_MS = 450, SLOP = 8; // 手指轻点：不到这么久、挪了不到这么多像素
   // 长回答的圈号（2026-11-13：长回答不上纸，纸上只留圈号，点开是浮出的卡片）：半径、数字字号（页面单位）、离字多远、到达时跳两下用多久
   const BADGE_R = 13, BADGE_FS = 17, BADGE_GAP = 16, HOP_MS = 900;
   // 卡片里的字按这个固定宽度排版（2026-11-14），外面按屏幕整体缩放：换屏幕大小、横竖屏，换行一样，卡片上的红字不错位。
   // 服务端按平板量下的排版画图给 Claude（pages.py 的 CARD_W 是同一个数）
   const CARD_W = 440;
-  const CARD_PAN = 24; // 卡片开着时，纸上的手指挪过这么多像素才算挪纸、收起卡片（搭着的手掌晃一点不算）
+  const CARD_PAN = 24; // 卡片开着时，纸上的一根手指挪过这么多像素才算挪纸、收起卡片（搭着的手掌晃一点不算）
+  // 卡片开着时纸上同时有几个触点：两点的间距变了、或中点挪了这么多像素，才算缩放、挪纸，收起卡片。比 CARD_PAN 大：
+  // 手掌、手环落下时常被认成两三个点，手放稳的时候这几个点各自滚动；真的两指缩放、挪纸一下子就超过它
+  const CARD_PINCH = 40;
+  // 试过又去掉的做法（2026-11-16）：手指在卡片里滑过后 1.5 秒内，卡片外的手指一律当手掌、不收卡片。用户在平板上试了说不好：
+  // 「如果是希望收起时用手指点卡片外面无法收起可能会怀疑卡顿或者延迟问题」。所以干净的一下轻点任何时候都立刻收起；
+  // 挡手掌只靠：几个触点要明确地挪、缩放才算（CARD_PINCH），系统取消的触摸不算轻点，接触面大的不算（PALM_SIZE）
+  // 触点的接触面（PointerEvent 的 width、height，CSS 像素）有这么大：像手掌、不像指尖，卡片开着时不算轻点、不算挪纸。只是旁证：
+  // 有的浏览器不给（是 1），那时只靠别的几条。2026-11-16 在用户的 iPad 上量过一次（90 个触点）：报的数是约 20.9 的整数倍；
+  // 指尖轻点是 41.7，偶尔 62.6，拖动、缩放时最大到 83.5；手掌是 104.3 到 250.4，而且大多被系统取消（pointercancel）。
+  // 所以门槛落在 83.5 和 104.3 之间都行，100 不用改。量不出来的：握笔时手掌边偶尔报成一个 62.6、按 65 毫秒就抬起的触点，和指尖轻点一模一样
+  const PALM_SIZE = 100;
   // 交上去以后一直没有下一步（插件没取、对话关了、连不上……）：过这么久，「AI」按钮上的进度收回，变回「AI」
   const ROUND_WAIT_MS = 10 * 60 * 1000;
+  const OFFER_MS = 8000; // 屏幕上方「Claude 生成了某某文件」那一条约 8 秒后自己收起（《产品定义》第 7 节第 5 条）
+  // 「画线停住变直」先藏起来（2026-11-16 夜用户试过后定：「可能不够好用，判别不一定准，有误判风险」）：false 时「⋯」菜单和抽屉最下面的
+  // 两个开关不在页面上（不占位置），功能关着——不管这台设备以前记没记过开着（store 的 straight）。代码（static/straight.js、hold*）留着，
+  // 以后要放出来只把这里改成 true。测试通过 window.__ink.showStraight(true) 在页面里打开来测
+  const STRAIGHT_SHOWN = false;
   const NS = 'http://www.w3.org/2000/svg';
 
   const $ = (s) => document.querySelector(s);
@@ -94,9 +131,11 @@
     collapsed: !store.get('bars', false),
     tool: 'pen',
     fingerDraw: store.get('finger', false),
+    straightOn: store.get('straight', true), // 「画线停住变直」开着没有（记在这台设备上，默认开）
     aiVisible: store.get('aiv', true),
     view: { s: 1, tx: 0, ty: 0 }, drawn: null, fitMode: 'width', fitS: 1,
     cur: null, erasing: null,
+    lasso: null, sel: null, // 套索：正在画的圈（{pid, kind, pts}）、选中的那几笔（见 lassoClose；拖动中另有 drag）
     undo: [],
     undos: new Map(), // 连续阅读：每页的撤销记录（本子#页 → 记录），离开再远回来也还在；换本子、加删页时清掉
     aiQueue: Promise.resolve(), renderGen: 0,
@@ -120,6 +159,12 @@
     cardInk: null, cardErase: null, cardDrag: null,
     // 连续阅读：正把 Claude 的回复落到屏幕上的相邻页（landing）；Claude 回在别的页、还没落下的页（本子#页）
     landing: false, pendingPages: new Set(),
+    // 输入页码的小框里「回到第 N 页」：从别处跳过来之前的那一页（{nb, key}，按页的键记；见 noteJumpBack）
+    jumpBack: null,
+    // 「Claude 读到了什么」开着没有（记在这台设备上）；新手引导开着时是 { sig, timer }
+    readsOn: store.get('reads', false), guide: null,
+    // 新文件提示：待处理的（offers）、见过的（offerKeys：编号@文件时间）、屏幕上方那一条（offerBar：{items, timer}）、那一条几毫秒后收起（offerMs，测试里调短）
+    offers: [], offerKeys: new Set(), offerBar: null, offerMs: OFFER_MS, offerBusy: false,
   };
 
   const stage = $('#stage'), cvBg = $('#bg'), cvInk = $('#ink'), cvLive = $('#live');
@@ -202,6 +247,7 @@
     drawLive();
     setAiTransform();
     drawNeighborBadges();
+    drawNeighborReads();
     S.drawn = Object.assign({}, S.view);
   }
 
@@ -220,10 +266,11 @@
     placeEdgeTabs();
   }
 
-  // 纸的下边、右边各一个小标签：点一下加长 / 加宽；放在看得见的那段边的中间
+  // 纸的四边各一个小标签：点一下加长 / 加宽 / 向上 / 向左；放在看得见的那段边的中间。
+  // 只有书页、推送页有：空白本子的纸跟着字自己长，不要这四个按钮（《产品定义》第 2 节，阶段 D1 去掉）
   function placeEdgeTabs() {
     const d = $('#extDown'), r = $('#extRight'), u = $('#extUp'), l = $('#extLeft'), v = S.view;
-    if (!S.page || S.replay) { d.hidden = r.hidden = u.hidden = l.hidden = true; return; }
+    if (!S.page || S.replay || blankNb()) { d.hidden = r.hidden = u.hidden = l.hidden = true; return; }
     const left = v.tx + S.X0 * v.s, right = v.tx + S.TW * v.s, top = v.ty + S.Y0 * v.s, bottom = v.ty + S.pageH * v.s;
     const midX = (clamp(left, 0, VW) + clamp(right, 0, VW)) / 2, midY = (clamp(top, 0, VH) + clamp(bottom, 0, VH)) / 2;
     d.hidden = bottom < 0 || bottom > VH || right < 0 || left > VW;
@@ -252,20 +299,36 @@
       l.style.left = `${x}px`;
       l.style.top = `${midY - l.offsetHeight / 2}px`;
     }
+    for (const t of [d, r, u, l]) dodgeTools(t);
+  }
+
+  // 纸边的按钮碰上了全屏时右下角那一条（2026-11-15 修的：书页的「＋ 加长」原来被它压住一半）：挪到那一条的左边，左边放不下就挪到它上面
+  function dodgeTools(t) {
+    const bar = $('#tools');
+    if (t.hidden || !S.collapsed || !bar.offsetWidth) return;
+    const r = bar.getBoundingClientRect(), x = parseFloat(t.style.left) + stageRect.left, y = parseFloat(t.style.top) + stageRect.top, w = t.offsetWidth, h = t.offsetHeight;
+    if (x > r.right + 6 || x + w < r.left - 6 || y > r.bottom + 6 || y + h < r.top - 6) return;
+    if (r.left - 10 - w >= stageRect.left + 4) t.style.left = `${r.left - 10 - w - stageRect.left}px`;
+    else t.style.top = `${r.top - 10 - h - stageRect.top}px`;
   }
 
   // ------------------------------------------------------------ 绘制
 
   function paintPaper(ctx, opts) {
     paintSheet(ctx, { X0: S.X0, Y0: S.Y0, W: S.W, M: S.M, TW: S.TW, pageH: S.pageH, baseH: S.baseH, baseH0: S.baseH0,
-      rot: (S.page && S.page.rot) || 0 }, S.bgImg, opts);
+      rot: (S.page && S.page.rot) || 0, blank: blankNb() }, S.bgImg, opts);
   }
 
-  // 一张纸：白底、页边、底图（转过的照转）、点阵；G 见 geomOf
+  // 一张纸：白底、页边、底图（转过的照转）、点阵；G 见 geomOf。
+  // 空白本子（G.blank，阶段 D1）：到处都是纸，没有页边那一栏的底色和分隔线，点阵铺满整张纸（右边原来那一栏也有）
   function paintSheet(ctx, G, img, opts) {
     const pw = G.TW - G.X0, ph = G.pageH - G.Y0;
     ctx.fillStyle = '#fff';
     ctx.fillRect(G.X0, G.Y0, pw, ph);
+    if (G.blank) {
+      if (opts && opts.grid) paintGrid(ctx, G.X0, G.TW, G.Y0, G.pageH, 0);
+      return;
+    }
     ctx.fillStyle = '#faf8f3';
     if (G.M) ctx.fillRect(G.W, G.Y0, G.M, ph);
     if (img) {
@@ -297,14 +360,64 @@
   // 页缝里的页码是画在画布上的，i18n.js 换不到，这里自己过一遍对照表
   const pageLabel = (i) => (window.InkLang ? window.InkLang.t(`第 ${i + 1} 页`) : `第 ${i + 1} 页`);
 
+  // 点阵：x 是 40 的倍数，y 是 D 加 40 的倍数（D：连续阅读时那一页挪下来多少，点阵跟着那一页走，换当前页时不跳）
+  function paintGrid(ctx, x0, x1, y0, y1, D) {
+    ctx.fillStyle = '#d8d3c8';
+    for (let y = Math.ceil((y0 - D) / 40) * 40 + D; y < y1; y += 40) {
+      for (let x = Math.ceil(x0 / 40) * 40; x < x1; x += 40) ctx.fillRect(x - 0.9, y - 0.9, 1.8, 1.8);
+    }
+  }
+
+  // 屏幕在页面坐标里的范围 [x0, y0, x1, y1]
+  function viewRect() {
+    const v = S.view;
+    return [-v.tx / v.s, -v.ty / v.s, (VW - v.tx) / v.s, (VH - v.ty) / v.s];
+  }
+
+  // 空白本子（阶段 D1，《产品定义》第 2 节）：到处看起来都是纸——整个屏幕同一种白底和点阵，没有纸边、页边那一栏和外面的灰底。
+  // 纸的大小（跟着字长、往写的方向长）和数据照旧，只是看不出边。连续阅读时页和页之间只画一条淡虚线，线的左端写小号的页码；
+  // 点阵在每一页里按那一页的坐标排（第一页的上面、最后画出来那页的下面接着它排），翻到下一页当前页换了，点阵不跳
+  function drawBlankBg(ctx, strip) {
+    const [vx0, vy0, vx1, vy1] = viewRect(), s = S.view.s;
+    const bands = [{ D: 0, i: S.idx, top: S.Y0, bottom: S.pageH }].concat(strip.map((n) => ({ D: n.D, i: n.i, top: n.D + n.G.Y0, bottom: n.D + n.G.pageH })))
+      .sort((a, b) => a.top - b.top);
+    bands.forEach((b, k) => {
+      const y0 = k === 0 ? vy0 : b.top, y1 = k === bands.length - 1 ? vy1 : b.bottom;
+      if (y1 > vy0 && y0 < vy1) paintGrid(ctx, vx0, vx1, Math.max(y0, vy0), Math.min(y1, vy1), b.D);
+    });
+    for (const n of strip) paintNeighbor(ctx, n);
+    if (!S.flow) return;
+    ctx.save();
+    const fs = 12 / s;
+    ctx.font = `${fs}px -apple-system, "PingFang SC", sans-serif`;
+    ctx.textBaseline = 'middle';
+    for (const b of bands) {
+      if (b.i <= 0) continue;
+      const y = b.top - FLOW_GAP / 2, label = pageLabel(b.i), x = vx0 + 12 / s, lw = ctx.measureText(label).width;
+      if (y < vy0 - 20 / s || y > vy1 + 20 / s) continue;
+      ctx.fillStyle = '#a59f93';
+      ctx.fillText(label, x, y);
+      ctx.strokeStyle = '#cfc8ba';
+      ctx.lineWidth = 1 / s;
+      ctx.setLineDash([6 / s, 6 / s]);
+      ctx.beginPath();
+      ctx.moveTo(x + lw + 8 / s, y);
+      ctx.lineTo(vx1, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
   function drawBg() {
-    const ctx = cvBg.getContext('2d');
+    const ctx = cvBg.getContext('2d'), blank = blankNb();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#e8e5df';
+    ctx.fillStyle = blank ? '#fff' : '#e8e5df';
     ctx.fillRect(0, 0, cvBg.width, cvBg.height);
     if (!S.page) return;
     setT(ctx);
     const strip = flowStrip();
+    if (blank) { drawBlankBg(ctx, strip); return; }
     for (const n of strip) paintNeighbor(ctx, n);
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,.16)';
@@ -313,7 +426,7 @@
     ctx.fillRect(S.X0, S.Y0, paperW(), paperH());
     ctx.restore();
     paintPaper(ctx, { grid: true });
-    if (S.flow) { // 页缝里的页码（写在每页的上面，靠左：中间是「＋ 向上」「＋ 加长」）
+    if (S.flow) { // 页缝里的页码（写在每页的上面，靠左：中间是「＋ 向上加长」「＋ 加长」）
       ctx.fillStyle = '#9a9488';
       ctx.font = '20px -apple-system, "PingFang SC", sans-serif';
       const tops = [[S.idx, S.Y0]].concat(strip.map((n) => [n.i, n.D + n.G.Y0]));
@@ -327,13 +440,15 @@
     const G = n.G, pg = n.ent.page;
     ctx.save();
     ctx.translate(0, n.D);
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,.16)';
-    ctx.shadowBlur = 10 * DPR;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(G.X0, G.Y0, G.TW - G.X0, G.pageH - G.Y0);
-    ctx.restore();
-    paintSheet(ctx, G, n.ent.img, { grid: true });
+    if (!G.blank) { // 空白本子：纸和点阵已经铺满了（drawBlankBg），这里只画字和批注
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,.16)';
+      ctx.shadowBlur = 10 * DPR;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(G.X0, G.Y0, G.TW - G.X0, G.pageH - G.Y0);
+      ctx.restore();
+      paintSheet(ctx, G, n.ent.img, { grid: true });
+    }
     for (const st of inkStrokes(pg)) if (!st.erasedAt) drawStroke(ctx, st, inkOf(st));
     if (S.aiVisible) paintAiForModel(ctx, pg, false);
     ctx.restore();
@@ -377,7 +492,7 @@
     const height = (i) => { const e = S.flowCache.get(i); return e ? geomOf(e.page, i).pageH : (nb.sizes && nb.sizes[i] ? nb.sizes[i].h : SCRATCH_H); };
     for (let i = idx + 1, acc = 0; i < nb.pages && i <= idx + FLOW_MAX && acc < reach; i++) { want.push(i); acc += height(i) + FLOW_GAP; }
     for (let i = idx - 1, acc = 0; i >= 0 && i >= idx - FLOW_MAX && acc < reach; i--) { want.push(i); acc += height(i) + FLOW_GAP; }
-    for (const [i, e] of S.flowCache) if (Math.abs(i - idx) > FLOW_KEEP) { if (e.url) URL.revokeObjectURL(e.url); S.flowCache.delete(i); }
+    for (const [i, e] of S.flowCache) if (Math.abs(i - idx) > FLOW_KEEP) { rememberAnswers(i, e.page); if (e.url) URL.revokeObjectURL(e.url); S.flowCache.delete(i); }
     const missing = want.filter((i) => !S.flowCache.has(i));
     if (!missing.length) return;
     await Promise.all(missing.map(async (i) => {
@@ -409,6 +524,7 @@
     queueSave();
     clearTimeout(S.saveTimer);
     S.saveTimer = setTimeout(flushSave, 300);
+    rememberAnswers(S.idx, S.page); // 卡片的上一条、下一条跨页：这一页上有几条回答记下（answersAt）
     S.flowCache.set(S.idx, { page: S.page, img: S.bgImg, url: S.bgUrl, undo: S.undo });
     S.undos.set(pageKey(), S.undo);
     S.flowCache.delete(i);
@@ -463,21 +579,28 @@
     await ensureNeighbors();
   }
 
-  const penWidth = (st, p) => st.w * (0.45 + 0.9 * (p || 0.5));
+  // 平板上显示的笔迹（2026-11-14，阶段 D1）：用户在试写页上选定的笔触（static/brush.js：线条顺、够黑、收笔略尖），
+  // 新旧笔迹、相邻页、书写回放都用它；笔迹数据不动。done 为 false 是还没写完的一笔（笔尖处先不收尖，抬笔那一刻才收）；
+  // n 只画前 n 个点（书写回放写到一半）
+  function drawStroke(ctx, st, color, done = true, n) {
+    Brush.draw(ctx, n === undefined ? st.pts : st.pts.slice(0, n), st.w, color, done);
+  }
 
-  function drawStroke(ctx, st, color, from, to) {
-    const p = st.pts, n = to === undefined ? p.length : to;
+  // 发给 Claude 的图（renderForAI）照旧用原来的画法（《产品定义》：发给 Claude 的图画法不变）：一小段一小段直线，粗细只随轻重变
+  const penWidth = (st, p) => st.w * (0.45 + 0.9 * (p || 0.5));
+  function drawStrokeForAI(ctx, st, color) {
+    const p = st.pts;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    if (p.length === 1 && n >= 1 && !from) {
+    if (p.length === 1) {
       ctx.beginPath();
       ctx.arc(p[0][0], p[0][1], penWidth(st, p[0][2]) / 2, 0, Math.PI * 2);
       ctx.fill();
       return;
     }
-    for (let i = Math.max(1, from || 1); i < n; i++) {
+    for (let i = 1; i < p.length; i++) {
       const a = p[i - 1], b = p[i];
       ctx.lineWidth = penWidth(st, (a[2] + b[2]) / 2);
       ctx.beginPath();
@@ -491,9 +614,14 @@
     const ctx = cvInk.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cvInk.width, cvInk.height);
-    if (!S.page || S.replay) return;
+    if (!S.page) return;
     setT(ctx);
-    for (const st of inkStrokes()) if (!st.erasedAt) drawStroke(ctx, st, inkOf(st));
+    if (S.replay) { // 回放中：已经写完的那几笔（正写着的在上面那层，drawLive）
+      for (const a of S.replay.shown) if (a.done >= a.s.pts.length) drawStroke(ctx, a.s, inkOf(a.s));
+      return;
+    }
+    const held = lassoHeld(); // 套索正拖着的那几笔：画在上面那层（drawLasso），这层先不画
+    for (const st of inkStrokes()) if (!st.erasedAt && !(held && held.has(st.id))) drawStroke(ctx, st, inkOf(st));
   }
 
   function drawLive() {
@@ -501,7 +629,8 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cvLive.width, cvLive.height);
     setT(ctx);
-    if (S.cur) drawStroke(ctx, S.cur, inkOf(S.cur));
+    if (S.cur) drawStroke(ctx, S.cur._sl && S.cur._sl.on ? { w: S.cur.w, pts: Straight.straighten(S.cur.pts, S.cur._sl.tip) } : S.cur, inkOf(S.cur), false); // 停住变直了的：画那条直线
+    if (S.replay) for (const a of S.replay.active) drawStroke(ctx, a.s, inkOf(a.s), false, a.done);
     if (S.erasing && S.erasing.at) {
       ctx.strokeStyle = 'rgba(0,0,0,.35)';
       ctx.lineWidth = 1 / S.view.s;
@@ -509,6 +638,7 @@
       ctx.arc(S.erasing.at[0], S.erasing.at[1], S.erasing.r, 0, Math.PI * 2);
       ctx.stroke();
     }
+    if (!S.replay) drawLasso(ctx);
   }
 
   // ------------------------------------------------------------ 笔迹数据
@@ -537,9 +667,8 @@
 
   const unionBox = (a, b) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
 
-  /* 把笔迹按「时间相近、位置相近」分组：一组大致是一个字、一个式子或一个图形。
-   * 每组记录开始/结束时间、笔数、擦掉了几笔、是否回头补写，这就是发给 AI 的「书写过程」。 */
-  function computeGroups(strokes) {
+  // 分组第一步（原来的规则，pages._by_time）：按落笔先后，同色、和上一组相隔不到 GROUP_GAP_MS、相距不到 GROUP_DIST 的笔接进上一组
+  function groupsByTime(strokes) {
     const ss = strokes.filter((s) => s.pts.length).slice().sort((a, b) => a.t0 - b.t0);
     const groups = [];
     let g = null;
@@ -554,12 +683,105 @@
         groups.push(g);
       }
     }
+    for (const gr of groups) gr.tw = gr.t1; // 这组「写」完的时刻；回头补的笔画不算（书写过程按它说停顿和写了多久）
+    return groups;
+  }
+
+  // 一组笔迹的字高（pages.char_h）：较高那几笔（第 75 百分位）的高度 ×1.3。不到 3 笔说不准，返回 null
+  function charH(strokes) {
+    if (strokes.length < 3) return null;
+    const hs = strokes.map((s) => strokeBox(s)[3] - strokeBox(s)[1]).sort((a, b) => a - b);
+    return Math.max(8, hs[Math.floor(hs.length * 0.75)]) * 1.3;
+  }
+
+  // 这一笔差不多是直的（pages._straight）：走过的路不到外框对角线的 1.25 倍
+  function straightStroke(s) {
+    const p = s.pts, b = strokeBox(s);
+    let len = 0;
+    for (let i = 1; i < p.length; i++) len += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+    return len <= 1.25 * Math.hypot(b[2] - b[0], b[3] - b[1]);
+  }
+
+  // 按字高 ch 看，这组像一行字（pages._one_line_of_text）：没有竖得很长的一笔、没有很长的直线，整组不比一行高
+  function oneLineOfText(g, ch) {
+    for (const s of g.strokes) {
+      const b = strokeBox(s);
+      if (b[3] - b[1] > TALL * ch || (b[2] - b[0] > LONG * ch && straightStroke(s))) return false;
+    }
+    return g.bbox[3] - g.bbox[1] <= 1.6 * ch;
+  }
+
+  // 第二步的判据（pages._join_line）：b 是不是 a 在同一行上接着写的（b 紧接在 a 后面写）。都要满足：同色、停顿不到 LINE_PAUSE_MS；
+  // 两组都像一行字、字高相差不到 LINE_RATIO 倍；竖直方向对齐（重叠过半、中线差不到半个字高）；b 在 a 的右边（起点过了 a 的一半）、
+  // 横向间距不到 LINE_GAP 个字高
+  function joinsLine(a, b) {
+    if (a.c !== b.c || b.t0 - a.t1 >= LINE_PAUSE_MS) return false;
+    const ha = charH(a.strokes), hb = charH(b.strokes);
+    if (ha === null && hb === null) return false;
+    if (ha && hb && Math.max(ha, hb) > LINE_RATIO * Math.min(ha, hb)) return false;
+    const ch = Math.max(...[ha, hb].filter((h) => h));
+    if (!(oneLineOfText(a, ch) && oneLineOfText(b, ch))) return false;
+    const A = a.bbox, B = b.bbox;
+    if (Math.min(A[3], B[3]) - Math.max(A[1], B[1]) < 0.5 * Math.min(A[3] - A[1], B[3] - B[1])) return false;
+    if (Math.abs((A[1] + A[3]) / 2 - (B[1] + B[3]) / 2) > 0.5 * ch) return false;
+    return B[0] - A[2] <= LINE_GAP * ch && B[0] >= A[0] + 0.5 * (A[2] - A[0]);
+  }
+
+  // 第三步的判据（pages._late_target）：g 是不是回头补在之前某一组上的小笔画（i 的点、t 的横、漏写的一点一横），返回那一组，不是就 null。
+  // 要求：g 只有一两笔、不超过 LATE_SMALL 个字高；那一组同色、像一行字；g 的中心落在那组的框里（上方可以高出半个字高，给 i 的点）；
+  // 离那组里最近的一笔不到 LATE_NEAR 个字高。几组都合适时取最近的。不看隔了多久
+  function lateTarget(g, earlier) {
+    if (g.strokes.length > 2) return null;
+    const b = g.bbox, cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    let best = null;
+    for (const t of earlier) {
+      const ch = charH(t.strokes);
+      if (t.c !== g.c || ch === null || Math.max(b[2] - b[0], b[3] - b[1]) > LATE_SMALL * ch || !oneLineOfText(t, ch)) continue;
+      const T = t.bbox;
+      if (!(T[0] <= cx && cx <= T[2] && T[1] - 0.5 * ch <= cy && cy <= T[3])) continue;
+      const d = Math.min(...t.strokes.map((s) => boxDist(b, strokeBox(s))));
+      if (d <= LATE_NEAR * ch && (best === null || d < best.d)) best = { d, t };
+    }
+    return best ? best.t : null;
+  }
+
+  // 把 h 并进 g（pages._absorb）：回头补的记下 late（补了几笔）、lateAt（最后一次补的时刻），不动 tw；同一行接着写的，tw 跟着往后挪
+  function absorbGroup(g, h, late) {
+    g.bbox = unionBox(g.bbox, h.bbox);
+    g.t1 = Math.max(g.t1, h.t1);
+    g.strokes.push(...h.strokes);
+    if (late) {
+      g.late = (g.late || 0) + h.strokes.length;
+      g.lateAt = Math.max(g.lateAt || 0, h.t0);
+    } else g.tw = Math.max(g.tw, h.tw);
+  }
+
+  /* 把笔迹分组：一组大致是一个词、一句话、一个式子或一个图形。和服务端 pages._cluster 一样分三步：
+   * 1. 按时间：同色、相隔不到 1.8 秒、相距不到 60 的笔归一组；
+   * 2. 同一行接着写：写到一半停了一会儿的词、一句话，并成一组（joinsLine）；
+   * 3. 回头补的小笔画并回它压着的那一组（lateTarget），这组记下 late、lateAt。
+   * 组按第一笔的时刻排，编号 g1、g2…… 照这个顺序；擦掉的笔迹也参加分组（编号不因擦除而变）。
+   * 每组记录开始时刻 t0、连补的笔画在内最后一笔的时刻 t1（「这组有没有新东西」按它算）、不算补的写完时刻 tw（停顿、写了多久、
+   * 是不是回头补写按它算）、笔数、擦掉了几笔，这就是发给 AI 的「书写过程」。 */
+  function computeGroups(strokes) {
+    const out = [];
+    for (const g of groupsByTime(strokes)) {
+      const prev = out[out.length - 1];
+      if (prev && joinsLine(prev, g)) absorbGroup(prev, g, false);
+      else out.push(g);
+    }
+    const groups = [];
+    for (const g of out) {
+      const t = lateTarget(g, groups);
+      if (t) absorbGroup(t, g, true);
+      else groups.push(g);
+    }
     groups.forEach((gr, i) => {
       gr.id = 'g' + (i + 1);
       gr.n = gr.strokes.length;
       gr.erased = gr.strokes.filter((s) => s.erasedAt).length;
       gr.erasedAt = gr.erased ? Math.max.apply(null, gr.strokes.map((s) => s.erasedAt || 0)) : null;
-      gr.revisit = groups.slice(0, i).some((o) => o.t1 < gr.t0 - 30000 && boxDist(o.bbox, gr.bbox) < 24);
+      gr.revisit = groups.slice(0, i).some((o) => o.tw < gr.t0 - 30000 && boxDist(o.bbox, gr.bbox) < 24);
     });
     return groups;
   }
@@ -578,7 +800,7 @@
     const live = liveIds();
     for (const a of S.page.ai) {
       if (a.dismissed || gone(a, live)) continue;
-      const b = isBadge(a) ? badgeBox(a, 4) : a.lay ? [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h] : null; // 圈号也要在图里
+      const b = isBadge(a) ? badgeBox(a, 4) : isDot(a) ? dotBox(a, 4) : a.lay ? [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h] : null; // 圈号、小蓝点也要在图里
       if (!b) continue;
       if (b[2] > S.W) right = S.TW;
       bottom = Math.max(bottom, b[3]);
@@ -598,7 +820,7 @@
   // ------------------------------------------------------------ 输入：笔、橡皮、手势
 
   const touches = new Map();
-  let gesture = null, lastTap = 0;
+  let gesture = null;
 
   function pressureOf(e) {
     if (e.pointerType === 'mouse') return 0.5;
@@ -609,11 +831,14 @@
 
   // 笔刚落下或抬起（PALM_MS 以内）：这时碰到屏幕的手指多半是手掌、手环。还没用过笔就不算——打开页面后的头一秒手指照样能挪纸
   function penJustUsed() { return S.penAt !== undefined && performance.now() - S.penAt <= PALM_MS; }
+  // 触点的接触面大得像手掌（只是旁证，见 PALM_SIZE；浏览器不给时 width、height 是 1）
+  function bigTouch(e) { return Math.max(e.width || 0, e.height || 0) >= PALM_SIZE; }
 
   // 系统接管了一次触摸（比如全屏时碰到顶端、Safari 退出全屏），收不到抬笔、抬手：把半截的状态清掉，不然之后写不了字
   function resetInput() {
     if (S.cur) { if (S.cur.pts.length >= 3) commitStroke(); else { S.cur = null; drawLive(); } }
     if (S.erasing) endErase();
+    lassoFinish(); // 套索画到一半的圈：照常圈；拖到一半：定在拖到的地方
     if (S.cardInk) finishCardInk(); // 卡片上写到一半的红字：收好
     if (S.cardErase) finishCardErase();
     S.cardDrag = null;
@@ -635,8 +860,9 @@
       if (e.isPrimary && touches.size) { touches.clear(); gesture = null; } // 新的第一根手指：之前没抬起的是系统吞掉的
 
       if (S.cur && S.cur._kind === 'touch') { S.cur = null; drawLive(); return; } // 手指书写时落下第二根手指：作废这一笔
-      if (S.cur || S.erasing || S.cardInk || S.cardErase) return; // 笔正在写（纸上或卡片上）：忽略手掌
-      // 笔刚落下或抬起（一秒内）时碰到屏幕的，多半是手掌、手腕上的手环：不当成挪纸的手指，直到它抬起都不管它
+      if (lassoBusy() === 'touch') { lassoAbort(); return; } // 手指画套索、拖选中的笔迹时落下第二根手指：作废这一圈、这一拖
+      if (S.cur || S.erasing || S.cardInk || S.cardErase || lassoBusy()) return; // 笔正在写（纸上或卡片上）、正在画套索或拖：忽略手掌
+      // 笔刚落下或抬起（一秒内）时碰到屏幕的，多半是手掌、手腕上的手环：不当成挪纸的手指，直到它抬起都不管它。
       if (!S.fingerDraw && penJustUsed()) return;
       if (!S.fingerDraw) {
         touchDown(e);
@@ -651,6 +877,7 @@
     if (e.pointerType === 'pen' && touches.size) { touches.clear(); gesture = null; if (!flowCheck()) redrawAll(); }
     if (S.cur) { if (S.cur.pts.length >= 3) commitStroke(); else S.cur = null; }
     if (S.erasing) endErase();
+    lassoFinish(); // 上一圈套索、上一次拖动的抬笔没到：也先收尾
     if (S.cur || S.erasing) return;
     // 抽屉、菜单开着时用笔（电脑上是鼠标）点纸面：只收起（菜单上面已经收了），纸上不留点。
     // 手指照旧：挪纸的手指上面已经交给 touchDown；「手指也能书写」时在菜单里刚勾上就能直接写（收起由 document 上的 pointerdown 做）
@@ -672,12 +899,13 @@
       S.cur = { id: uid(), t0: Date.now(), w: PEN_W, pts: [[r1(x), r1(y), Math.round(pressureOf(e) * 100) / 100, 0]],
         _pid: e.pointerId, _ts0: e.timeStamp, _kind: e.pointerType };
       if (tool === 'red') S.cur.c = 'r';
+      if (straightActive() && e.pointerType !== 'touch') holdStart(x, y); // 画线停住变直：只看用笔写在纸上的（手指写的不看）
       drawLive();
     } else if (tool === 'eraser') {
       const live = liveIds();
       S.erasing = { pid: e.pointerId, ids: [], ai: [], r: 14 / S.view.s, at: [x, y], gone0: new Set(S.page.ai.filter((a) => gone(a, live)).map((a) => a.id)) };
       eraseAt(x, y);
-    }
+    } else if (tool === 'lasso') lassoDown(e, x, y); // 套索：画一圈选笔迹，或按住选中的框里拖（不看「停住变直」）
   });
 
   stage.addEventListener('pointermove', (e) => {
@@ -685,22 +913,24 @@
     if (S.cur && e.pointerId === S.cur._pid) {
       const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
       const list = evs.length ? evs : [e];
-      const ctx = cvLive.getContext('2d');
-      setT(ctx);
+      const n0 = S.cur.pts.length, edges = !blankNb(); // 纸边的加纸按钮：书页、推送页才有（空白本子的纸跟着字自己长）
       for (const ev of list) {
         const [x, y] = toWorld(...ptOf(ev));
         const p = S.cur.pts, last = p[p.length - 1];
         if (Math.hypot(x - last[0], y - last[1]) < 0.35) continue;
         const pr = Math.round(((pressureOf(ev) + last[2]) / 2) * 100) / 100;
         p.push([r1(x), r1(y), pr, Math.max(last[3], Math.round(ev.timeStamp - S.cur._ts0))]);
+        if (!edges) continue;
         if (x > S.TW - 170) heatTab('#extRight');
         if (y > S.pageH - 240) heatTab('#extDown');
         if (y < S.Y0 + 120) heatTab('#extUp');
         if (x < S.X0 + 100) heatTab('#extLeft');
-        drawStroke(ctx, S.cur, inkOf(S.cur), p.length - 1, p.length);
       }
+      if (S.cur._sl && holdMove(...toWorld(...ptOf(e)))) return; // 已经停住变直：终点跟着笔尖走（holdMove 里重画）
+      if (S.cur.pts.length > n0) drawLive(); // 线是按整笔算顺的：这一笔整笔重画（只画在上面那层）
       return;
     }
+    if (lassoTrack(e)) return; // 套索：画圈、拖动
     if (S.erasing && e.pointerId === S.erasing.pid) {
       const [x, y] = toWorld(...ptOf(e));
       S.erasing.at = [x, y];
@@ -709,26 +939,291 @@
     }
   });
 
+  // 画线停住变直（2026-11-16 用户定，《产品定义》第 2 节；直不直、吸不吸、存成哪些点在 static/straight.js，门槛都是暂定）。
+  // 停住＝笔不抬，Straight.HOLD_MS 里笔尖离停下的那一点不超过 Straight.STILL_PX 个屏幕像素。笔停着时浏览器可能不再发移动事件，
+  // 所以靠定时器：笔尖每挪出那么远就重新计时，到点了还没挪出去就是停住了。停住时这一笔到此为止又长又差不多直，就变直；
+  // 之后终点跟着笔尖走，抬笔时（commitStroke）把这一笔的点换成那条直线。记在正在写的这一笔的 _sl 上（不存）：
+  // at 停下的那一点、tip 笔尖（页面坐标）、timer、on 变直了没有。
+  // 2026-11-16 夜起先藏着（STRAIGHT_SHOWN）：开关不在页面上时功能关着，开关记着开也不算
+  let straightShown = STRAIGHT_SHOWN;
+  const straightActive = () => straightShown && S.straightOn;
+  // 两个开关（「⋯」菜单里一行、抽屉最下面一行）在不在页面上：不在时连那一行一起拿掉（hidden，不占位置）
+  function showStraight(on) {
+    straightShown = Boolean(on);
+    $('#optStraight').closest('.row').hidden = !straightShown;
+    $('#drStraight').closest('.dr-row').hidden = !straightShown;
+    for (const id of ['#optStraight', '#drStraight']) $(id).checked = S.straightOn;
+  }
+  function holdStart(x, y) {
+    S.cur._sl = { at: [x, y], tip: [x, y], timer: 0, on: false };
+    holdArm(S.cur._sl);
+  }
+  function holdArm(sl) {
+    clearTimeout(sl.timer);
+    sl.timer = setTimeout(() => holdDone(sl), Straight.HOLD_MS);
+  }
+  // 笔挪了：记下笔尖；挪出停下的那一点够远就重新计时。已经变直的：这条线跟着笔尖重画，返回 true
+  function holdMove(x, y) {
+    const sl = S.cur._sl;
+    sl.tip = [x, y];
+    if (sl.on) { drawLive(); return true; }
+    if (Math.hypot(x - sl.at[0], y - sl.at[1]) > Straight.STILL_PX / S.view.s) { sl.at = [x, y]; holdArm(sl); }
+    return false;
+  }
+  // 停住了：这一笔到此为止够格（Straight.lineLike；停住时手抖的那点来回不算路）就变直。不够格的照旧，挪了再停再看
+  function holdDone(sl) {
+    if (!S.cur || S.cur._sl !== sl || sl.on || !straightActive()) return;
+    if (!Straight.lineLike(S.cur.pts, sl.tip, Straight.STILL_PX / S.view.s)) return;
+    sl.on = true;
+    drawLive();
+  }
+
+  // 套索（2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」第二批；细节暂定，用户之后在平板上试）：选了「套索」，用笔（鼠标也算；
+  // 「手指也能书写」开着时手指也算）在纸上画一圈，画的时候是一条细虚线，抬笔自动闭合；圈里没擦掉的黑笔、红笔笔迹（一笔的点有一半以上
+  // 在圈里，static/lasso.js 的 pick）被选中，虚线消失，选中的笔迹外面画一个虚线框，笔迹本身一点不变。用笔按住框里拖：这几笔跟着走
+  // （拖的时候画在上面那层），抬笔定下，可以接着再拖。点框外面、再画一圈、换工具、翻页、换本子、点「AI」、撤销、重做：取消选中。
+  // 圈本身不是笔迹：不存、不进撤销。只能挪：一次挪动是撤销里的一步（t: 'move'），只改这几笔的点坐标（同一个平移量），id、时刻、
+  // 别的字段都不动。跟着走的：Claude 的东西里只指着这几笔的（Lasso.follows），读法能跟就跟（见 splitReads）。
+  // 选中的状态（S.sel）认它选在哪一本、哪一页、转到多少度：换了就作废（把 Claude 的回复落到相邻页时临时换过去不算）
+  const LASSO_PAD = 8;   // 虚线框离笔迹多远（屏幕像素）；按在框里（连这一圈）才是拖
+  const LASSO_SLOP = 4;  // 拖不到这么多屏幕像素算没挪（暂定）
+  const LINK_NEAR = 16;  // 概念图上建议的新概念连到别的组：连线那一头离选中的那块、离没选中的笔迹多近（页面单位），见 lassoFollowers
+
+  function lassoSel() {
+    const L = S.sel;
+    if (!L) return null;
+    if (L.page === S.page && L.nb === S.nb && L.rot === ((S.page && S.page.rot) || 0) && lassoInk(L).length) return L;
+    if (!S.landing) S.sel = null;
+    return null;
+  }
+  // 正在拖的那几笔（墨迹层上先不画）
+  function lassoHeld() { const L = S.sel; return L && L.drag && L.page === S.page ? L.set : null; }
+  // 正在画圈或拖：是哪种指针（pen、mouse、touch）；都没有是空串
+  function lassoBusy() { return S.lasso ? S.lasso.kind : S.sel && S.sel.drag ? S.sel.drag.kind : ''; }
+  function lassoInk(L) { return inkStrokes().filter((s) => L.set.has(s.id) && !s.erasedAt && s.pts.length); }
+  function lassoBoxOf(L) { const ss = lassoInk(L); return ss.length ? boxOf(ss) : null; }
+  function lassoFrame(L) { const b = lassoBoxOf(L), p = LASSO_PAD / S.view.s; return b && [b[0] - p, b[1] - p, b[2] + p, b[3] + p]; }
+
+  // 拖到哪里为止（页面坐标 [x0, y0, x1, y1]）：书页、推送页挪不出纸边；空白本子挪到纸外面时纸跟着长（lassoDrop 里的 growSides、
+  // maybeExtend），所以只夹在纸最多能长到的地方（向左、向上 6000，加宽 3000，高 30000）；连续模式下不跨到上下页
+  function lassoBounds() {
+    if (!blankNb()) return [S.X0, S.Y0, S.TW, S.pageH];
+    const b = [-6000, -6000, W + 3000 + S.M, 30000];
+    if (S.flow) { b[1] = S.Y0; b[3] = S.pageH; }
+    return b;
+  }
+
+  // 跟着这几笔走的 Claude 的东西（Lasso.follows）。概念图上建议的新概念连到别的组的线：那一头落在选中的笔迹那一块旁边、附近又没有
+  // 没选中的笔迹，才算那一头也选中了（连线只记在路径里，没记连的是哪几笔）
+  function lassoFollowers(L) {
+    const live = liveIds(), b = lassoBoxOf(L), r = LINK_NEAR;
+    const linkOk = (p) => Boolean(b) && p[0] >= b[0] - r && p[0] <= b[2] + r && p[1] >= b[1] - r && p[1] <= b[3] + r
+      && !inkStrokes().some((s) => !s.erasedAt && s.pts.length && !L.set.has(s.id) && ptBoxDist(strokeBox(s), p[0], p[1]) <= r);
+    return S.page.ai.filter((a) => Lasso.follows(a, L.set, live, linkOk));
+  }
+  // 拖着走的这一块：选中的笔迹，连同跟着走、看得见的蓝字（圈号、小蓝点、别的按点擦的范围 hit）——夹在纸内时整块一起夹
+  function lassoReach(L, items) {
+    let b = lassoBoxOf(L);
+    for (const a of items) {
+      if (a.erasedAt) continue;
+      const h = isBadge(a) ? badgeBox(a) : isDot(a) ? dotBox(a, DOT_HALO) : Array.isArray(a.hit) && a.hit.length === 4 ? a.hit : null;
+      if (h) b = unionBox(b, h);
+    }
+    return b;
+  }
+
+  function lassoDown(e, x, y) {
+    const L = lassoSel(), F = L && lassoFrame(L);
+    if (F && x >= F[0] && x <= F[2] && y >= F[1] && y <= F[3]) { // 按在选中的框里：拖
+      const items = lassoFollowers(L), live = liveIds(), reads = new Map();
+      (S.page.reads || []).forEach((r, k) => { // 读法的小灰字：整组都选中的跟着挪；只选中了一部分的拖的时候先藏起来（定下后见 splitReads）
+        const ids = r && Array.isArray(r.ids) ? r.ids.filter((id) => live.has(id)) : [], n = ids.filter((id) => L.set.has(id)).length;
+        if (n) reads.set(k, n === ids.length ? 'go' : 'hide');
+      });
+      L.drag = { pid: e.pointerId, kind: e.pointerType, x0: x, y0: y, dx: 0, dy: 0, items: items.map((a) => a.id), ids: new Set(items.map((a) => a.id)),
+        reads, box: lassoReach(L, items), lim: lassoBounds() };
+      drawInk();
+      drawLive();
+      return;
+    }
+    lassoOff(); // 按在框外：原来选中的取消，从这里画新的一圈（只点了一下就什么都没圈到）
+    S.lasso = { pid: e.pointerId, kind: e.pointerType, pts: [[r1(x), r1(y)]] };
+    drawLive();
+  }
+
+  function lassoTrack(e) {
+    const P = S.lasso;
+    if (P && e.pointerId === P.pid) {
+      const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+      for (const ev of evs.length ? evs : [e]) {
+        const [x, y] = toWorld(...ptOf(ev)), last = P.pts[P.pts.length - 1];
+        if (Math.hypot(x - last[0], y - last[1]) * S.view.s >= 1.5) P.pts.push([r1(x), r1(y)]);
+      }
+      drawLive();
+      return true;
+    }
+    const d = S.sel && S.sel.drag;
+    if (!d || e.pointerId !== d.pid) return false;
+    const [x, y] = toWorld(...ptOf(e));
+    [d.dx, d.dy] = Lasso.clampDelta(d.box, d.lim, x - d.x0, y - d.y0);
+    drawLive();
+    lassoDecor(d);
+    return true;
+  }
+
+  function lassoEnd(e) {
+    if (S.lasso && e.pointerId === S.lasso.pid) { lassoClose(); return true; }
+    if (S.sel && S.sel.drag && e.pointerId === S.sel.drag.pid) { lassoDrop(); return true; }
+    return false;
+  }
+
+  // 抬笔：这一圈闭合，圈中的笔迹选中；什么都没圈到就什么都不发生
+  function lassoClose() {
+    const P = S.lasso;
+    S.lasso = null;
+    const ids = P && S.page ? Lasso.pick(inkStrokes(), P.pts) : [];
+    if (ids.length) S.sel = { page: S.page, nb: S.nb, rot: S.page.rot || 0, ids, set: new Set(ids), drag: null };
+    drawLive();
+  }
+
+  // 拖完抬笔：挪了就定下（撤销里的一步），没挪（不到 LASSO_SLOP）就当没拖过。空白本子挪到纸边外面：纸跟着长，和写在纸外面一样
+  function lassoDrop() {
+    const L = S.sel, d = L.drag;
+    L.drag = null;
+    const dx = r1(d.dx), dy = r1(d.dy);
+    if (Math.hypot(dx, dy) * S.view.s < LASSO_SLOP || L !== lassoSel()) { drawInk(); renderAI(); drawLive(); return; }
+    const rec = { t: 'move', ids: lassoInk(L).map((s) => s.id), ai: d.items, dx, dy }, apart = splitReads(L.set); // 选中后又被橡皮键擦掉的不挪
+    if (apart.length) rec.apart = apart;
+    const items = S.page.ai.filter((a) => d.ids.has(a.id)), snap = () => Object.fromEntries(items.map((a) => [a.id, Lasso.coordsOf(a)]));
+    rec.pre = snap();
+    shiftSel(rec, 1);
+    rec.post = snap();
+    pushUndo(rec);
+    drawInk();
+    renderAI();
+    drawLive();
+    markDirty();
+    const b = [d.box[0] + dx, d.box[1] + dy, d.box[2] + dx, d.box[3] + dy];
+    keepHeight(b[3]);
+    if (!S.flow || blankNb()) maybeExtend(b[3]);
+    if (blankNb()) growSides(b);
+  }
+
+  // 画到一半、拖到一半没等到抬笔（系统接管了触摸、下一笔已经落下）：照常收尾
+  function lassoFinish() {
+    if (S.lasso) lassoClose();
+    if (S.sel && S.sel.drag) lassoDrop();
+  }
+  // 作废正在画的圈、正在拖的这一下（拖的时候数据没动过，重画就回到原处）；选中的留着
+  function lassoAbort() {
+    S.lasso = null;
+    if (S.sel && S.sel.drag) { S.sel.drag = null; drawInk(); renderAI(); }
+    drawLive();
+  }
+  // 取消选中（连同正在画的圈、正在拖的这一下）
+  function lassoOff() {
+    if (!S.lasso && !S.sel) return;
+    const dragging = Boolean(S.sel && S.sel.drag);
+    S.lasso = null;
+    S.sel = null;
+    if (dragging) { drawInk(); renderAI(); }
+    drawLive();
+  }
+
+  // 一次挪动（撤销里的 t: 'move'）做一遍（k = 1）或撤回（k = -1）：这几笔的点、跟着走的 Claude 的东西挪同一个量，
+  // 只选中了一部分的那几条读法记上 apart（不显示，见 readLabels）或去掉。找不到的（撤销写字拿掉了、收进了卡片）跳过。
+  // Claude 的东西：第一次挪时记下挪前（pre）、挪后（post）的坐标，撤销、重做时它还是那个样子就照原数放回去（笔迹的点都是一位小数，
+  // 加减本来就分毫不差）；样子变了（比如短批注收成了卡片）就按量挪
+  function shiftSel(rec, k) {
+    const dx = rec.dx * k, dy = rec.dy * k, ids = new Set(rec.ids), ai = new Set(rec.ai || []);
+    const from = k > 0 ? rec.pre : rec.post, to = k > 0 ? rec.post : rec.pre;
+    for (const st of S.page.strokes) if (ids.has(st.id)) { st.pts = Lasso.shiftPts(st.pts, dx, dy); delete st._box; }
+    for (const a of S.page.ai) {
+      if (!ai.has(a.id)) continue;
+      if (from && to && from[a.id] && to[a.id] && JSON.stringify(Lasso.coordsOf(a)) === JSON.stringify(from[a.id])) Lasso.putCoords(a, to[a.id]);
+      else Lasso.shiftItem(a, dx, dy);
+    }
+    for (const r of rec.apart || []) { if (k > 0) r.apart = true; else delete r.apart; }
+  }
+
+  // 读法（「Claude 读到了什么」的小灰字）按它读的那几笔现在在哪写，整组挪了就跟着走；只挪了一部分的，那一组的字已经分在两处，
+  // 读法写在哪都不对：记上 apart，先不显示（readLabels 跳过它，也不让更早的读法顶上来），等 Claude 下次交来新的读法。返回这次新记上的
+  function splitReads(set) {
+    const live = liveIds(), out = [];
+    for (const r of S.page.reads || []) {
+      if (!r || r.apart || !Array.isArray(r.ids)) continue;
+      const ids = r.ids.filter((id) => live.has(id)), n = ids.filter((id) => set.has(id)).length;
+      if (n && n < ids.length) out.push(r);
+    }
+    return out;
+  }
+
+  // 拖动中：跟着走的蓝字、读法的小灰字在批注层上一起挪（只是挪画出来的，抬笔后按数据重画）
+  function lassoDecor(d) {
+    const t = `translate(${f1(d.dx)} ${f1(d.dy)})`;
+    for (const g of aiRoot.querySelectorAll(':scope > [data-id]')) if (d.ids.has(g.dataset.id)) g.setAttribute('transform', t);
+    for (const g of aiRoot.querySelectorAll(':scope > g.reads > g.read')) {
+      const m = d.reads.get(Number(g.dataset.k));
+      if (m === 'go') g.setAttribute('transform', t);
+      else if (m === 'hide') g.setAttribute('display', 'none');
+    }
+  }
+
+  // 画在上面那层：正在画的圈（细虚线，不画回起点的那一段）；选中的笔迹外面的虚线框；拖动中的那几笔（跟着笔挪）
+  function drawLasso(ctx) {
+    const s = S.view.s, P = S.lasso;
+    ctx.save();
+    ctx.lineWidth = 1.5 / s;
+    ctx.strokeStyle = 'rgba(30,30,30,.7)';
+    if (P && P.pts.length > 1) {
+      ctx.setLineDash([6 / s, 5 / s]);
+      ctx.beginPath();
+      P.pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.stroke();
+    }
+    const L = lassoSel(), F = L && lassoFrame(L);
+    if (F) {
+      const d = L.drag, dx = d ? d.dx : 0, dy = d ? d.dy : 0;
+      if (d) {
+        ctx.save();
+        ctx.translate(dx, dy);
+        for (const st of lassoInk(L)) drawStroke(ctx, st, inkOf(st));
+        ctx.restore();
+      }
+      ctx.setLineDash([5 / s, 4 / s]);
+      ctx.strokeRect(F[0] + dx, F[1] + dy, F[2] - F[0], F[3] - F[1]);
+    }
+    ctx.restore();
+  }
+
   function pointerEnd(e) {
     if (touches.has(e.pointerId)) { touchUp(e); return; } // 手指
     if (e.pointerType === 'pen') S.penAt = performance.now();
     if (S.cur && e.pointerId === S.cur._pid) { commitStroke(); return; }
+    if (lassoEnd(e)) return; // 套索：抬笔闭合这一圈、定下这一拖
     if (S.erasing && e.pointerId === S.erasing.pid) endErase();
   }
   function commitStroke() {
     const st = S.cur;
     S.cur = null;
     if (!st) return;
-    delete st._pid; delete st._ts0; delete st._kind;
+    const sl = st._sl;
+    delete st._pid; delete st._ts0; delete st._kind; delete st._sl;
+    // 停住变直了的：存那条直线（起点、起止时刻不变，还是普通的一笔）；没变直的点一个不动
+    if (sl) { clearTimeout(sl.timer); if (sl.on) { st.pts = Straight.straighten(st.pts, sl.tip); delete st._box; } }
     // 笔点 ✓ × 钮、笔点圈号（打开卡片）、在建议框里打勾横划、蓝字旁画星号：不留作笔迹
     if (penTapVote(st) || penTapBadge(st) || gestureOnVote(st) || gestureOnBlue(st)) { drawLive(); return; }
     S.page.strokes.push(st);
-    S.undo.push({ t: 'add', id: st.id });
+    const rec = { t: 'add', id: st.id };
+    pushUndo(rec);
     const ctx = cvInk.getContext('2d');
     setT(ctx);
     drawStroke(ctx, st, inkOf(st));
     drawLive();
     markDirty();
+    // 空白本子：黑笔压到了一条展开着的短批注，它收成小蓝点（红笔写在上面是批注、追问，不收）。撤销这一笔时它展开回来
+    if (blankNb() && st.c !== 'r') { const f = foldUnder(st); if (f.length) rec.fold = f; }
+    if (S.readsOn) drawReads(); // 「Claude 读到了什么」开着：小灰字让开新写的这一笔
     keepHeight(strokeBox(st)[3]);
     // 书页连续阅读时下一页接在下面，要更多纸点「＋ 加长」。空白本子的纸跟着字长：快写到底就往下长，写出左、右、上边就往那边长
     if (!S.flow || blankNb()) maybeExtend(strokeBox(st)[3]);
@@ -767,7 +1262,8 @@
     markDirty();
   }
 
-  // 要不要页边：空白本子一直有；书页、推送页只在页边有东西（Claude 的批注、写过的字）或开过页边时才有
+  // 要不要页边：空白本子的纸一直这么宽（数据不变，阶段 D1 起只是不再画成一栏、也不预留给批注，到处都是纸）；
+  // 书页、推送页只在页边有东西（Claude 的批注、写过的字）或开过页边时才有
   function needsMargin(page = S.page, Wp = S.W) {
     if (!S.nb || S.nb.kind === 'scratch' || S.nb.kind === 'pad' || page.mg) return true;
     if (inkStrokes(page).some((st) => !st.erasedAt && strokeBox(st)[2] > Wp)) return true;
@@ -799,9 +1295,9 @@
     t._cool = setTimeout(() => t.classList.remove('hot'), 2500);
   }
 
-  // 手动加长、加宽：视图不动，多出来的纸在下面 / 右边
+  // 手动加长、加宽（书页、推送页纸边的按钮）：视图不动，多出来的纸在下面 / 右边
   function extendPage(dir) {
-    if (!S.page) return;
+    if (!S.page || blankNb()) return;
     if (dir === 'down') {
       S.pageH = Math.min(30000, S.pageH + 700);
       S.page.h = S.pageH;
@@ -823,7 +1319,7 @@
     S.fitMode = null;
     redrawAll();
     markDirty();
-    toast({ down: '这一页加长了', right: '这一页加宽了（页边挪到了右边）', up: '上面加了一块纸', left: '左边加了一块纸' }[dir], 1500);
+    toast({ down: '这一页加长了', right: '这一页加宽了（页边往右挪了）', up: '上面加了一块纸', left: '左边加了一块纸' }[dir], 1500);
   }
 
   function isFullscreen() { return Boolean(document.fullscreenElement || document.webkitFullscreenElement); }
@@ -906,6 +1402,8 @@
     grip.addEventListener('pointerup', end);
     grip.addEventListener('pointercancel', end);
     window.addEventListener('resize', () => placeTools());
+    // 这一条变宽了（英文界面在摆好之后才换成英文、「AI」上的字变了……）：按记着的位置重新夹回屏幕里，右边不出屏幕
+    if (window.ResizeObserver) new ResizeObserver(() => placeTools()).observe(bar);
     placeTools();
   }
 
@@ -919,11 +1417,11 @@
       const hid = er.ids.length ? S.page.ai.filter((a) => !(er.gone0 && er.gone0.has(a.id)) && gone(a, live)).length : 0;
       const rec = { t: 'erase', ids: er.ids };
       if (blue.length) rec.ai = blue; // 擦掉的蓝字：撤销时回到擦之前（原来划掉的仍是划掉）
-      S.undo.push(rec);
+      pushUndo(rec);
       if (hid) {
         renderAI();
-        toast(`Claude 的 ${hid} 条批注指着的字擦掉了，已收起（撤销可恢复）`, 3000);
-      }
+        toast(`Claude 的 ${hid} 条批注指着的字擦掉了，已收起（点撤销能找回）`, 3000);
+      } else if (S.readsOn) drawReads(); // 那组笔迹擦掉了：它下面的小灰字跟着没了
       markDirty();
     }
     drawLive();
@@ -1019,6 +1517,7 @@
   function blueDist(a, x, y) { // 点到这条蓝字自己画出来的地方的距离（线类留 4 的余量）
     const lay = a.lay && [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h];
     if (a.type === 'write') return isBadge(a) ? Math.max(0, Math.hypot(x - a.at[0], y - a.at[1]) - BADGE_R) : Infinity; // 圈号
+    if (isDot(a)) return Math.max(0, Math.hypot(x - a.dot.at[0], y - a.dot.at[1]) - DOT_R); // 收成小蓝点的短批注：只认那个点
     if (a.type === 'circle' && a.box) { // 只认圈线：圈里是我的字。沿着从圈心出发的方向量到圈线
       const b = a.box, cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2, rx = (b[2] - b[0]) / 2 + 14, ry = (b[3] - b[1]) / 2 + 11;
       const d = Math.hypot((x - cx) / rx, (y - cy) / ry), p = Math.hypot(x - cx, y - cy);
@@ -1040,61 +1539,169 @@
     return best;
   }
 
+  // 重做（界面上叫「恢复」，英文 Redo；2026-11-16 用户定，细节暂定）：每页的重做记录挂在那一页的撤销记录（S.undo 那个数组）上，跟着它走——
+  // 翻页、换本子、连续阅读时各页另存、转动这一页、别处改过重新载入，撤销记录怎么换、怎么清，重做记录就怎么换、怎么清。
+  // 撤销一步时把重做要用的东西记进那一步（拿掉的那一笔、擦掉的时刻、改之前的值……），这一步挪进重做记录；重做时照着做回去、挪回撤销记录。
+  // 撤销之后又有了新的动作（写、擦、采纳、✓ ×、清除本页批注、卡片上的红字……，凡是记进撤销的），重做记录清掉
+  const redoOf = new WeakMap();
+  function redoList(u = S.undo) {
+    let r = redoOf.get(u);
+    if (!r) { r = []; redoOf.set(u, r); }
+    return r;
+  }
+  function pushUndo(rec) {
+    S.undo.push(rec);
+    redoList().length = 0;
+    updateRedo();
+  }
+  // 「恢复」按钮（重做；右下角那一条、左侧工具栏各一个）：撤销过才能点，否则是灰的
+  function updateRedo() {
+    const r = redoOf.get(S.undo), off = !r || !r.length;
+    for (const id of ['#redo', '#toolsRedo']) { const b = $(id); if (b) b.disabled = off; }
+  }
+
   function undo() {
+    lassoOff(); // 套索选中的取消（撤销、重做可能把选中的那几笔挪走、拿掉）
     const a = S.undo.pop();
     if (!a) { toast('没有可以撤销的'); return; }
-    if (a.t === 'add') S.page.strokes = S.page.strokes.filter((s) => s.id !== a.id);
-    else if (a.t === 'erase') {
-      for (const st of S.page.strokes) if (a.ids.indexOf(st.id) >= 0) delete st.erasedAt;
+    if (a.t === 'move') shiftSel(a, -1); // 套索挪动：这几笔和跟着走的蓝字挪回去
+    else if (a.t === 'add') {
+      a.st = S.page.strokes.find((s) => s.id === a.id) || a.st; // 重做时放回去的就是这一笔
+      S.page.strokes = S.page.strokes.filter((s) => s.id !== a.id);
+      // 这一笔压到、收成小蓝点的短批注：展开回来（浮出来时在上面写过红字的不展开：红字在小蓝点那张小卡片上）
+      a.dots = {};
+      for (const id of a.fold || []) {
+        const it = S.page.ai.find((o) => o.id === id);
+        if (it && it.dot && it.dot.by === a.id && !marksOf(it).length) { a.dots[id] = it.dot; delete it.dot; }
+      }
+      if (S.card && (a.fold || []).includes(S.card.id)) closeCard();
+    } else if (a.t === 'erase') {
+      a.at = {}; // 擦掉的时刻：重做时照原样记回去（交给 Claude 的书写过程里写着什么时候擦的）
+      for (const st of S.page.strokes) if (a.ids.indexOf(st.id) >= 0) { a.at[st.id] = st.erasedAt; delete st.erasedAt; }
       for (const x of a.ai || []) { // 擦掉的蓝字（连同圈号）回来；原来划掉的仍是划掉
         const it = S.page.ai.find((o) => o.id === x.id);
         if (!it) continue;
+        x.at = it.erasedAt;
         delete it.erasedAt;
         if (x.dismissed) it.dismissed = true; else delete it.dismissed;
       }
     } else if (a.t === 'flag') { // 采纳：回到原样
       const it = S.page.ai.find((o) => o.id === a.id);
       if (it) {
+        a.next = Boolean(it[a.key]);
         if (a.prev) it[a.key] = true; else delete it[a.key];
       }
     } else if (a.t === 'verdict') { // ✓ / × 点错了
       const it = S.page.ai.find((o) => o.id === a.id);
-      if (it) { if (a.prev) it.verdict = a.prev; else delete it.verdict; }
+      if (it) { a.next = it.verdict; if (a.prev) it.verdict = a.prev; else delete it.verdict; }
     } else if (a.t === 'cmark' || a.t === 'cerase') { // 长回答卡片上的红字：撤掉刚写的一笔，或找回擦掉的
       const it = S.page.ai.find((o) => o.id === a.a);
       if (it && Array.isArray(it.marks)) {
-        if (a.t === 'cmark') it.marks = it.marks.filter((m) => !m || m.id !== a.id);
-        else for (const m of it.marks) if (m && a.ids.indexOf(m.id) >= 0) delete m.erasedAt;
+        if (a.t === 'cmark') {
+          const k = it.marks.findIndex((m) => m && m.id === a.id);
+          if (k >= 0) { a.mark = it.marks[k]; a.mi = k; }
+          it.marks = it.marks.filter((m) => !m || m.id !== a.id);
+        } else {
+          a.at = {};
+          for (const m of it.marks) if (m && a.ids.indexOf(m.id) >= 0) { a.at[m.id] = m.erasedAt; delete m.erasedAt; }
+        }
         if (S.card && S.card.id === it.id) drawCardInk();
         else toast('撤销的是卡片上的红字', 1800); // 卡片收着：纸上看不出来，说一句
       }
     }
+    redoList().push(a);
+    updateRedo();
     drawInk();
     renderAI(); // 落空的标注跟着回来
     markDirty();
   }
 
-  // -- 手指：单指平移，双指缩放，轻点圈号打开长回答的卡片，双击切换整页/适配宽度
+  // 重做：把最近撤销的那一步照原样做回去，挪回撤销记录（不清重做记录里更早撤销的几步）
+  function redo() {
+    lassoOff();
+    const a = redoList().pop();
+    if (!a) { toast('没有可以恢复的'); return; }
+    const find = (id) => S.page.ai.find((o) => o.id === id);
+    if (a.t === 'move') shiftSel(a, 1); // 套索挪动：再挪过去
+    else if (a.t === 'add') {
+      if (a.st && !S.page.strokes.some((s) => s.id === a.id)) {
+        S.page.strokes.push(a.st);
+        for (const id of Object.keys(a.dots || {})) { const it = find(id); if (it && !it.dot && !it.erasedAt) it.dot = a.dots[id]; } // 压到的批注照旧收成小蓝点
+        // 撤销以后才到的短批注落在这一笔底下：和写这一笔时一样收成小蓝点（撤销这一笔时它展开回来）
+        const f = blankNb() && a.st.c !== 'r' ? foldUnder(a.st) : [];
+        if (f.length) a.fold = Array.from(new Set((a.fold || []).concat(f)));
+      }
+    } else if (a.t === 'erase') {
+      const now = Date.now();
+      for (const st of S.page.strokes) if (a.ids.indexOf(st.id) >= 0) st.erasedAt = (a.at && a.at[st.id]) || now;
+      for (const x of a.ai || []) {
+        const it = find(x.id);
+        if (!it) continue;
+        it.erasedAt = x.at || now;
+        it.dismissed = true;
+      }
+      if (S.card && (a.ai || []).some((x) => x.id === S.card.id)) closeCard(); // 开着的那张卡片的回答又擦掉了
+    } else if (a.t === 'flag') {
+      const it = find(a.id);
+      if (it) { if (a.next) it[a.key] = true; else delete it[a.key]; }
+    } else if (a.t === 'verdict') {
+      const it = find(a.id);
+      if (it) { if (a.next) it.verdict = a.next; else delete it.verdict; }
+    } else if (a.t === 'cmark' || a.t === 'cerase') {
+      const it = find(a.a);
+      if (it) {
+        if (a.t === 'cmark') {
+          if (a.mark && !marksOf(it).some((m) => m.id === a.id)) {
+            const ms = Array.isArray(it.marks) ? it.marks.slice() : [];
+            ms.splice(Math.min(typeof a.mi === 'number' ? a.mi : ms.length, ms.length), 0, a.mark);
+            it.marks = ms;
+          }
+        } else for (const m of marksOf(it)) if (a.ids.indexOf(m.id) >= 0) m.erasedAt = (a.at && a.at[m.id]) || Date.now();
+        if (S.card && S.card.id === it.id) drawCardInk();
+        else toast('恢复的是卡片上的红字', 1800);
+      }
+    }
+    S.undo.push(a);
+    updateRedo();
+    drawInk();
+    renderAI();
+    markDirty();
+  }
+
+  // -- 手指：单指平移，双指缩放，轻点圈号打开长回答的卡片
   function touchDown(e) {
     const [px, py] = ptOf(e);
     touches.set(e.pointerId, { x: px, y: py });
     try { stage.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     gestureStart();
+    if (bigTouch(e)) gesture.big = true;
+  }
+  // 卡片开着时，这一下算不算明确地挪纸、缩放：一根手指挪过 CARD_PAN；几个触点（取头两个，和下面缩放用的一样）的间距或中点变过 CARD_PINCH
+  function firmMove(pts, p0) {
+    if (pts.length === 1) return Math.hypot(pts[0].x - p0[0].x, pts[0].y - p0[0].y) > CARD_PAN;
+    const [a, b] = pts, [a0, b0] = p0;
+    const dd = Math.hypot(a.x - b.x, a.y - b.y) - Math.hypot(a0.x - b0.x, a0.y - b0.y);
+    const dm = Math.hypot((a.x + b.x - a0.x - b0.x) / 2, (a.y + b.y - a0.y - b0.y) / 2);
+    return Math.abs(dd) > CARD_PINCH || dm > CARD_PINCH;
   }
   function touchMove(e) {
     const [px, py] = ptOf(e);
     touches.set(e.pointerId, { x: px, y: py });
     if (!gesture) return;
     const pts = Array.from(touches.values()), g = gesture, v0 = g.v0;
-    // 卡片开着：挪纸（挪过 CARD_PAN）、两指缩放时收起。搭在纸上的手掌、手环晃一点不算（用户写字的手上戴手环）
-    if (S.card && (pts.length > 1 || Math.hypot(pts[0].x - g.p0[0].x, pts[0].y - g.p0[0].y) > CARD_PAN)) closeCard();
+    if (bigTouch(e)) g.big = true;
+    if (pts.length > 1 || Math.hypot(pts[0].x - g.p0[0].x, pts[0].y - g.p0[0].y) > SLOP) g.moved = true;
+    // 卡片开着：明确地挪纸、缩放（firmMove）才收起，纸从这时起跟着手指走。搭在纸上的手掌、手环（常被认成两三个点）晃一点、
+    // 接触面大得像手掌的：卡片不收，纸也不动（用户写字的手上戴手环）
+    if (S.card) {
+      if (g.big || !firmMove(pts, g.p0)) return;
+      closeCard();
+    }
     let v;
     if (pts.length === 1) {
       const dx = pts[0].x - g.p0[0].x, dy = pts[0].y - g.p0[0].y;
-      if (Math.hypot(dx, dy) > SLOP) g.moved = true;
       v = { s: v0.s, tx: v0.tx + dx, ty: v0.ty + dy };
     } else {
-      g.moved = true;
       const a = pts[0], b = pts[1], a0 = g.p0[0], b0 = g.p0[1];
       const d0 = Math.hypot(a0.x - b0.x, a0.y - b0.y) || 1, d = Math.hypot(a.x - b.x, a.y - b.y);
       const s = clamp(v0.s * d / d0, S.fitS * 0.4, S.fitS * 8), k = s / v0.s;
@@ -1111,13 +1718,14 @@
     touches.delete(e.pointerId);
     if (touches.size) { gestureStart(); return; }
     gesture = null;
-    // 轻点：不到 0.45 秒；距离由 moved 管
-    if (g && !g.moved && g.single && performance.now() - g.t < TAP_MS && !penJustUsed()) {
-      const now = performance.now();
+    // 轻点：手指抬起（系统取消的触摸不算：pointercancel、lostpointercapture），一根手指，不到 0.45 秒，距离由 moved 管。
+    // 卡片开着时接触面大得像手掌的也不算（旁证，见 PALM_SIZE）
+    if (g && e.type === 'pointerup' && !g.moved && g.single && performance.now() - g.t < TAP_MS && !penJustUsed()
+      && !(S.card && (g.big || bigTouch(e)))) {
+      // 手指连点两下不再切换「整页 / 适配宽度」（2026-11-16 用户定去掉）：这是个看不见的手势，用户是碰巧撞上的，画面突然跳变；
+      // 轻点还要用来收卡片、点圈号、点小蓝点，连点的机会多。切换在「⋯」菜单里
       if (!tapAiItem(...ptOf(e))) {
         closeCard(); // 手指点纸上别处：卡片收起（手指落下时不收：可能是搭上来的手掌，见 document 上的 pointerdown）
-        if (now - lastTap < 320) { fit(S.fitMode === 'width' ? 'page' : 'width'); lastTap = 0; return; }
-        lastTap = now;
       } else if (S.card) { redrawAll(); return; } // 点开了卡片（相邻页上的圈号：那一页已换成当前页）：不按屏幕中线再换页，换了卡片就收起了
     }
     if (!flowCheck()) redrawAll();
@@ -1126,7 +1734,7 @@
   function gestureStart() {
     const pts = Array.from(touches.values());
     gesture = { v0: Object.assign({}, S.view), p0: pts.map((p) => ({ x: p.x, y: p.y })), moved: gesture ? gesture.moved : false,
-      single: (gesture ? gesture.single : true) && pts.length === 1, t: gesture ? gesture.t : performance.now() };
+      single: (gesture ? gesture.single : true) && pts.length === 1, t: gesture ? gesture.t : performance.now(), big: gesture ? gesture.big : false };
   }
 
   stage.addEventListener('wheel', (e) => {
@@ -1164,8 +1772,9 @@
     kc.fillRect(0, 0, k.width, k.height);
     kc.setTransform(sc, 0, 0, sc, -sel.x0 * sc, -sel.y0 * sc);
     paintPaper(kc, {});
-    for (const st of inkStrokes()) if (st.erasedAt) drawStroke(kc, st, ERASED); // 书写过程每次都附：擦掉的笔迹画成浅灰
-    for (const st of inkStrokes()) if (!st.erasedAt) drawStroke(kc, st, inkOf(st));
+    // 笔迹用原来的画法（平板上显示的笔触改过，这张图不跟着改）
+    for (const st of inkStrokes()) if (st.erasedAt) drawStrokeForAI(kc, st, ERASED); // 书写过程每次都附：擦掉的笔迹画成浅灰
+    for (const st of inkStrokes()) if (!st.erasedAt) drawStrokeForAI(kc, st, inkOf(st));
     paintAiForModel(kc);
     paintLabels(kc, labelled, sc);
 
@@ -1220,6 +1829,12 @@
         ctx.textAlign = 'start';
         continue;
       }
+      if (isDot(it)) { // 收成小蓝点的短批注：只画那个点（字照旧列在消息的「之前写过的批注」里）
+        ctx.beginPath();
+        ctx.arc(it.dot.at[0], it.dot.at[1], DOT_R, 0, Math.PI * 2);
+        ctx.fill();
+        continue;
+      }
       if (it.fig && it.img) { // Claude 放上来的图：载入好了才画得上
         const im = figImage(it.img);
         if (im.complete && im.naturalWidth) ctx.drawImage(im, it.fig.x, it.fig.y, it.fig.w, it.fig.h);
@@ -1262,22 +1877,27 @@
 
   function payloadFor(groups, sel, imgs) {
     // 回答过的红笔问题，不再当新问题（faded 是以前发送时记下的「回答过」）
-    const ans = answeredIds(), done = (g) => g.c === 'r' && g.strokes.every((s) => s.faded || ans.has(s.id));
+    const ans = answeredIds(), done = (g) => g.c === 'r' && redAnswered(g.strokes, ans);
     return {
       nb: S.nb.id, page: S.idx, include_process: true, now: Date.now(),
       sel: { x0: sel.x0, y0: sel.y0, x1: sel.x1, y1: sel.y1 },
       crop: imgs.cropInfo,
       page_size: { w: S.W, margin: M, h: S.pageH, x0: S.X0, y0: S.Y0 },
       rot: S.page.rot || 0, // Claude 看到的图是这一页转到多少度时画的
-      groups: groups.map((g) => ({
+      // 有回头补的笔画的组另带 late（补了几笔）、lateAt（最后一次补的时刻）、tw（不算补的、写完的时刻），和服务端 pages.compute_groups 一样：
+      // 书写过程里写成「其中 N 笔是 mm:ss 回头补的」，停顿、写了多久按 tw 算（prompt.build_timeline）
+      groups: groups.map((g) => Object.assign({
         id: g.id, t0: g.t0, t1: g.t1, n: g.n, erased: g.erased, erasedAt: g.erasedAt,
         bbox: g.bbox.map(Math.round), inSel: g.inSel, revisit: g.revisit, red: g.c === 'r', answered: done(g) || undefined,
         ids: g.strokes.map((s) => s.id), on: groupOn(g),
-      })),
+      }, g.late ? { late: g.late, lateAt: g.lateAt, tw: g.tw } : {})),
       // 之前写过的批注：短的是原话；长回答（圈号）带上圈号、问题和全文，消息里写成「圈号 n（问：q）：前 200 个字…」（prompt.fmt_prev）；
-      // 卡片下面接着回过的各段（回应卡片上的红字）也带上
+      // 卡片下面接着回过的各段（回应卡片上的红字）也带上；纸上的短批注收成的卡片标上 note（消息里写「原来是短批注」）
       prev_notes: S.page.ai.filter((a) => a.text && !a.dismissed && a.type !== 'arrow' && !gone(a, liveIds()))
-        .map((a) => (a.type === 'write' ? Object.assign({ n: a.n, q: a.q, text: a.text }, moreOf(a).length ? { more: moreOf(a).map((m) => ({ q: m.q, text: m.text })) } : {}) : a.text)),
+        .map((a) => (a.type === 'write' ? Object.assign({ n: a.n, q: a.q, text: a.text }, fromNote(a) ? { note: true } : {},
+          moreOf(a).length ? { more: moreOf(a).map((m) => ({ q: m.q, text: m.text })) } : {}) : a.text)),
+      // 收成小蓝点的短批注有几条（图里是没有数字的小蓝点）：消息里说一句那些点是什么（字照旧在上面的 prev_notes 里）
+      dots: S.page.ai.filter((a) => isDot(a) && !a.erasedAt && !a.dismissed && !gone(a, liveIds())).length || undefined,
       images: { crop: imgs.crop },
     };
   }
@@ -1353,7 +1973,7 @@
     let best = null, bestArea = Infinity;
     for (const a of S.page.ai) {
       if (a.erasedAt || VOTE_TYPES.has(a.type) || gone(a, live)) continue;
-      const h = a.type === 'write' ? (isBadge(a) ? badgeBox(a) : null) : a.hit;
+      const h = a.type === 'write' ? (isBadge(a) ? badgeBox(a) : null) : isDot(a) ? dotBox(a) : a.hit;
       if (!h) continue;
       const area = (h[2] - h[0]) * (h[3] - h[1]);
       if (pt[0] >= h[0] - pad && pt[0] <= h[2] + pad && pt[1] >= h[1] - pad && pt[1] <= h[3] + pad && area < bestArea) { best = a; bestArea = area; }
@@ -1370,24 +1990,28 @@
   }
 
   function flag(a, key, on, msg) {
-    S.undo.push({ t: 'flag', id: a.id, key, prev: Boolean(a[key]) });
+    pushUndo({ t: 'flag', id: a.id, key, prev: Boolean(a[key]) });
     if (on) a[key] = true; else delete a[key];
     renderAI();
     markDirty();
     toast(msg, 1800);
   }
 
-  // 有回应指着的笔迹：红笔问题算回答过了
-  function answeredIds() {
+  // 有回应指着的笔迹：红笔问题算回答过了（page：哪一页，默认当前页；req：这一轮的回应不算，给 lastQuestion 用）
+  function answeredIds(page = S.page, req) {
     const s = new Set();
-    for (const a of S.page.ai) if (!a.dismissed) for (const x of [].concat(a.on || [], a.on2 || [])) s.add(x);
+    for (const a of page.ai) if (!a.dismissed && !(req && a.req === req)) for (const x of [].concat(a.on || [], a.on2 || [])) s.add(x);
     return s;
+  }
+  // 一组红笔问题回答过了：那组的笔迹都有回应指着（ans 是 answeredIds 的结果；faded 是以前发送时记下的「回答过」）
+  function redAnswered(strokes, ans) {
+    return strokes.every((s) => s.faded || ans.has(s.id));
   }
 
   function decide(a, v) {
     const prev = a.verdict;
     if (v) a.verdict = v; else delete a.verdict;
-    S.undo.push({ t: 'verdict', id: a.id, prev });
+    pushUndo({ t: 'verdict', id: a.id, prev });
     renderAI();
     markDirty();
     // 决定跟着下一次点「AI」带给 Claude（那一页没写新字也会带上）
@@ -1398,23 +2022,64 @@
     decide(it, it.verdict === v ? undefined : v);
   }
 
-  // ✓ × 两个圆钮（2026-11-04 用户要回来的：框里画勾难画）：框右边放得下就放在右边、和框齐平，否则放在框上方右端
-  function verdictButtons(a) {
-    const b = a.vbox || a.box, r = 15, gap = 8;
-    if (b[2] + gap + 4 * r + gap <= S.TW - 6) {
-      const y = (b[1] + b[3]) / 2, x1 = b[2] + gap + r;
-      return [{ v: 'yes', x: x1, y, r }, { v: 'no', x: x1 + 2 * r + gap, y, r }];
+  // ✓ × 两个圆钮（2026-11-04 用户要回来的：框里画勾难画）：框右边放得下就放在右边、和框齐平，否则放在框上方右端。
+  // 一页上几条建议的钮不叠（阶段 D1 修的：分组框和框里那条连线的钮原来各算各的，常叠在一处，点到的只会是排在前面的那条）：
+  // 按 S.page.ai 的先后排，先来的在原处；后来的那组要是碰着前面的钮，挪到紧挨着自己那条建议的、离原处最近的空处
+  const VB_R = 15, VB_GAP = 8;
+  const vbPair = (x1, y) => [{ v: 'yes', x: x1, y, r: VB_R }, { v: 'no', x: x1 + 2 * VB_R + VB_GAP, y, r: VB_R }];
+  function vbHome(b) { // 原来的位置：✓ 的圆心
+    const r = VB_R, gap = VB_GAP;
+    if (b[2] + gap + 4 * r + gap <= S.TW - 6) return [b[2] + gap + r, (b[1] + b[3]) / 2];
+    return [b[2] - 3 * r - gap, b[1] - r - 10 >= S.Y0 + r ? b[1] - r - 10 : b[3] + r + 6];
+  }
+  // 紧挨着框 b 的几处（一对钮的 ✓ 圆心）：右边一列、上边一行、下边一行、左边一列，都和框隔一个小空
+  function vbSpots(b) {
+    const r = VB_R, gap = VB_GAP, step = r + gap / 2, out = [];
+    for (let y = b[1] - r; y <= b[3] + r + 1e-6; y += step) out.push([b[2] + gap + r, y], [b[0] - gap - 3 * r - gap, y]);
+    for (let x = b[2] - 3 * r - gap + 2 * step; x >= b[0] - 3 * r - gap - 2 * step; x -= step) out.push([x, b[1] - r - 10], [x, b[3] + r + 6]);
+    return out;
+  }
+  // 让开的那组（第二部分加的，看得出归属）：挑紧挨自己框的空处时，离别的钮 VB_APART 以内的加价，尽量不和别的钮上下挨着排；
+  // 让开了的那组画一条细虚线连到自己的框上（drawItem 里的 vlink），线的那头一个小点落在框边上
+  const VB_APART = 70;
+  function voteLayout() {
+    const live = liveIds(), placed = [], out = new Map(), r = VB_R, room = 2 * r + 4;
+    const clear = (x1, y) => vbPair(x1, y).every((c) => placed.every((q) => Math.hypot(c.x - q.x, c.y - q.y) >= room));
+    const crowd = (x1, y) => vbPair(x1, y).some((c) => placed.some((q) => Math.hypot(c.x - q.x, c.y - q.y) < VB_APART));
+    const onPaper = (x1, y) => x1 - r >= S.X0 + 2 && x1 + 3 * r + VB_GAP <= S.TW - 2 && y - r >= S.Y0 + 2 && y + r <= S.pageH - 2;
+    for (const a of S.page.ai) {
+      if (!VOTE_TYPES.has(a.type) || !a.box || a.sent || a.erasedAt || gone(a, live)) continue; // 画出钮来的那些（和 drawItem 一样）
+      const b = a.vbox || a.box, home = vbHome(b);
+      let at = home;
+      if (!clear(...home)) {
+        const d = (p) => Math.hypot(p[0] - home[0], p[1] - home[1]) + (crowd(...p) ? 200 : 0);
+        const free = vbSpots(b).filter((p) => onPaper(...p) && clear(...p)).sort((p, q) => d(p) - d(q));
+        if (free.length) at = free[0];
+      }
+      const pair = vbPair(...at);
+      if (at !== home) pair.moved = true;
+      placed.push(...pair);
+      out.set(a.id, pair);
     }
-    const x2 = b[2] - r, x1 = x2 - 2 * r - gap, y = b[1] - r - 10 >= S.Y0 + r ? b[1] - r - 10 : b[3] + r + 6;
-    return [{ v: 'yes', x: x1, y, r }, { v: 'no', x: x2, y, r }];
+    return out;
+  }
+  // 让开了的那组钮连到自己那条建议的框（b）的细线：从这对钮靠框的那一边到框边上最近的一点
+  function vbLink(pair, b) {
+    const P = [pair[0].x - pair[0].r, pair[0].y - pair[0].r, pair[1].x + pair[1].r, pair[1].y + pair[1].r];
+    const pick = (a0, a1, b0, b1) => (a0 > b1 ? [a0, b1] : a1 < b0 ? [a1, b0] : [(Math.max(a0, b0) + Math.min(a1, b1)) / 2, (Math.max(a0, b0) + Math.min(a1, b1)) / 2]);
+    const [px, bx] = pick(P[0], P[2], b[0], b[2]), [py, by] = pick(P[1], P[3], b[1], b[3]);
+    return { from: [px, py], to: [bx, by] };
+  }
+  function verdictButtons(a) {
+    return voteLayout().get(a.id) || vbPair(...vbHome(a.vbox || a.box));
   }
   // 点在哪个 ✓ / × 钮上（页面坐标）：钮挨得近时取最近的那个
   function voteButtonAt(x, y) {
-    const live = liveIds();
+    const live = liveIds(), lay = voteLayout();
     let best = null, bestD = Infinity;
     for (const a of S.page.ai) {
       if (!VOTE_TYPES.has(a.type) || a.sent || a.dismissed || !a.box || gone(a, live)) continue;
-      for (const vb of verdictButtons(a)) {
+      for (const vb of lay.get(a.id) || []) {
         const d = Math.hypot(x - vb.x, y - vb.y);
         if (d <= vb.r + 12 && d < bestD) { best = { a, v: vb.v }; bestD = d; }
       }
@@ -1432,11 +2097,11 @@
     const b = strokeBox(st);
     return b[2] - b[0] <= 16 && b[3] - b[1] <= 16 && tapVote(st.pts[0][0], st.pts[0][1]);
   }
-  // 用笔（电脑上是鼠标）点一下圈号：打开那条长回答的卡片，这一点不留作笔迹
+  // 用笔（电脑上是鼠标）点一下圈号：打开那条长回答的卡片；点一下小蓝点：那条短批注在旁边浮出来。这一点不留作笔迹
   function penTapBadge(st) {
     const b = strokeBox(st);
     if (b[2] - b[0] > 16 || b[3] - b[1] > 16) return false;
-    const a = badgeAtWorld(st.pts[0][0], st.pts[0][1]);
+    const a = badgeAtWorld(st.pts[0][0], st.pts[0][1]) || dotAtWorld(st.pts[0][0], st.pts[0][1], S.page, DOT_R + DOT_HALO + 3);
     if (!a) return false;
     tapBadge(a);
     return true;
@@ -1465,6 +2130,8 @@
   async function send() {
     if (!S.page || S.sending || localBlocked() || targetGone(send)) return;
     const nbId = S.nb.id, sentPage = S.page;
+    // 写在短批注上的红字：这条批注先收成卡片（红字挪进卡片），存好后随这次交上去（服务端按存好的页挑要交的卡片）
+    followupsToCards();
     const groups = computeGroups(inkStrokes());
     const raw = wholePageSel();
     await flushSave(); // 服务器按存好的这一页做本机手写识别
@@ -1516,6 +2183,10 @@
   async function fetchPending(nbId, i) {
     let list = [];
     try { list = await (await api(`/api/pending?nb=${encodeURIComponent(nbId)}&i=${i}`)).json(); } catch (e) { return false; }
+    // 里面有公式：先等 KaTeX 用到的字体载入，落下时量的宽度才对（landHere 是同步的，等不了）
+    const texes = (Array.isArray(list) ? list : []).flatMap((p) => (p && Array.isArray(p.items) ? p.items : []))
+      .filter((it) => it && it.type === 'formula').map((it) => String(it.tex || it.text || ''));
+    if (texes.length) await texFontsReady(texes);
     const key = nbId + '#' + i;
     S.pendingPages.delete(key);
     if (Array.isArray(list) && list.length) held.set(key, (held.get(key) || []).concat(list));
@@ -1547,6 +2218,11 @@
         if (markCardsSent(S.page, p.msent, p.req)) { renderAI(); markDirty(); }
         continue;
       }
+      if (typeof p.lsent === 'number') { // 几页一起交带上了这一页：记下交到了哪一笔为止（noteFollowups 的「上次交稿之后」）
+        markPageSent(S.page, p.lsent);
+        markDirty(); // 手上这份可能早由事件改过、还没存：待处理队列取过就没了，这里一定存一次
+        continue;
+      }
       if (p.relocate) continue; // 对旧批注的判断（收起、挪动）：这个功能删了，这种条目直接跳过
       if (!Array.isArray(p.items)) continue; // 别的不认识的条目（比如以前的「回答上的批注发过了」）：跳过
       // 发出去之后这一页又转过：回复里的框、圈选框、笔迹分组的位置换算到现在的方向
@@ -1558,8 +2234,13 @@
         crop: p.crop || { x0: 0, y0: 0, x1: S.TW, y1: S.pageH, scale: 1 },
         groups: new Map(Object.keys(p.groups || {}).map((id) => [id, Object.assign({ bbox: fix(p.groups[id]) }, (p.gx || {})[id])])),
       };
-      for (const it of Array.isArray(p.items) ? p.items : []) if (it && typeof it === 'object' && onItem(it, T) === 'write') answers++;
+      const all = p.items.filter((it) => it && typeof it === 'object');
+      // 空白本子（阶段 D1）：自己找空白的那几种（短批注、图、公式、示意图）等这一轮里紧贴着字的符号（勾、叉、编号、下划线……）都落下了再找，
+      // 免得先占了「行尾右边」那一格、把勾叉挤到批注后面去；同一种里照 Claude 写回的先后
+      const late = blankNb() ? all.filter((it) => ROOM_TYPES.has(it.type)) : [];
+      for (const it of all.filter((x) => !late.includes(x)).concat(late)) if (onItem(it, T) === 'write') answers++;
     }
+    drawReads(); // 「Claude 读到了什么」开着：新到的读法写上（只重画那几行小灰字，不打断正一个字一个字写出来的蓝字）
     if (answers) toast(`Claude 回了 ${answers} 条`, 3000);
     flushSave();
     return answers;
@@ -1592,13 +2273,13 @@
       if (nbId === S.nb.id && neighborOnScreen(i)) { S.pendingPages.delete(key); landNeighbor(i); return; }
     }
     if (held.has(pageKey())) landHere();
-    const busy = S.cur || S.erasing || touches.size || gesture;
+    const busy = S.cur || S.erasing || lassoBusy() || touches.size || gesture;
     for (const key of Array.from(held.keys())) {
       const [nbId, i] = [key.slice(0, key.lastIndexOf('#')), Number(key.slice(key.lastIndexOf('#') + 1))];
       if (nbId !== S.nb.id) continue;
       const n = neighborOnScreen(i);
       if (!n) continue;
-      if (busy) { landSoon(600); return; } // 正在写字、擦除、挪纸：等一会儿
+      if (busy) { landSoon(600); return; } // 正在写字、擦除、画套索或拖、挪纸：等一会儿
       const back = S.idx;
       S.landing = true;
       try {
@@ -1619,7 +2300,7 @@
         const d = await (await api(`/api/events?since=${S.evSeq}&wait=20`)).json();
         const isFirst = S.evSeq === 0;
         S.evSeq = d.seq;
-        if (!S.online) { S.online = true; updateStatus(); refreshSessions(); loadCards(); } // 连上了：顶上「连不上电脑」那句收起
+        if (!S.online) { S.online = true; updateStatus(); refreshSessions(); loadCards(); loadOffers(false); } // 连上了：顶上「连不上电脑」那句收起
         if (!isFirst) for (const ev of d.events) handleEvent(ev);
         // 刚打开（刷新）页面：以前的事件不再处理，只拿服务记着的最近几步，补上刷新前交的那一轮在刷新那会儿走到了哪（见 restoreRounds）
         else for (const ev of d.events) if (ev.type === 'progress') onProgress(ev);
@@ -1798,14 +2479,21 @@
     if (ev.type === 'sessions') {
       refreshSessions();
     } else if (ev.type === 'ai') {
+      // 回在这一本别的页上（连续阅读时落在屏幕上相邻页上的也算）、纸上看得见的：页码旁出记号（只有读法的不出）
+      if (S.nb && ev.nb === S.nb.id && ev.page !== S.idx && ev.what !== 'relocate' && ev.shown !== false) noteNewAns(ev.page, ev.key);
       if (S.nb && ev.nb === S.nb.id && ev.page === S.idx) processPending();
       else if (S.nb && ev.nb === S.nb.id && neighborOnScreen(ev.page)) landNeighbor(ev.page); // 连续阅读：那一页正显示在屏幕上，直接落下
       else if (ev.what !== 'relocate') { // 不在屏幕上：等翻到时落下（对旧批注的判断已删，不提示）
         if (S.nb && ev.nb === S.nb.id) S.pendingPages.add(ev.nb + '#' + ev.page); // 连续阅读时滑到屏幕上也落下（landVisible）
-        toast(`Claude 在别的页写了批注：${ev.label}`, 5000, '去看看', () => openNotebook(ev.nb, ev.page));
+        toast(`Claude 在别的页写了批注：${ev.label}`, 5000, '去看看', () => {
+          if (S.nb && S.nb.id === ev.nb) noteJumpBack(); // 同一本里跳过去：输入页码的小框里能「回到」现在这一页
+          openNotebook(ev.nb, ev.page);
+        });
       }
     } else if (ev.type === 'folders') { // 抽屉里的文件夹改过了（这台或别的设备上）
       loadNotebooks().catch(() => {});
+    } else if (ev.type === 'offers') { // 新文件提示：插件刚报上来新生成的文件（带文件名），或别处加入、忽略了一条
+      loadOffers(Array.isArray(ev.names) && ev.names.length > 0);
     } else if (ev.type === 'show') {
       loadNotebooks(S.nb && S.nb.id);
       const what = ev.nb && ev.nb.startsWith('book:') ? `Claude 导入了《${ev.title}》` : `Claude 推送了一页：${ev.title}`;
@@ -1829,6 +2517,12 @@
         if (markCardsSent(pg, cards, ev.req) && i === S.idx) { renderAI(); markDirty(); }
       }
       if (S.flow) drawNeighborBadges();
+    } else if (ev.type === 'lsent') { // 几页一起交带上了这几页：手上有的页记下交到了哪一笔为止（没开着的页，打开时由待处理队列合进去）
+      if (!S.nb || ev.nb !== S.nb.id) return;
+      for (const [k, t] of Object.entries(ev.pages || {})) {
+        const i = Number(k), pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
+        if (markPageSent(pg, t) && i === S.idx) markDirty();
+      }
     } else if (ev.type === 'progress') { // 这一轮到哪一步了（插件报来）
       onProgress(ev);
     } else if (ev.type === 'confirm' || ev.type === 'confirmed' || ev.type === 'ask' || ev.type === 'asked') {
@@ -1993,18 +2687,17 @@
       markDirty();
       return;
     }
-    if (it.type === 'read') { // Claude 读到的字：照旧存进这一页（数据不丢），现在不显示
-      S.page.reads = S.page.reads || [];
-      S.page.reads.push({ req: T.req, t: Date.now(), level: T.level, text: it.text });
+    if (it.type === 'read') { // Claude 读到的字（阶段 D2）：存进这一页；「Claude 读到了什么」开着时写在那组笔迹下面（见 readLabels）
+      S.page.reads = pruneReads((S.page.reads || []).concat([readEntry(it, T)]));
       markDirty();
-      return;
+      return 'read';
     }
     if (it.type === 'write' && it.card !== undefined && appendToCard(it, T)) return 'write'; // 回应卡片上的红字：接在那张卡片下面
     const item = buildItem(it, T);
     if (!item) return null;
     S.page.ai.push(item);
     markDirty();
-    if (item.type === 'write') S.fresh.set(item.id, performance.now()); // 圈号到了：跳两下（重画时接着跳，不从头来）
+    if (item.type === 'write' || isDot(item)) S.fresh.set(item.id, performance.now()); // 圈号（直接收成的小蓝点）到了：跳两下（重画时接着跳，不从头来）
     if (S.aiVisible) {
       const gen = S.renderGen;
       S.aiQueue = S.aiQueue.then(() => (gen === S.renderGen ? drawItem(item, true) : null));
@@ -2102,40 +2795,65 @@
   }
   const boxOf = (ss) => ss.map(strokeBox).reduce(unionBox);
 
-  // 纸上已经占着的地方：没擦掉的笔迹、别的圈号、Claude 别的东西
-  function occupied(except) {
+  // 纸上已经占着的地方：没擦掉的笔迹、别的圈号、Claude 别的东西（page：哪一页，默认当前页）。收成小蓝点的短批注只占那个点
+  function occupied(except, page = S.page) {
     const out = [];
-    for (const st of inkStrokes()) if (!st.erasedAt && st.pts.length) out.push(strokeBox(st));
-    for (const a of S.page.ai) {
+    for (const st of inkStrokes(page)) if (!st.erasedAt && st.pts.length) out.push(strokeBox(st));
+    for (const a of page.ai) {
       if (a === except || a.erasedAt || a.dismissed) continue;
       if (isBadge(a)) out.push(badgeBox(a));
+      else if (isDot(a)) out.push(dotBox(a, DOT_HALO));
       else if (a.type !== 'write' && a.hit) out.push(a.hit);
     }
     return out;
   }
 
   // 长回答的圈号放哪（到达时定下，之后不跟着笔迹动）：所答那组笔迹最后一行的右端外侧、那一行竖直的中间，离字约 16；
-  // anchor 是 end 或没给：这一页最后写的那组笔迹的右边；页面是空的：左上方。那里有字或别的圈号就往右、再往下挪到不压东西的地方
+  // 没指明答的是哪句（anchor 是 end、没给或对不上）：这一轮交上去的红笔问题里最后一句的旁边（《产品定义》第 3 节，2026-11-13 定）；
+  // 这一轮没有红笔问题：这一页最后写的那组笔迹的右边；页面是空的：左上方。那里有字或别的圈号就往右、再往下挪到不压东西的地方
   function answerSpot(it, T) {
     let row = null;
     if (Array.isArray(it.box)) row = resolveRef(it, 'anchor', T); // 指着印刷文字：那块的右边
-    else if (it.anchor && String(it.anchor).trim().toLowerCase() !== 'end') {
-      const ids = new Set(refIds(it, 'anchor', T) || []), ss = inkStrokes().filter((s) => ids.has(s.id) && !s.erasedAt);
-      if (ss.length) row = boxOf(strokeRows(ss).pop());
-      else {
-        let ref = String(it.anchor).trim().toLowerCase();
-        if (/^\d+$/.test(ref)) ref = 'g' + ref;
-        if (T.groups.has(ref)) row = resolveRef(it, 'anchor', T); // 那组笔迹已经擦掉了：按交上来时的位置
-      }
-    }
-    if (!row) { // 没指着笔迹：最后写的那一组
+    else if (it.anchor && String(it.anchor).trim().toLowerCase() !== 'end') row = groupRow(it.anchor, T);
+    if (!row) { const q = lastQuestion(T); if (q) row = groupRow(q, T); }
+    if (!row) { // 这一轮没有红笔问题：最后写的那一组（按第一笔排在最后的；回头补的一点一横并回了它所属的那组，不再自成「最后一组」）
       const live = computeGroups(inkStrokes()).filter((g) => g.n > g.erased);
       if (live.length) row = boxOf(strokeRows(live[live.length - 1].strokes.filter((s) => !s.erasedAt)).pop());
     }
-    const R = BADGE_R, x0 = row ? row[2] + BADGE_GAP + R : 60, y0 = row ? (row[1] + row[3]) / 2 : 60;
-    const maxX = S.TW - R - 6, obs = occupied(), pad = 4;
+    return badgeSpot(row ? row[2] + BADGE_GAP + BADGE_R : 60, row ? (row[1] + row[3]) / 2 : 60);
+  }
+
+  // 交上来的一组笔迹（ref：组编号，g3 或 3）最后一行的框：那组没擦掉的几笔；都擦掉了，按交上来时的位置；这一轮没有这一组：null
+  function groupRow(ref, T) {
+    const it = { anchor: ref }, ids = new Set(refIds(it, 'anchor', T) || []), ss = inkStrokes().filter((s) => ids.has(s.id) && !s.erasedAt);
+    if (ss.length) return boxOf(strokeRows(ss).pop());
+    let r = String(ref).trim().toLowerCase();
+    if (/^\d+$/.test(r)) r = 'g' + r;
+    return T.groups.has(r) ? resolveRef(it, 'anchor', T) : null;
+  }
+
+  // 这一轮交上去的红笔问题里最后写的那一句（组号最大的，组号按第一笔的先后排）；没有就是 null。
+  // 「交上去的红笔」和 redIdsInSel 同一个认法（red、sel）；之前几轮已经回答过的不算问题，和交上去时 payloadFor 标 answered 同一个认法
+  // （redAnswered），只是这一轮先落下的回应（同一个 req，比如先到的一条短批注）不算「之前回答过」
+  function lastQuestion(T) {
+    const ans = answeredIds(S.page, T.req), byId = new Map(inkStrokes().map((s) => [s.id, s]));
+    let best = null, bn = 0;
+    for (const [id, g] of T.groups) {
+      const m = /^g(\d+)$/.exec(id); // 「g3:1」这类只指某一行的小组不另算（它是整组 g3 的一部分）
+      if (!m || !g.red || !g.sel || !Array.isArray(g.ids)) continue;
+      const ss = g.ids.map((x) => byId.get(x)).filter(Boolean);
+      if (ss.length && redAnswered(ss, ans)) continue;
+      if (Number(m[1]) > bn) { bn = Number(m[1]); best = id; }
+    }
+    return best;
+  }
+
+  // 圈号从 (x0, y0) 起找一个不压东西的地方。page、G：哪一页、那一页的纸（TW、Y0、pageH；默认当前页）。
+  // R、except：小蓝点也用它找地方（半径小，不算正在收起的那条批注自己）
+  function badgeSpot(x0, y0, page = S.page, G = S, R = BADGE_R, except = null) {
+    const maxX = G.TW - R - 6, obs = occupied(except, page), pad = 4;
     const free = (x, y) => obs.every((o) => x + R + pad <= o[0] || x - R - pad >= o[2] || y + R + pad <= o[1] || y - R - pad >= o[3]);
-    const top = S.Y0 + R + 4, bottom = Math.max(top, S.pageH - R - 4);
+    const top = G.Y0 + R + 4, bottom = Math.max(top, G.pageH - R - 4);
     for (let k = 0; k < 40; k++) { // 先往右，到了纸边再往下一行（约一行字高）从原来的横坐标找起
       const y = clamp(y0 + k * 32, top, bottom);
       for (let x = Math.min(x0, maxX); x <= maxX; x += 10) if (free(x, y)) return [n1(x), n1(y)];
@@ -2148,11 +2866,12 @@
   function buildAnswer(it, T, base) {
     const item = { id: base.id, req: base.req, type: 'write', t: base.t, text: String(it.text || ''), on: base.on || [] };
     if (it.q) item.q = it.q;
-    item.n = 1 + S.page.ai.reduce((m, a) => (a.type === 'write' && typeof a.n === 'number' ? Math.max(m, a.n) : m), 0);
+    item.n = nextBadgeNo(S.page);
     item.at = answerSpot(it, T);
     item.seen = false;
     return item;
   }
+  const nextBadgeNo = (page) => 1 + page.ai.reduce((m, a) => (a.type === 'write' && typeof a.n === 'number' ? Math.max(m, a.n) : m), 0);
 
   // 在 parent 里画一个圈号：没看过的实心（蓝底白字），看过的空心（蓝圈蓝字），采纳的深蓝带 ★；刚到的跳两下
   function drawBadge(it, parent, cls) {
@@ -2246,9 +2965,14 @@
 
   // 卡片里的内容：主回答（问：……、全文）、接着的各段回应（前面写着它回应的那句红字）、最底下之前的版本
   function renderCard(a) {
-    $('#acQ').hidden = !a.q;
-    $('#acQt').textContent = a.q || '';
-    fillText($('#acBody'), a.text);
+    // 纸上的短批注收成的卡片：最上面一块照它在纸上的换行画（红字压着的字不错位），不写「问：」。
+    // 小蓝点浮出来的那张小卡片（阶段 D1）：同一个画法，只有原来那几行（下面留一点写红字的地方）
+    const dot = isDot(a), note = !dot && fromNote(a);
+    $('#acQ').hidden = dot || note || !a.q;
+    $('#acQt').textContent = dot ? '' : a.q || '';
+    if (dot) fillNote($('#acBody'), a.lay, popMap(a), a.id);
+    else if (note) fillNote($('#acBody'), a.from.lay, a.fromMap, a.from.id);
+    else fillText($('#acBody'), a.text);
     const box = $('#acMore');
     box.textContent = '';
     for (const m of moreOf(a)) {
@@ -2288,7 +3012,8 @@
 
   // 卡片里的内容按固定宽度 CARD_W 排好，整体缩放到卡片的宽度（卡片宽约半屏，最多 460 像素）；返回缩放倍数
   function layoutCard() {
-    const c = $('#answerCard'), pg = $('#acPage'), k = (c.clientWidth || CARD_W) / CARD_W;
+    // 小蓝点浮出来的小卡片比长回答的卡片窄（只有那几行宽），里面的字照长回答卡片的倍数缩放：变成卡片以后大小一样
+    const c = $('#answerCard'), pg = $('#acPage'), k = S.card && S.card.note ? popScale() : (c.clientWidth || CARD_W) / CARD_W;
     pg.style.transform = `scale(${k})`;
     const h = pg.offsetHeight;
     $('#acSizer').style.height = `${Math.ceil(h * k)}px`;
@@ -2317,12 +3042,10 @@
     return [(e.clientX - r.left) / k, (e.clientY - r.top) / k];
   }
 
-  // 一笔红字画成 SVG（一个点的画成小圆），往下挪 dy（它那一块的顶）
+  // 一笔红字画成 SVG，往下挪 dy（它那一块的顶）。和纸上的笔迹同一种笔触（brush.js，填实的轮廓）；正写着的（live）笔尖处先不收尖
   function drawMarkPath(parent, m, dy, cls) {
-    const p = m.pts, w = penWidth(m, p.reduce((s, q) => s + (q[2] || 0.5), 0) / p.length);
-    if (p.length === 1) return el('circle', { cx: f1(p[0][0]), cy: f1(p[0][1] + dy), r: f1(Math.max(1, w / 2)), class: cls || '', 'data-id': m.id || '' }, parent);
-    const d = 'M' + p.map((q) => `${f1(q[0])} ${f1(q[1] + dy)}`).join(' L');
-    return el('path', { d, 'stroke-width': f1(w), class: cls || '', 'data-id': m.id || '' }, parent);
+    const pts = dy ? m.pts.map((q) => [q[0], q[1] + dy].concat(q.slice(2))) : m.pts;
+    return el('path', { d: Brush.svgPath(pts, m.w || PEN_W, cls !== 'live'), class: cls || '', 'data-id': m.id || '' }, parent);
   }
 
   // 卡片上的红字：叠在内容上面的一层 SVG，和内容一起缩放、一起滑
@@ -2347,8 +3070,9 @@
   // 排版快照：每一块的位置和高度，块里每一行字（相对这一块）的位置、文字、字号，公式的位置和 TeX 源码。
   // 服务端排不出和平板一样的换行，画卡片的图给 Claude 时照这个画（整本一起交时服务端自己取页面数据，也靠它）
   function captureSheet() {
-    const pg = $('#acPage'), k = (S.card && S.card.k) || 1, r0 = pg.getBoundingClientRect(), blocks = [];
-    for (const [id, b] of cardBlocks()) blocks.push({ id, y: r1(b.y), h: r1(b.h), rows: sheetRows(b.el, r0, k, b.y) });
+    const pg = $('#acPage'), k = (S.card && S.card.k) || 1, r0 = pg.getBoundingClientRect(), blocks = [], a = cardItem(), note = fromNote(a);
+    // 短批注收成的卡片：最上面那块的字是照纸上的样子画的（SVG），每行的位置按它在纸上的排版算（noteRows），不一个字一个字量
+    for (const [id, b] of cardBlocks()) blocks.push({ id, y: r1(b.y), h: r1(b.h), rows: (note && id === 'a' ? noteRows(a) : []).concat(sheetRows(b.el, r0, k, b.y)) });
     return { w: CARD_W, h: r1(pg.offsetHeight), t: Date.now(), blocks };
   }
   function sheetRows(blockEl, r0, k, by) {
@@ -2366,7 +3090,7 @@
     };
     for (let n = walk.nextNode(); n; n = walk.nextNode()) {
       const host = n.parentElement;
-      if (!host || host.closest('.ac-tex')) continue;
+      if (!host || host.closest('.ac-tex') || host.closest('.ac-note')) continue;
       const fs = r1(parseFloat(getComputedStyle(host).fontSize) || 20);
       const kind = host.closest('.ac-q') ? 'q' : host.closest('.ac-mq') ? 'mq' : host.closest('.ac-older') ? 'old' : '';
       const s = n.nodeValue;
@@ -2419,8 +3143,10 @@
       if (d < best) { best = d; blk = id; top = b.y; }
     }
     const mark = { id: st.id, blk, pts: st.pts.map((p) => [p[0], r1(p[1] - top), p[2], p[3]]), t0: st.t0, w: st.w, c: 'r' };
+    // 小蓝点浮出的小卡片上第一次写红字：记下这时纸上那几行怎么换算进卡片（popMap），之后变成卡片时照它排，红字不错位
+    if (isDot(a) && !a.popMap) a.popMap = popMap(a);
     a.marks = (Array.isArray(a.marks) ? a.marks : []).concat([mark]);
-    S.undo.push({ t: 'cmark', a: a.id, id: mark.id });
+    pushUndo({ t: 'cmark', a: a.id, id: mark.id });
     cardInkChanged(a);
   }
 
@@ -2442,30 +3168,36 @@
     S.cardErase = null;
     const a = cardItem();
     if (!er || !a || !er.ids.length) return;
-    S.undo.push({ t: 'cerase', a: a.id, ids: er.ids });
+    pushUndo({ t: 'cerase', a: a.id, ids: er.ids });
     cardInkChanged(a);
   }
 
   function cardInkChanged(a) {
-    saveSheet(a);
+    if (!isDot(a)) saveSheet(a); // 小蓝点的小卡片：变成卡片时再排（noteSheet）
     markDirty();
     drawCardInk();
-    redrawBadge(a); // 圈号上的红点
+    redrawBadge(a); // 圈号（小蓝点）上的红点
     if (S.card && S.card.stale) refreshCard(); // 写的时候 Claude 的回应到了：写完再排
   }
 
-  // 只重画这一个圈号（红点、实心空心、跳两下）：不动别的蓝字（它们可能正在一个字一个字写出来）
+  // 只重画这一个圈号（红点、实心空心、跳两下）或小蓝点：不动别的蓝字（它们可能正在一个字一个字写出来）
   function redrawBadge(a) {
-    const old = aiRoot.querySelector(`g.ai-write[data-id="${CSS.escape(String(a.id))}"]`);
+    const old = aiRoot.querySelector(`:scope > g.ai-item[data-id="${CSS.escape(String(a.id))}"]`);
     if (old) old.remove();
-    if (S.aiVisible && isBadge(a) && !a.erasedAt) drawBadge(a, aiRoot, 'ai-item ai-write');
+    if (!S.aiVisible || a.erasedAt) return;
+    if (isBadge(a)) drawBadge(a, aiRoot, 'ai-item ai-write');
+    else if (isDot(a)) drawDot(a, aiRoot);
   }
 
-  // 卡片的位置：紧挨圈号，默认在右下方；放不下就翻到左边、上边，始终整个在屏幕里
+  // 卡片挨着的那一点和它的半径（页面坐标）：长回答是圈号，收成小蓝点的短批注是那个点
+  const markAt = (a) => (isDot(a) ? a.dot.at : a.at);
+  const markR = (a) => (isDot(a) ? DOT_R + DOT_HALO : BADGE_R);
+
+  // 卡片的位置：紧挨圈号（小蓝点），默认在右下方；放不下就翻到左边、上边，始终整个在屏幕里
   function placeCard(a) {
-    const card = $('#answerCard');
+    const card = $('#answerCard'), at = markAt(a);
     measureStage();
-    const v = S.view, s = v.s, cx = stageRect.left + v.tx + a.at[0] * s, cy = stageRect.top + v.ty + a.at[1] * s, r = BADGE_R * s;
+    const v = S.view, s = v.s, cx = stageRect.left + v.tx + at[0] * s, cy = stageRect.top + v.ty + at[1] * s, r = markR(a) * s;
     const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight, m = 8;
     const w = card.offsetWidth, h = card.offsetHeight;
     let left = cx + r + 6, top = cy - r * 0.4;
@@ -2485,19 +3217,27 @@
 
   // 打开一条长回答的卡片（一次只开一张），记为看过（存盘）。卡片是页面上的浮层，不是画在纸上的。
   // Claude 接着回了新的一段、还没看过：点开时滑到最新的那一段
+  // 小蓝点浮出来的小卡片：内容的倍数和长回答卡片一样（卡片宽 min(460, 半屏)，去掉两边的细框），卡片只有那几行宽
+  function popScale() { return (Math.min(460, document.documentElement.clientWidth * 0.5) - 2) / CARD_W; }
+  function popWidth(a) { const m = popMap(a); return `${Math.ceil((m.w * m.u + 2 * CARD_PX) * popScale() + 2)}px`; }
+
   function openCard(a) {
-    const card = $('#answerCard');
+    const card = $('#answerCard'), dot = isDot(a);
     closeCard();
-    const segs = moreOf(a), jump = !a.seen && segs.length ? String(segs[segs.length - 1].id) : null;
-    S.card = { id: a.id, k: 1 };
+    const segs = moreOf(a), jump = !dot && !a.seen && segs.length ? String(segs[segs.length - 1].id) : null;
+    S.card = { id: a.id, k: 1, note: dot };
+    card.classList.toggle('note-pop', dot); // 小蓝点浮出来的：样子和长回答的卡片分得开（见 style.css）
     renderCard(a);
+    card.style.width = dot ? popWidth(a) : '';
+    updateCardNav(); // 顶上的「上一条」「下一条」：先定出不出，卡片多高才量得对
     card.hidden = false;
     card.scrollTop = 0;
     layoutCard();
     placeCard(a);
     drawCardInk();
     if (jump) scrollCardTo(jump);
-    if (!a.seen) { // 看过了：圈号变空心，存下来
+    if (dot) redrawBadge(a); // 小蓝点：浮着的时候带一圈，看得出是哪一个
+    else if (!a.seen) { // 看过了：圈号变空心，存下来
       a.seen = true;
       markDirty();
       renderAI();
@@ -2514,6 +3254,87 @@
     }
   }
 
+  // -- 卡片顶上的「上一条」「下一条」（2026-11-16 用户定，暂定）：按这一页圈号的顺序（圈号上的数字）换到相邻那条回答的卡片。
+  // 擦掉的回答不算。小蓝点浮出来的小卡片不是回答，不出。用按钮不用滑动（免得和手掌打架）：手掌、手环碰到按钮不算点（bindUI 里的说明）。
+  // 跨页（2026-11-16 夜用户试过后定，暂定）：这一页最后一条再点「下一条」，翻到后面最近的、有（没擦掉的）长回答的那一页，打开它的第一条；
+  // 「上一条」同理往前，打开那一页的最后一条。要跨页时按钮上写出去哪一页（「下一条（第 5 页）›」）；整本的头和尾才变灰；
+  // 整本只有这一条时两个都不出。别的页有没有回答：当前页、连续阅读取来的相邻页看页面数据，别的页看本子信息里服务算的 ans（answersAt）
+  function cardSiblings() {
+    return S.page ? S.page.ai.filter((a) => isBadge(a) && !a.erasedAt).sort((p, q) => (p.n || 0) - (q.n || 0)) : [];
+  }
+  const liveAnswers = (pg) => (pg && Array.isArray(pg.ai) ? pg.ai.filter((a) => isBadge(a) && !a.erasedAt).length : 0);
+  // 第 i 页上没擦掉的长回答有几条：载着的页（当前页、连续阅读的相邻页）数一数，顺手记回本子信息；别的页用服务给的 ans
+  // （打开本子时从各页的数据文件算的；载过、改过又放下的页，放下时记回来——rememberAnswers）
+  function answersAt(i) {
+    const pi = S.nb && S.nb.pageInfo && S.nb.pageInfo[i];
+    const pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
+    if (pg) { if (pi) pi.ans = liveAnswers(pg); return liveAnswers(pg); }
+    return pi ? Number(pi.ans) || 0 : 0;
+  }
+  // 载着的页放下之前（翻走、连续阅读换当前页、相邻页的缓存丢掉）：它上面有几条回答记回本子信息，之后不载它也知道
+  function rememberAnswers(i, pg) {
+    const pi = S.nb && S.nb.pageInfo && S.nb.pageInfo[i];
+    if (pi && pg) pi.ans = liveAnswers(pg);
+  }
+  // 从第 i 页往 d 方向（1 往后、-1 往前）最近的、有长回答的那一页；没有是 null
+  function answerPageFrom(i, d) {
+    if (!S.nb) return null;
+    for (let j = i + d; j >= 0 && j < S.nb.pages; j += d) if (answersAt(j) > 0) return j;
+    return null;
+  }
+  function updateCardNav() {
+    const nav = $('#acNav'), list = S.card && !S.card.note ? cardSiblings() : [], k = list.findIndex((o) => S.card && o.id === S.card.id);
+    if (k < 0) { nav.hidden = true; return; }
+    const before = k === 0 ? answerPageFrom(S.idx, -1) : null, after = k === list.length - 1 ? answerPageFrom(S.idx, 1) : null;
+    nav.hidden = list.length < 2 && before === null && after === null; // 整本只有这一条
+    if (nav.hidden) return;
+    const prev = $('#acPrev'), next = $('#acNext');
+    prev.disabled = k === 0 && before === null;
+    next.disabled = k === list.length - 1 && after === null;
+    prev.textContent = before === null ? '‹ 上一条' : `‹ 上一条（第 ${before + 1} 页）`;
+    next.textContent = after === null ? '下一条 ›' : `下一条（第 ${after + 1} 页）›`;
+  }
+  // 卡片开着时这一页的回答多了、少了（Claude 又回了一条、撤销找回、擦掉）：按钮跟着变；按钮出来、收起时卡片高矮变了，重新摆
+  function syncCardNav() {
+    if (!S.card) return;
+    const was = $('#acNav').hidden, a = cardItem();
+    updateCardNav();
+    if (a && was !== $('#acNav').hidden) placeCard(a);
+  }
+  // 换到前一条（d = -1）或后一条（d = 1）：和点那个圈号打开一样（紧挨它的圈号、它自己的红字和接着的回应、记为看过）。
+  // 这一页到头了：翻到那个方向最近的有回答的页，打开它的第一条（往后）或最后一条（往前）
+  function stepCard(d) {
+    if (!S.card || S.card.note) return;
+    const list = cardSiblings(), k = list.findIndex((o) => o.id === S.card.id), b = k >= 0 ? list[k + d] : null;
+    if (b) { openCard(b); return; }
+    const j = k >= 0 ? answerPageFrom(S.idx, d) : null;
+    if (j !== null) answerOnPage(j, d < 0);
+  }
+  // 翻到第 j 页、打开它的第一条（last：最后一条）回答的卡片，和点那一页的圈号一样。连续阅读时那一页已经画在屏幕上下的，
+  // 和点它的圈号一样换成当前页、屏幕不动；不然像 ‹ › 那样翻过去。圈号不在屏幕上（翻过去后在纸的下面）：先把纸挪到看得见它。
+  // 输入页码的小框里能「回到」跳之前的那一页（noteJumpBack）
+  async function answerOnPage(j, last) {
+    const nb = S.nb;
+    noteJumpBack();
+    const n = S.flow ? flowStrip().find((m) => m.i === j) : null;
+    if (!(n && activate(n.i, n.ent, n.D))) await openPage(j);
+    if (S.nb !== nb || S.idx !== j || !S.page) return;
+    const list = cardSiblings(), a = last ? list[list.length - 1] : list[0];
+    if (!a) return;
+    revealAt(a.at);
+    openCard(a);
+  }
+  // 纸上 at 这一点不在屏幕里（或太靠下，卡片放不下）：纸挪一下，让它在屏幕上方约三分之一处；在的话不动
+  function revealAt(at) {
+    measureStage();
+    const v = S.view, x = v.tx + at[0] * v.s, y = v.ty + at[1] * v.s, top = S.collapsed ? TOP_SAFE + 40 : 20;
+    if (x >= 20 && x <= VW - 20 && y >= top && y <= VH - 160) return;
+    S.view = clampView({ s: v.s, tx: x >= 20 && x <= VW - 20 ? v.tx : VW / 2 - at[0] * v.s, ty: VH * 0.3 - at[1] * v.s });
+    S.fitMode = null;
+    updateSegs();
+    redrawAll();
+  }
+
   // 开着的卡片内容变了（Claude 接着回了一段）：重排，滑到的位置不动
   function refreshCard() {
     const a = cardItem(), card = $('#answerCard');
@@ -2521,6 +3342,7 @@
     S.card.stale = false;
     const top = card.scrollTop;
     renderCard(a);
+    updateCardNav();
     layoutCard();
     placeCard(a);
     card.scrollTop = top;
@@ -2534,9 +3356,12 @@
     if (S.cardErase) finishCardErase();
     S.cardDrag = null;
     S.cardShut = { id: S.card.id, t: performance.now() };
+    const was = S.card.note && S.page ? S.page.ai.find((o) => o.id === S.card.id) : null;
     S.card = null;
     $('#answerCard').hidden = true;
+    $('#acNav').hidden = true;
     $('#acInk').textContent = '';
+    if (was && isDot(was)) redrawBadge(was); // 小蓝点收回：那一圈去掉
   }
 
   // Claude 回应卡片上的红字（write 带 card）：接在那张卡片最下面成为一段，前面写着它回应的那句红字（q）；
@@ -2564,6 +3389,15 @@
     return a;
   }
 
+  // 这一页交上去了，交到 t 为止（平板的时钟）：lastSent 只往后挪。单页交时记交稿的时刻（send）；几页一起交时电脑记下的是
+  // 那一页当时最后一次落笔、擦除的时刻（pages.last_touch）——之后写的都比它晚，之前写的都不再算「上次交稿之后写的」。
+  // lastSent 只有 noteFollowups 用（服务端判断哪页有新字看的是它自己记的 seen，不看它）。返回改了没有
+  function markPageSent(page, t) {
+    if (!page || typeof t !== 'number' || !(t > (page.lastSent || 0))) return false;
+    page.lastSent = t;
+    return true;
+  }
+
   // 卡片上的这些红字交给 Claude 了：cards 是 {长回答 id: [红字 id]}，req 是这一轮的投递编号。
   // 同一笔红字再交一次，记最近的那一轮（投递编号按时间排，只往后换）。返回改了几笔
   function markCardsSent(page, cards, req) {
@@ -2577,9 +3411,228 @@
     return n;
   }
 
+  // -- 纸上的短批注上写了红字（2026-11-14 用户定；怎么算「写在上面」、什么时候变、圈号放哪、红字怎么换算是用户不在时暂定的，等用户过目）：
+  // 红笔写在一条短批注（note、question）上或紧挨着它，点「AI」交稿的那一刻，这条批注收成一个圈号、变成一张卡片：
+  // 卡片最上面一块是原来那句（照它在纸上的换行、字体、字号画），冲着它写的那几笔红字从纸上挪进卡片（按同一个比例换算，
+  // 相对它压着的字不动），成为卡片上还没交的红字；之后和长回答的卡片一样：随这次交稿交给 Claude，Claude 用带 card 的 write 回，
+  // 接在下面。交稿没成也不丢：卡片已经变好、存好，红字算没交（圈号带红点），下次点「AI」照样交。
+  // 新条目：{ id（还是原来那条的）, type: 'write', text（原话）, q?, on（原来所指的笔迹）, n, at, seen: true, adopted?, marks, sheet,
+  //   from（原来那条批注，原样）, fromMap（纸上那一块怎么换算进卡片：{x0, y0, w, h, u}，卡片里 x = 16 + (纸上 x − x0)·u，
+  //   y = (纸上 y − y0)·u，从卡片最上面那块的顶量）, fromAt（变的时刻） }
+  const FOLLOW_TYPES = new Set(['note', 'question']);
+  const NOTE_PAD = 10; // 短批注的字（21 号）四周放宽这么多页面单位（约半个字高）：红字压到这一圈里就算写在它上面
+  // 拉得很远的一组不收进卡片（2026-11-14 暂定，第二轮）：带上它以后卡片要缩到 NOTE_MIN_U 以下（这一块比 408 ÷ 0.8 = 510 宽），
+  // 或者这一块比批注自己的字高出 NOTE_GROW 以上，这一组就整组留在纸上、照旧是普通的红笔（不拆开带一半）。卡片里的字最小约 17 像素
+  const NOTE_MIN_U = 0.8, NOTE_GROW = 240;
+  const CARD_PX = 16, CARD_PT = 12, CARD_TW = CARD_W - 32; // 卡片内容的左边距、上边距、一行能排多宽（style.css 里 #acPage 的 padding）
+
+  function fromNote(a) {
+    const f = a && a.from, m = a && a.fromMap;
+    return Boolean(f && f.lay && Array.isArray(f.lay.lines) && m && m.u > 0 && m.w > 0 && m.h > 0);
+  }
+
+  // 短批注在纸上的字占的那一块（页面坐标）：每行按纸上的字体量宽（不按排版时留的整栏宽），高从第一行字顶到最后一行字底
+  function noteTextBox(a) {
+    const L = a.lay, n = Math.max(1, L.lines.length);
+    measure.font = `${L.fs}px ${FONT}`;
+    const tw = Math.max(L.fs, ...L.lines.map((ln) => measure.measureText(ln).width));
+    return [L.x, L.y + 2, L.x + tw, L.y + (n - 1) * L.lh + L.fs * 1.2];
+  }
+
+  // 一笔压到框 b 里的长度（沿笔画每 3 个单位数一点）：0 就是没碰到
+  function inkInBox(st, b) {
+    const sb = strokeBox(st), p = st.pts, inside = (x, y) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+    if (sb[2] < b[0] || sb[0] > b[2] || sb[3] < b[1] || sb[1] > b[3]) return 0;
+    if (p.length === 1) return inside(p[0][0], p[0][1]) ? 1 : 0;
+    let n = 0;
+    for (let i = 1; i < p.length; i++) {
+      const [x0, y0] = p[i - 1], [x1, y1] = p[i], k = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 3));
+      for (let j = i === 1 ? 0 : 1; j <= k; j++) if (inside(x0 + ((x1 - x0) * j) / k, y0 + ((y1 - y0) * j) / k)) n++;
+    }
+    return n;
+  }
+
+  // 这一页上写在短批注上的红字：[{ note, strokes }]。只认红笔；只认这条批注到了之后、这一页上次交稿之后写的、没擦、没被回答过的
+  // （「上次交稿」：单页交时平板记下的时刻，几页一起交时由电脑记下的那一页最后落笔的时刻，见 handleEvent 的 lsent）。
+  // 一组笔迹（按交稿时的分组 computeGroups：同一口气写的，加上同一行接着写的、回头补的；一句话停顿过也是一组）里有一笔压到批注的字
+  // （四周放宽 NOTE_PAD），这一组都算冲着它，写出了框的也算；一组压到两条批注时归压得多的那条（那条容不下它就留在纸上，不改归另一条）。
+  // 一条批注上的几组按先后一组组加：加上这一组后卡片要缩到 NOTE_MIN_U 以下、或高出 NOTE_GROW 以上，这一组整组留在纸上（noteFits）。
+  // 蓝字藏起来时不认（看不见，就不是写在它上面）。蓝字旁画的星号是采纳，不留作笔迹（commitStroke 里先认手势），不会到这里
+  function noteFollowups(page) {
+    if (!S.aiVisible || !page) return [];
+    const live = liveIds(page);
+    // 收成小蓝点的不算：纸上看不见它，写在原来那块地方的红字不是写在它上面（浮出来时写的红字在它的小卡片上，见 dotToCard）
+    const notes = page.ai.filter((a) => FOLLOW_TYPES.has(a.type) && a.lay && Array.isArray(a.lay.lines) && a.lay.lines.length && a.text
+      && !a.erasedAt && !a.dismissed && !gone(a, live) && !isDot(a));
+    if (!notes.length) return [];
+    const boxes = notes.map((a) => { const b = noteTextBox(a); return [b[0] - NOTE_PAD, b[1] - NOTE_PAD, b[2] + NOTE_PAD, b[3] + NOTE_PAD]; });
+    const ans = answeredIds(page), since = page.lastSent || 0, byNote = new Map();
+    for (const g of computeGroups(inkStrokes(page))) { // 按先后
+      if (g.c !== 'r') continue;
+      let best = null;
+      notes.forEach((a, k) => {
+        const ss = g.strokes.filter((s) => !s.erasedAt && s.t0 > since && s.t0 > (a.t || 0) && !ans.has(s.id));
+        const hit = ss.reduce((n, s) => n + inkInBox(s, boxes[k]), 0);
+        if (hit && (!best || hit > best.hit)) best = { a, ss, hit };
+      });
+      if (best) byNote.set(best.a, (byNote.get(best.a) || []).concat([best.ss]));
+    }
+    const out = [];
+    for (const [note, list] of byNote) {
+      const tb = noteTextBox(note);
+      let E = tb, keep = [];
+      for (const ss of list) {
+        const E2 = ss.reduce((b, s) => unionBox(b, strokeBox(s)), E);
+        if (noteFits(tb, E2)) { E = E2; keep = keep.concat(ss); }
+      }
+      if (keep.length) out.push({ note, strokes: keep });
+    }
+    return out;
+  }
+
+  // 批注的字（tb）连同红字一共占 E 这一块时，收成的卡片还看得清吗：缩放 u（和 noteToCard 同一个算法）不小于 NOTE_MIN_U，
+  // 高不比批注自己的字高出 NOTE_GROW 以上
+  function noteFits(tb, E) {
+    const w = E[2] - E[0] + 8, h = E[3] - E[1] + 8;
+    return Math.floor(Math.min(1, CARD_TW / w) * 1000) / 1000 >= NOTE_MIN_U && h <= tb[3] - tb[1] + 8 + NOTE_GROW;
+  }
+
+  // 卡片最上面那块里原来那几行字的排版（相对那一块的顶，卡片的固定宽度下的单位），给服务端画卡片的图用：
+  // 和纸上同一个字体量每行的宽；基线和卡片上画的一样（服务端把基线画在 y + h/2 + 0.35·字号）
+  function noteRows(a) {
+    const L = a.from.lay, m = a.fromMap, fs = L.fs * m.u;
+    measure.font = `${L.fs}px ${FONT}`;
+    return L.lines.map((ln, i) => ({ ln, base: (L.y + L.fs + i * L.lh - m.y0) * m.u })).filter((r) => r.ln.trim())
+      .map((r) => ({ x: r1(CARD_PX + (L.x - m.x0) * m.u), y: r1(r.base - 0.85 * fs), w: r1(measure.measureText(r.ln).width * m.u), h: r1(fs), fs: r1(fs),
+        t: r.ln.trim(), k: '' }));
+  }
+  function noteSheet(a) {
+    const m = a.fromMap, h = r1(m.h * m.u);
+    return { w: CARD_W, h: r1(CARD_PT + h + 14), t: Date.now(), blocks: [{ id: 'a', y: CARD_PT, h, rows: noteRows(a) }] };
+  }
+
+  // 卡片最上面那块：短批注原来那几行，照纸上的样子画（同一个字体、字号、换行、每个字的歪斜），整块按 u 缩放；
+  // 写出框的红字要用的地方（左右上下）在 fromMap 里已经留出来了
+  // L：纸上那几行的排版（lay），m：纸上那一块怎么换算进卡片（fromMap / popMap），seed：每个字歪斜的种子（和纸上一样，用那条批注的 id）
+  function fillNote(box, L, m, seed) {
+    box.textContent = '';
+    const sv = el('svg', { class: 'ac-note', width: f1(m.w * m.u), height: f1(m.h * m.u), viewBox: `${m.x0} ${m.y0} ${m.w} ${m.h}`, preserveAspectRatio: 'xMinYMin meet' }, box);
+    L.lines.forEach((line, i) => {
+      el('text', { x: f1(L.x), y: f1(L.y + L.fs + i * L.lh), 'font-size': L.fs, rotate: jitter(line, seed + i) }, sv).textContent = line;
+    });
+  }
+
+  // 小蓝点浮出来的小卡片：纸上那几行字（noteTextBox）四周留一点，下面再留一行写红字的地方，按卡片的固定宽度换算（和 noteToCard 同一个算法）。
+  // 第一次在上面写红字时记进 popMap（finishCardInk），之后都照它，变成卡片时也照它
+  const POP_PAD = 6, POP_ROOM = 34;
+  function popMap(a) {
+    const p = a.popMap;
+    if (p && p.u > 0 && p.w > 0 && p.h > 0) return p;
+    const tb = noteTextBox(a), E = [tb[0] - POP_PAD, tb[1] - POP_PAD, tb[2] + POP_PAD, tb[3] + POP_PAD + POP_ROOM], w = E[2] - E[0], h = E[3] - E[1];
+    return { x0: n1(E[0]), y0: n1(E[1]), w: n1(w), h: n1(h), u: Math.floor(Math.min(1, CARD_TW / w) * 1000) / 1000 };
+  }
+
+  // 收成的圈号放哪：批注原来所指的笔迹旁（和长回答的圈号一样，那组笔迹最后一行的右边）；指着印刷文字（box）的放在那块的右边；
+  // 没指着什么（指的笔迹没了、指的是整页）放在它原来那几行字的左上角。那里有东西就往右、往下让
+  function noteBadgeAt(page, G, a) {
+    const ids = new Set(Array.isArray(a.on) ? a.on : []), ss = inkStrokes(page).filter((s) => ids.has(s.id) && !s.erasedAt);
+    let row = ss.length ? boxOf(strokeRows(ss).pop()) : null;
+    if (!row && !ids.size && Array.isArray(a.box) && a.box.length === 4 && a.box[2] - a.box[0] < 0.9 * G.W) row = a.box;
+    if (row) return badgeSpot(row[2] + BADGE_GAP + BADGE_R, (row[1] + row[3]) / 2, page, G);
+    return badgeSpot(a.lay.x + BADGE_R, a.lay.y + BADGE_R, page, G);
+  }
+
+  // 一条短批注连同冲着它的红字收成卡片（就地换掉 page.ai 里那一条，红字从 page.strokes 里拿掉）。返回新条目
+  function noteToCard(page, G, a, strokes) {
+    let E = noteTextBox(a);
+    for (const s of strokes) E = unionBox(E, strokeBox(s));
+    E = [E[0] - 4, E[1] - 4, E[2] + 4, E[3] + 4]; // 笔画的粗细、字的歪斜：再留一点
+    const w = E[2] - E[0], h = E[3] - E[1];
+    const map = { x0: n1(E[0]), y0: n1(E[1]), w: n1(w), h: n1(h), u: Math.floor(Math.min(1, CARD_TW / w) * 1000) / 1000 };
+    const cx = (x) => r1(CARD_PX + (x - map.x0) * map.u), cy = (y) => r1((y - map.y0) * map.u);
+    const item = { id: a.id, req: a.req, type: 'write', t: a.t, text: String(a.text || ''), on: Array.isArray(a.on) ? a.on.slice() : [] };
+    if (a.q) item.q = String(a.q);
+    if (a.adopted) item.adopted = true;
+    item.n = nextBadgeNo(page);
+    item.seen = true; // 原来那句用户看过了
+    item.marks = strokes.map((s) => ({ id: s.id, blk: 'a', pts: s.pts.map((p) => [cx(p[0]), cy(p[1])].concat(p.slice(2))), t0: s.t0, w: r1(s.w * map.u) || s.w, c: 'r' }));
+    item.from = JSON.parse(JSON.stringify(a));
+    item.fromMap = map;
+    item.fromAt = Date.now();
+    item.sheet = noteSheet(item);
+    const moved = new Set(strokes.map((s) => s.id));
+    page.strokes = page.strokes.filter((s) => !moved.has(s.id));
+    page.ai[page.ai.indexOf(a)] = item;
+    item.at = noteBadgeAt(page, G, a); // 红字、原来那条批注都拿掉了之后再找地方
+    return item;
+  }
+
+  // 收成小蓝点的短批注，浮出来时上面写了红字（阶段 D1）：点「AI」交稿时同样收成圈号、变成卡片。红字本来就在它那张小卡片上
+  // （坐标是小卡片里的），换算（popMap）照搬成卡片最上面那块的换算（fromMap），卡片最上面那块和小卡片排得一样，红字不错位。
+  // 圈号放在所指的笔迹旁（和 noteToCard 一样）。返回新条目
+  function dotToCard(page, G, a) {
+    const map = popMap(a), from = JSON.parse(JSON.stringify(a));
+    delete from.marks;
+    delete from.popMap;
+    const item = { id: a.id, req: a.req, type: 'write', t: a.t, text: String(a.text || ''), on: Array.isArray(a.on) ? a.on.slice() : [] };
+    if (a.q) item.q = String(a.q);
+    if (a.adopted) item.adopted = true;
+    item.n = nextBadgeNo(page);
+    item.seen = true; // 原来那句用户看过了
+    item.marks = marksOf(a).map((m) => Object.assign({}, m, { blk: 'a' }));
+    item.from = from;
+    item.fromMap = map;
+    item.fromAt = Date.now();
+    item.sheet = noteSheet(item);
+    page.ai[page.ai.indexOf(a)] = item;
+    item.at = noteBadgeAt(page, G, from);
+    return item;
+  }
+
+  // 点「AI」交稿前：把这一页写在短批注上的红字都收成卡片。page、G、undo：哪一页、那一页的纸、那一页的撤销记录（默认当前页）。
+  // 撤销记录里「写了这一笔」改成「卡片上写了这一笔」：撤销照样撤得掉它（从卡片上撤），和别的笔迹在同一个次序里。
+  // 收成小蓝点、浮出来时写了红字的，也在这时变成卡片（dotToCard；红字本来就记作卡片上的，撤销记录不用改）。返回变了几条
+  function followupsToCards(page = S.page, G = S, undo = S.undo) {
+    const list = page ? noteFollowups(page) : [];
+    for (const { note, strokes } of list) {
+      const item = noteToCard(page, G, note, strokes), ids = new Set(strokes.map((s) => s.id));
+      if (undo) for (let k = 0; k < undo.length; k++) if (undo[k].t === 'add' && ids.has(undo[k].id)) undo[k] = { t: 'cmark', a: item.id, id: undo[k].id };
+    }
+    const live = page ? liveIds(page) : new Set();
+    const dots = page ? page.ai.filter((a) => isDot(a) && hasUnsentMarks(a) && !a.erasedAt && !a.dismissed && !gone(a, live)) : [];
+    if (S.card && dots.some((a) => a.id === S.card.id)) closeCard();
+    for (const a of dots) dotToCard(page, G, a);
+    const n = list.length + dots.length;
+    if (n && undo) { redoList(undo).length = 0; updateRedo(); } // 笔迹挪进了卡片：之前撤销的几步对不上了，不再重做
+    if (n && page === S.page) { closeCard(); drawInk(); renderAI(); markDirty(); }
+    return n;
+  }
+
+  // 几页一起交：别的页上写在短批注上的红字也先收成卡片，排进存盘队列。用手上最新的那份：相邻页的缓存、还没存上的那份；
+  // 都没有才从电脑上取（取的时候那一页被翻到了、或又有了没存上的改动，这次就不动它，那一页的红字照旧当普通的红笔交）
+  async function followupsElsewhere(list) {
+    const nb = S.nb;
+    let changed = 0;
+    for (const i of list || []) {
+      if (S.nb !== nb || i === S.idx) continue;
+      const key = nb.id + '#' + i, cached = S.flow ? S.flowCache.get(i) : null, job = pendingSaves.get(key);
+      let page = (cached && cached.page) || (job && job.page) || null;
+      if (!page) {
+        try { page = normalizePage(await (await api(`/api/page?nb=${encodeURIComponent(nb.id)}&i=${i}`)).json()); } catch (e) { continue; }
+        if (S.nb !== nb || i === S.idx || (S.flow && S.flowCache.has(i)) || pendingSaves.has(key)) continue;
+      }
+      if (!followupsToCards(page, geomOf(page, i), S.undos.get(key) || (cached && cached.undo) || null)) continue;
+      pendingSaves.set(key, { nb: nb.id, i, body: JSON.stringify(serializePage(page)), page });
+      changed++;
+    }
+    if (changed && S.flow) redrawAll(); // 画在屏幕上的相邻页：那条批注换成了圈号
+    return changed;
+  }
+
   // -- 卡片上的笔、橡皮、手指：红笔写在卡片上，黑笔收起卡片，橡皮擦卡片上的红字，手指上下滑（笔刚用过一秒内落下的不算）
   function cardDown(e) {
     if (!S.card) return;
+    if (e.target.closest && e.target.closest('#acNav')) return; // 顶上的「上一条」「下一条」：照常是按钮（不写字、不滑卡片，见 bindUI）
     e.preventDefault();
     const card = $('#answerCard');
     if (e.pointerType === 'touch') {
@@ -2596,7 +3649,7 @@
     if (S.cardInk) finishCardInk(); // 上一笔的抬笔没到：先收好
     if (S.cardErase) finishCardErase();
     const tool = isEraserButton(e) ? 'eraser' : S.tool;
-    if (tool === 'pen') { closeCard(); return; } // 黑笔落在卡片里：卡片收起，这一笔不留（用户：蓝字上肯定是红笔而不是黑笔）
+    if (tool === 'pen' || tool === 'lasso') { closeCard(); return; } // 黑笔落在卡片里：卡片收起，这一笔不留（用户：蓝字上肯定是红笔而不是黑笔）。卡片上没有套索，一样收起
     if (!cardItem()) return;
     try { card.setPointerCapture(e.pointerId); } catch (err) { /* 有些浏览器不支持 */ }
     const [x, y] = cardPoint(e);
@@ -2637,13 +3690,14 @@
     const on = refIds(it, 'anchor', T);
     if (on) base.on = on;
     if (it.type === 'note' || it.type === 'question' || it.type === 'suggest') {
+      if (blankNb()) return buildFreeNote(it, T, base, rnd); // 空白本子：不留批注栏，在所指的笔迹旁找空白
       ensureMargin();
       const box = resolveRef(it, 'anchor', T);
       const lines = wrapText(it.text, NOTE_W, NOTE_FS);
       const h = lines.length * NOTE_LH + 8;
       const ay = (box[1] + box[3]) / 2;
-      const y = findFreeY(clamp(ay - NOTE_LH * 0.7, S.Y0 + 6, S.pageH - h - 6), h);
       const nx = noteX();
+      const y = findFreeY(clamp(ay - NOTE_LH * 0.7, S.Y0 + 6, S.pageH - h - 6), h, nx - 6, nx + NOTE_W);
       const lay = { x: nx, y, w: NOTE_W, h, lines, fs: NOTE_FS, lh: NOTE_LH };
       const paths = [];
       if (box[0] < S.W - 4) {
@@ -2703,17 +3757,20 @@
   }
 
   const BLOCK_TYPES = new Set(['sketch', 'formula', 'figure']); // 占一整块的：示意图、公式、图
+  // 页面内容的下沿：书页、推送页只算正文区（页边那一栏是批注）；空白本子没有那一栏，纸上所有的东西都算（批注、小蓝点也算）
   function contentBottom() {
     let b = 0;
+    if (blankNb()) { for (const o of roomObstacles()) b = Math.max(b, o[3]); return b || 20; }
     for (const st of inkStrokes()) if (!st.erasedAt) { const bb = strokeBox(st); if (bb[0] < S.W) b = Math.max(b, bb[3]); }
     for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt) b = Math.max(b, badgeBox(a)[3]);
     for (const a of S.page.ai) if (BLOCK_TYPES.has(a.type) && a.hit && !a.dismissed) b = Math.max(b, a.hit[3]);
     return b || 20;
   }
 
-  // 从 y 往下找一块不压着笔迹、圈号和其他整块的空白
+  // 从 y 往下找一块不压着笔迹、圈号和其他整块的空白（空白本子：Claude 别的东西——批注、小蓝点、批改符号——也让开）
   function freeBlockY(x, w, h, y) {
     const boxes = [];
+    if (blankNb()) boxes.push(...roomObstacles());
     for (const st of inkStrokes()) if (!st.erasedAt) boxes.push(strokeBox(st));
     for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt) boxes.push(badgeBox(a, 4));
     for (const a of S.page.ai) if (BLOCK_TYPES.has(a.type) && a.hit && !a.dismissed) boxes.push(a.hit);
@@ -2725,14 +3782,271 @@
     return y;
   }
 
-  function findFreeY(y, h) {
-    const occ = S.page.ai.filter((a) => a.lay && a.type !== 'arrow' && a.type !== 'write').map((a) => [a.lay.y, a.lay.y + a.lay.h]);
+  // 书页、推送页的页边批注排在哪一高度：从 y 起找一段高 h 的空，不压别的批注（擦掉的、以前横划掉的、指着的字擦光了的不算：
+  // 2026-11-15 修的，原来擦掉的蓝字仍占着位置，把新批注挤到栏底），也不压写在这一栏里（x0–x1）的笔迹和圈号（2026-11-14 修的：
+  // 用户的字写进了页边，批注锚在它上面时原来正好压在它上面）
+  function findFreeY(y, h, x0 = -Infinity, x1 = Infinity) {
+    const live = liveIds();
+    const occ = S.page.ai.filter((a) => a.lay && a.type !== 'arrow' && a.type !== 'write' && !a.erasedAt && !a.dismissed && !gone(a, live))
+      .map((a) => [a.lay.y, a.lay.y + a.lay.h]);
+    for (const st of inkStrokes()) {
+      if (st.erasedAt || !st.pts.length) continue;
+      const b = strokeBox(st);
+      if (b[2] > x0 && b[0] < x1) occ.push([b[1], b[3]]);
+    }
+    for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt && a.at[0] + BADGE_R > x0 && a.at[0] - BADGE_R < x1) occ.push([a.at[1] - BADGE_R, a.at[1] + BADGE_R]);
     const free = (yy) => yy >= S.Y0 + 4 && yy + h <= S.pageH - 4 && occ.every((o) => yy + h + 6 <= o[0] || yy >= o[1] + 6);
     if (free(y)) return y;
     const cands = [];
     for (const o of occ) cands.push(o[1] + 6, o[0] - h - 6);
     const ok = cands.filter(free).sort((p, q) => Math.abs(p - y) - Math.abs(q - y));
     return ok.length ? ok[0] : y;
+  }
+
+  // ------------------------------------------------------------ 空白本子：Claude 的东西自己找空白，挡路时收成小蓝点（阶段 D1）
+  // 《产品定义》第 3 节「短的回在原处」「能画」：空白本子里不预留批注栏，短批注在所指的笔迹旁找一块空白放下、用细线连过去；
+  // 找不到空白，或之后用户的黑笔压到了它，就收成所指笔迹旁的一个小蓝点（没有数字；有数字的圈号是长回答），点一下在旁边浮出来，
+  // 点别处、落笔收回（和长回答的卡片同一套：浮出来时红笔写在上面不收，点「AI」时连红字一起变成卡片）。不做手动收起（手环会误触）。
+  // 收起的状态记在那条批注的 dot 里：{ at: 小蓝点的圆心, t: 收起的时刻, why: 'ink'（被黑笔压到）| 'room'（到的时候旁边放不下）,
+  // by?: 压到它的那一笔 }；没有 dot 的就是展开着。lay 的意思不变（那几行字在纸上排在哪；收起了纸上就不画）。
+  // 图和公式也先看所指内容的右边、再看下面；它们不收起，在上面写画不碍事。书页、推送页照旧（页边一栏）
+
+  function isDot(a) {
+    return Boolean(a) && FOLLOW_TYPES.has(a.type) && Boolean(a.dot) && Array.isArray(a.dot.at) && a.dot.at.length === 2 && a.dot.at.every((v) => typeof v === 'number');
+  }
+  function dotBox(a, pad = 0) {
+    const r = DOT_R + pad;
+    return [a.dot.at[0] - r, a.dot.at[1] - r, a.dot.at[0] + r, a.dot.at[1] + r];
+  }
+
+  // 页面坐标 (x, y) 处的小蓝点。手指点：范围比点大（屏幕上至少 22 像素，和圈号一样）；笔点（reach 给了）：只认点上和紧挨着的，
+  // 免得在它旁边写一个句号、i 上的一点被当成点开它
+  function dotAtWorld(x, y, page = S.page, reach) {
+    if (!page || !S.aiVisible) return null;
+    const r = reach === undefined ? Math.max(DOT_R + 8, 22 / S.view.s) : reach, live = liveIds(page);
+    let best = null, bestD = Infinity;
+    for (const a of page.ai) {
+      if (!isDot(a) || a.erasedAt || a.dismissed || gone(a, live)) continue;
+      const d = Math.hypot(x - a.dot.at[0], y - a.dot.at[1]);
+      if (d <= r && d < bestD) { best = a; bestD = d; }
+    }
+    return best;
+  }
+
+  // 画一个小蓝点：实心的蓝点，外面一圈淡的光晕（好认、好点）；浮出来的时候光晕加深；上面写了还没交的红字时右上角一个红点；采纳的深蓝带 ★
+  function drawDot(a, parent) {
+    const [x, y] = a.dot.at, open = Boolean(S.card && S.card.id === a.id);
+    const g = el('g', { class: 'ai-item ai-dot' + (a.adopted ? ' adopted' : '') + (open ? ' open' : ''), 'data-id': a.id }, parent);
+    const hop = el('g', { class: 'bdg' }, g);
+    el('circle', { class: 'halo', cx: f1(x), cy: f1(y), r: DOT_R + DOT_HALO }, hop);
+    el('circle', { class: 'pt', cx: f1(x), cy: f1(y), r: DOT_R }, hop);
+    if (hasUnsentMarks(a)) el('ellipse', { class: 'bdot', cx: f1(x + DOT_R * 0.85), cy: f1(y - DOT_R * 0.85), rx: 3.4, ry: 3.4 }, hop);
+    if (a.adopted) el('text', { x: f1(x + DOT_R + DOT_HALO + 1), y: f1(y - DOT_R + 4), 'font-size': 14, class: 'adopt-star' }, g).textContent = '★';
+    const t0 = S.fresh.get(a.id); // 到的时候旁边放不下、直接收成小蓝点的：和圈号一样跳两下
+    if (t0 !== undefined) {
+      const age = performance.now() - t0;
+      if (age < HOP_MS) { g.classList.add('fresh'); hop.style.animationDelay = `-${Math.round(age)}ms`; } else S.fresh.delete(a.id);
+    }
+    return g;
+  }
+
+  // 小蓝点放哪：紧挨所指的笔迹（那组最后一行的右端外侧、那一行竖直的中间），那里有东西就往右、往下让（和圈号同一个找法，只是小）；
+  // 没指着笔迹的放在那几行字原来的左上角
+  function dotSpot(page, G, a) {
+    const ids = new Set(Array.isArray(a.on) ? a.on : []), ss = inkStrokes(page).filter((s) => ids.has(s.id) && !s.erasedAt), R = DOT_R + DOT_HALO;
+    let row = ss.length ? boxOf(strokeRows(ss).pop()) : null;
+    if (!row && Array.isArray(a.box) && a.box.length === 4 && a.box[2] - a.box[0] < 0.9 * G.W) row = a.box;
+    if (row) return badgeSpot(row[2] + DOT_GAP + R, (row[1] + row[3]) / 2, page, G, R, a);
+    return badgeSpot(a.lay.x + R, a.lay.y + R, page, G, R, a);
+  }
+
+  // 收起一条短批注：成为小蓝点（why、by 见上）
+  function foldNote(a, why, by) {
+    a.dot = { at: dotSpot(S.page, S, a), t: Date.now(), why };
+    if (by) a.dot.by = by;
+  }
+
+  // 这一笔黑笔压到了哪些展开着的短批注（压到它的字：每行按实际字宽量的那一块，见 noteTextBox）：收成小蓝点。返回收起的那几条的 id。
+  // 擦掉的、以前横划掉的、指着的字擦光了的（纸上不画）不管；Claude 的批注藏起来时照样收（看不见也是压着了，打开时不叠在字上）
+  function foldUnder(st) {
+    const live = liveIds(), out = [];
+    for (const a of S.page.ai) {
+      if (!FOLLOW_TYPES.has(a.type) || isDot(a) || !a.lay || !Array.isArray(a.lay.lines) || !a.lay.lines.length) continue;
+      if (a.erasedAt || a.dismissed || gone(a, live) || !inkInBox(st, noteTextBox(a))) continue;
+      foldNote(a, 'ink', st.id);
+      out.push(a.id);
+    }
+    if (out.length) {
+      renderAI();
+      markDirty();
+      toast(out.length > 1 ? `被字压到的 ${out.length} 条批注收成了小蓝点，点一下能看` : '被字压到的批注收成了小蓝点，点一下能看', 2200);
+    }
+    return out;
+  }
+
+  // 一条线（M x y Q cx cy x y，或 M x y L x y）沿线的几小块：箭头、连线占的地方按这几块算，不按整个外框（斜着的箭头外框里大多是空的）
+  function pathBoxes(d) {
+    const n = (String(d).match(/-?\d+(?:\.\d+)?/g) || []).map(Number), out = [];
+    if (n.length < 4) return out;
+    const p0 = [n[0], n[1]], p2 = [n[n.length - 2], n[n.length - 1]], c = n.length >= 6 ? [n[2], n[3]] : [(p0[0] + p2[0]) / 2, (p0[1] + p2[1]) / 2];
+    const k = Math.max(2, Math.ceil(Math.hypot(p2[0] - p0[0], p2[1] - p0[1]) / 24));
+    for (let i = 0; i <= k; i++) {
+      const t = i / k, u = 1 - t, x = u * u * p0[0] + 2 * u * t * c[0] + t * t * p2[0], y = u * u * p0[1] + 2 * u * t * c[1] + t * t * p2[1];
+      out.push([x - 6, y - 6, x + 6, y + 6]);
+    }
+    return out;
+  }
+
+  // 空白本子上已经占着的地方（找空白时要让开）：没擦掉的笔迹，Claude 画在纸上的东西——短批注的字（按实际字宽）、圈号、小蓝点、
+  // 图、公式、示意图、批改符号和它旁边那句话、概念图上的建议和它们的 ✓ × 钮；箭头、连线按线上的几小块算。
+  // 擦掉的、以前横划掉的、指着的字擦光了的（纸上不画）不算（2026-11-15 用户的页面上擦掉的蓝字仍占着位置，把新批注挤走了）
+  function roomObstacles(page = S.page) {
+    const out = [], live = liveIds(page);
+    for (const st of inkStrokes(page)) if (!st.erasedAt && st.pts.length) out.push(strokeBox(st));
+    for (const a of page.ai) {
+      if (a.erasedAt || a.dismissed || gone(a, live)) continue;
+      if (a.type === 'write') { if (isBadge(a)) out.push(badgeBox(a, 2)); continue; }
+      if (isDot(a)) { out.push(dotBox(a, DOT_HALO)); continue; }
+      if (FOLLOW_TYPES.has(a.type) && a.lay && Array.isArray(a.lay.lines)) { out.push(noteTextBox(a)); continue; }
+      if (MARK_TYPES.has(a.type) && (a.sym || a.lay)) { // 批改符号：占的是画出来的符号和那句话，不是它批的那一块（大括号括住的几行之间是空白）
+        if (a.sym) out.push(a.sym);
+        if (a.lay) out.push([a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h]);
+        continue;
+      }
+      if ((a.type === 'arrow' || a.type === 'link') && a.paths && a.paths[0]) {
+        out.push(...pathBoxes(a.paths[0].d));
+        if (a.lay) out.push([a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h]);
+        if (a.type === 'link' && a.vbox) out.push(a.vbox);
+        continue;
+      }
+      if (a.hit) out.push(a.hit);
+    }
+    if (page === S.page) for (const pair of voteLayout().values()) for (const c of pair) out.push([c.x - c.r, c.y - c.r, c.x + c.r, c.y + c.r]);
+    return out;
+  }
+
+  // 用户接着往下写的地方（软的，尽量不占）：最后写的那一组的最后一行、整页最底下那一行，各自下面的一行。
+  // 横向是这一段的宽：那一行连同它上面 300 以内、左右 600 以内写过的字，最靠左到最靠右（下一行多半也写这么宽）；
+  // 竖直方向从那一行的中线往下约一行字（行高按那一行的字高估，44–100）：和那一行齐平、放在它右边的东西碰不到它，紧贴在它下面的才碰到
+  function writeOnZones(page = S.page) {
+    const live = inkStrokes(page).filter((s) => !s.erasedAt && s.pts.length);
+    if (!live.length) return [];
+    const zone = (row) => {
+      let left = row[0], right = row[2];
+      for (const s of live) {
+        const b = strokeBox(s);
+        if (b[3] > row[1] - 300 && b[1] < row[3] + 2 && b[0] < row[2] + 600 && b[2] > row[0] - 600) { left = Math.min(left, b[0]); right = Math.max(right, b[2]); }
+      }
+      const lh = clamp(1.6 * (row[3] - row[1]), 44, 100), top = Math.max(row[3] + 4, (row[1] + row[3]) / 2 + 22);
+      return [left - 30, top, right + 20, top + lh];
+    };
+    const out = [], gs = computeGroups(inkStrokes(page)).filter((g) => g.n > g.erased);
+    if (gs.length) {
+      const last = gs.reduce((p, q) => (q.t1 > p.t1 ? q : p));
+      out.push(zone(boxOf(strokeRows(last.strokes.filter((s) => !s.erasedAt)).pop())));
+    }
+    const low = Math.max(...live.map((s) => strokeBox(s)[3]));
+    out.push(zone(live.map(strokeBox).filter((b) => (b[1] + b[3]) / 2 > low - 50).reduce(unionBox)));
+    return out;
+  }
+
+  // 在所指的那块 A 旁边找一块 w × h 的空白（页面坐标）。o：sides 按先后试的方向（right、below、left、above），gap 离 A 多远，
+  // reach 每个方向最多再找出去多远，clear 和别的东西至少隔多远，obs 要让开的（roomObstacles），zones 尽量不占的（writeOnZones），
+  // yPref 放在左右两边时首选的上沿、xPref 放在上下两边时首选的左沿。
+  // 每个落点的代价 = 离 A 的距离 + 那个方向的加价（SIDE_COST）+ 压到 zones 的加价（ZONE_COST）+ 离首选位置的一点点，
+  // 取代价最小、不压任何东西、在纸上的那个（纸往下长不算出纸）；都不行返回 null
+  function findRoom(A, w, h, o) {
+    const gap = o.gap, reach = o.reach, clear = o.clear === undefined ? NOTE_CLEAR : o.clear, step = 8, zones = o.zones || [];
+    const minX = S.X0 + 6, maxX = S.TW - 6 - w, minY = S.Y0 + 6;
+    if (maxX < minX) return null;
+    const R = [A[0] - gap - reach - w - clear, A[1] - gap - reach - h - clear, A[2] + gap + reach + w + clear, A[3] + gap + reach + h + clear];
+    const obs = o.obs.filter((b) => b[0] < R[2] && b[2] > R[0] && b[1] < R[3] && b[3] > R[1]);
+    const free = (x, y) => obs.every((b) => x + w + clear <= b[0] || x - clear >= b[2] || y + h + clear <= b[1] || y - clear >= b[3]);
+    const inZone = (x, y) => zones.some((z) => x < z[2] && x + w > z[0] && y < z[3] && y + h > z[1]);
+    let best = null;
+    const tryAt = (x, y, side, extra) => {
+      if (x < minX || x > maxX || y < minY) return;
+      const score = boxDist([x, y, x + w, y + h], A) + SIDE_COST[side] + extra + (inZone(x, y) ? ZONE_COST : 0);
+      if (best && score >= best.score) return;
+      if (free(x, y)) best = { x: n1(x), y: n1(y), side, score };
+    };
+    const yPref = o.yPref === undefined ? A[1] : o.yPref, xPref = o.xPref === undefined ? A[0] : o.xPref;
+    for (const side of o.sides) {
+      if (side === 'right' || side === 'left') { // 竖直方向和 A 至少叠 12：是「旁边」
+        const lo = Math.min(A[1] - h + 12, yPref), hi = Math.max(A[3] - 12, yPref);
+        for (let dx = 0; dx <= reach; dx += step) {
+          const x = side === 'right' ? A[2] + gap + dx : A[0] - gap - w - dx;
+          tryAt(x, yPref, side, 0);
+          for (let y = lo; y <= hi; y += step) tryAt(x, y, side, Math.abs(y - yPref) * 0.15);
+        }
+      } else { // 横向和 A 至少叠 30：是「下面」「上面」
+        let lo = A[0] - w + 30, hi = A[2] - 30;
+        if (lo > hi) [lo, hi] = [hi, lo];
+        lo = Math.min(lo, xPref);
+        hi = Math.max(hi, xPref);
+        for (let dy = 0; dy <= reach; dy += step) {
+          const y = side === 'below' ? A[3] + gap + dy : A[1] - gap - h - dy;
+          tryAt(xPref, y, side, 0);
+          for (let x = lo; x <= hi; x += step) tryAt(x, y, side, Math.abs(x - xPref) * 0.08);
+        }
+      }
+    }
+    return best;
+  }
+
+  // 这一页最后写的那一组笔迹的最后一行（按第一笔排在最后的那组；没有笔迹时 null）
+  function lastRowBox(page = S.page) {
+    const live = computeGroups(inkStrokes(page)).filter((g) => g.n > g.erased);
+    return live.length ? boxOf(strokeRows(live[live.length - 1].strokes.filter((s) => !s.erasedAt)).pop()) : null;
+  }
+
+  // 短批注连到所指笔迹的细线：两块之间最近的两点（批注在左右两边时从第一行字的中间连出去，在上下两边时从左边一点连出去）
+  function leaderTo(lay, A, rnd) {
+    const N = [lay.x - 4, lay.y, lay.x + lay.w, lay.y + lay.h];
+    const pick = (a0, a1, b0, b1, want) => {
+      if (a0 > b1) return [a0, b1];
+      if (a1 < b0) return [a1, b0];
+      const v = clamp(want, Math.max(a0, b0), Math.min(a1, b1));
+      return [v, v];
+    };
+    const [nx, ax] = pick(N[0], N[2], A[0], A[2], N[0] + 24), [ny, ay] = pick(N[1], N[3], A[1], A[3], lay.y + NOTE_LH * 0.55);
+    if (Math.hypot(nx - ax, ny - ay) < 6) return [];
+    return [{ d: sketchLine(ax, ay, nx, ny, rnd, 6), cls: 'leader', w: 1.3 }];
+  }
+
+  // 空白本子的短批注（note、question；修改建议写在我自己的字上，和原来一样画成批注）：不留批注栏，在所指的笔迹旁找空白放下，
+  // 用细线连过去。宽最多 NOTE_MAXW，按字折行后收窄到最宽那一行。没指着哪组笔迹的（没给 anchor、给了 end）放在最后写的那一行旁边、不连线。
+  // 周围都满了：直接以小蓝点落下；那几行字的排版照样记下（浮出来的小卡片、往来稿照它排），放在小蓝点的右下方
+  function buildFreeNote(it, T, base, rnd) {
+    if (base.type === 'suggest') base.type = 'note';
+    let ref = String(it.anchor || '').trim().toLowerCase();
+    if (/^\d+$/.test(ref)) ref = 'g' + ref;
+    const known = Array.isArray(it.box) || T.groups.has(ref);
+    let A = known ? resolveRef(it, 'anchor', T) : null, rowMid = null;
+    if (base.on) { // 指着的笔迹还在：按它现在的样子（交上去之后可能又擦改过）
+      const ids = new Set(base.on), ss = inkStrokes().filter((s) => ids.has(s.id) && !s.erasedAt);
+      if (ss.length) { A = boxOf(ss); const r0 = boxOf(strokeRows(ss)[0]); rowMid = (r0[1] + r0[3]) / 2; }
+    }
+    if (!A) A = lastRowBox() || [48, 48, 48, 48 + NOTE_LH];
+    if (rowMid === null) rowMid = A[3] - A[1] < 70 ? (A[1] + A[3]) / 2 : A[1] + 20;
+    const lines = wrapText(it.text, NOTE_MAXW, NOTE_FS);
+    measure.font = `${NOTE_FS}px ${FONT}`;
+    const w = Math.ceil(Math.max(NOTE_FS, ...lines.map((l) => measure.measureText(l).width))) + 4, h = lines.length * NOTE_LH + 8;
+    const spot = findRoom(A, w, h, { sides: ['right', 'below', 'left', 'above'], gap: NOTE_GAP, reach: NOTE_REACH, obs: roomObstacles(), zones: writeOnZones(),
+      yPref: rowMid - NOTE_LH * 0.7, xPref: A[0] + 12 });
+    const box = A.map(n1);
+    if (spot) {
+      const lay = { x: spot.x, y: spot.y, w, h, lines, fs: NOTE_FS, lh: NOTE_LH };
+      maybeExtend(lay.y + h);
+      keepHeight(lay.y + h + 20);
+      return Object.assign(base, { text: it.text, box, lay, paths: known ? leaderTo(lay, A, rnd) : [], hit: [lay.x - 6, lay.y - 4, lay.x + w + 6, lay.y + h + 4].map(n1) });
+    }
+    const item = Object.assign(base, { text: it.text, box, paths: [], lay: { x: n1(A[2] + NOTE_GAP), y: n1(A[1]), w, h, lines, fs: NOTE_FS, lh: NOTE_LH } });
+    foldNote(item, 'room');
+    item.lay.x = n1(clamp(item.dot.at[0] + DOT_R + 10, S.X0 + 6, Math.max(S.X0 + 6, S.TW - 6 - w)));
+    item.lay.y = n1(Math.max(S.Y0 + 6, item.dot.at[1] + DOT_R + 4));
+    item.hit = [item.lay.x - 6, item.lay.y - 4, item.lay.x + w + 6, item.lay.y + h + 4].map(n1);
+    return item;
   }
 
   // ------------------------------------------------------------ AI 层（SVG）
@@ -2760,6 +4074,8 @@
     markConfirmOnPage();
     markChanges();
     drawNeighborBadges();
+    drawReads();
+    syncCardNav(); // 卡片顶上的「上一条」「下一条」跟着这一页的回答变
   }
 
   function drawItem(it, animate) {
@@ -2767,6 +4083,7 @@
       if (isBadge(it)) drawBadge(it, aiRoot, 'ai-item ai-write');
       return Promise.resolve();
     }
+    if (isDot(it)) { drawDot(it, aiRoot); return Promise.resolve(); } // 收成小蓝点的短批注：纸上只有那个点（没有字、没有连线）
     const vcls = VOTE_TYPES.has(it.type) ? ' v-' + (it.verdict || 'none') + (it.sent ? ' sent' : '') : '';
     const g = el('g', { class: 'ai-item ai-' + it.type + (it.dismissed ? ' dismissed' : '') + vcls + (it.adopted ? ' adopted' : ''),
       'data-id': it.id }, aiRoot);
@@ -2798,7 +4115,13 @@
       const b = it.vbox || it.box;
       let x0 = b[2] + 10; // 状态那行字从哪儿写起
       if (!it.sent) { // ✓ × 两个钮：手指、笔点一下就定，再点一次取消
-        for (const vb of verdictButtons(it)) {
+        const pair = verdictButtons(it);
+        if (pair.moved) { // 让开了的那组：一条细虚线连到自己的框，线头一个小点落在框边上（看得出是哪条建议的）
+          const ln = vbLink(pair, b), lg = el('g', { class: 'vlink' }, g);
+          el('path', { d: `M${f1(ln.from[0])} ${f1(ln.from[1])} L${f1(ln.to[0])} ${f1(ln.to[1])}`, 'stroke-width': 1.3 }, lg);
+          el('circle', { cx: f1(ln.to[0]), cy: f1(ln.to[1]), r: 2.6 }, lg);
+        }
+        for (const vb of pair) {
           const bg = el('g', { class: 'vbtn ' + vb.v + (it.verdict === vb.v ? ' on' : '') }, g);
           el('circle', { cx: f1(vb.x), cy: f1(vb.y), r: vb.r }, bg);
           el('text', { x: f1(vb.x), y: f1(vb.y + vb.r * 0.45), 'font-size': f1(vb.r * 1.3), 'text-anchor': 'middle' }, bg).textContent = vb.v === 'yes' ? '✓' : '×';
@@ -2867,9 +4190,11 @@
     const [x, y] = toWorld(cx, cy), live = liveIds();
     if (tapVote(x, y)) return true; // 建议旁的 ✓ × 钮
     if (tapBadgeAt(cx, cy)) return true; // 圈号（连续阅读时相邻页上的也算）
+    const d = dotAtWorld(x, y); // 小蓝点：那条短批注在旁边浮出来（再点一下收回）
+    if (d) { tapBadge(d); return true; }
     for (let i = S.page.ai.length - 1; i >= 0; i--) {
       const it = S.page.ai[i];
-      if (it.erasedAt || VOTE_TYPES.has(it.type) || it.type === 'write') continue; // 擦掉的点不着；建议用 ✓ × 钮（或笔打勾、横划）回应，点框本身不动它
+      if (it.erasedAt || VOTE_TYPES.has(it.type) || it.type === 'write' || isDot(it)) continue; // 擦掉的点不着；建议用 ✓ × 钮（或笔打勾、横划）回应，点框本身不动它
       const h = it.hit;
       if (!h || gone(it, live) || x < h[0] || x > h[2] || y < h[1] || y > h[3]) continue;
       toast('蓝字用笔回应：旁边画个星号采纳；不要的用橡皮擦', 2200);
@@ -3087,11 +4412,22 @@
     return null;
   }
 
-  // 示意图、公式放哪：居中；anchor/box 那块下面，否则接在页面内容后面；找不压着笔迹、圈号的空处
+  // 示意图、公式、图放哪：书页、推送页照旧——居中，anchor/box 那块下面，否则接在页面内容后面，往下找不压着笔迹、圈号的空处。
+  // 空白本子（阶段 D1）：指着内容的，先看那块的右边、再看下面（findRoom：不压字和别的批注，尽量不占接着往下写的地方）；
+  // 都放不下、或没指着（end、没给）的，照旧接在内容后面往下找
   function blockSpot(it, T, w, h) {
-    const x = 48 + Math.max(0, (S.W - 96 - w) / 2);
+    const x = 48 + Math.max(0, (S.W - 96 - w) / 2), anchored = Boolean(it.box || (it.anchor && it.anchor !== 'end'));
+    if (anchored && blankNb()) {
+      const A = resolveRef(it, 'anchor', T);
+      const spot = findRoom(A, w, h, { sides: ['right', 'below'], gap: BLOCK_GAP, reach: BLOCK_REACH, clear: 12, obs: roomObstacles(), zones: writeOnZones(), yPref: A[1], xPref: A[0] });
+      if (spot) {
+        maybeExtend(spot.y + h + 60);
+        keepHeight(spot.y + h + 60);
+        return [spot.x, spot.y];
+      }
+    }
     let y;
-    if (it.box || (it.anchor && it.anchor !== 'end')) y = resolveRef(it, 'anchor', T)[3] + 30;
+    if (anchored) y = resolveRef(it, 'anchor', T)[3] + 30;
     else if (S.bgImg) y = Math.max(contentBottom(), S.baseH) + 40;
     else y = contentBottom() + 44;
     y = freeBlockY(x, w, h, y);
@@ -3111,18 +4447,41 @@
     return d.innerHTML;
   }
   const texSizes = new Map();
-  function measureTex(tex, fs) { // 公式排出来多大（页面坐标）
-    const key = fs + '|' + tex;
-    if (texSizes.has(key)) return texSizes.get(key);
+  // 量的时候 KaTeX 的字体还没载入，量出来偏窄（2026-11-12 查的：打开页面后的第一个公式窄 5–6%）：字体载入了一批就把量过的作废
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', () => texSizes.clear());
+  function texProbe(html, fs) { // 藏在屏幕外的一块，排着这些公式
     const d = document.createElement('div');
     d.className = 'tx';
     d.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;font-size:${fs}px;white-space:nowrap`;
-    d.innerHTML = texHTML(tex);
+    d.innerHTML = html;
     document.body.appendChild(d);
+    return d;
+  }
+  function measureTex(tex, fs) { // 公式排出来多大（页面坐标）
+    const key = fs + '|' + tex;
+    if (texSizes.has(key)) return texSizes.get(key);
+    const d = texProbe(texHTML(tex), fs);
     const r = { w: Math.ceil(d.offsetWidth) + 4, h: Math.ceil(d.offsetHeight) + 4 };
     d.remove();
-    if (window.katex) texSizes.set(key, r);
+    if (window.katex && (!document.fonts || document.fonts.status === 'loaded')) texSizes.set(key, r); // 字体还在载入：这次的不记
     return r;
+  }
+  // 等这些公式用到的 KaTeX 字体载入（Claude 回的公式落下之前，fetchPending 里等）。哪几种字体看排出来的每个元素用的是什么；
+  // 字体载不进来（断网、文件坏了）最多等 ms 毫秒，照旧往下走，退回系统字体量
+  async function texFontsReady(texes, ms = 3000) {
+    if (!window.katex || !document.fonts || !document.fonts.load) return;
+    const d = texProbe(texes.map(texHTML).join(' '), FORMULA_FS), want = new Set();
+    for (const e of d.querySelectorAll('*')) {
+      const cs = getComputedStyle(e), fam = cs.fontFamily.split(',')[0].trim().replace(/^["']|["']$/g, '');
+      if (/^KaTeX_/.test(fam)) want.add(`${cs.fontStyle} ${cs.fontWeight} ${FORMULA_FS}px "${fam}"`);
+    }
+    d.remove();
+    let timer;
+    await Promise.race([
+      Promise.all([...want].map((f) => document.fonts.load(f).catch(() => null))),
+      new Promise((res) => { timer = setTimeout(res, ms); }),
+    ]);
+    clearTimeout(timer);
   }
   function texAt(x, y, h, tex, fs, faded) { // 从 (x, y) 起、高 h 的一块里排一个公式，竖直居中
     const d = document.createElement('div');
@@ -3261,6 +4620,7 @@
     for (const a of S.page.ai) {
       if (a.dismissed) continue;
       if (isBadge(a)) obs.push(badgeBox(a, 2)); // 长回答的圈号
+      if (isDot(a)) { obs.push(dotBox(a, DOT_HALO)); continue; } // 收成小蓝点的短批注：只占那个点
       if (a.lay) obs.push([a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h]);
       if (a.sym) obs.push(a.sym);
     }
@@ -3294,18 +4654,19 @@
     return Array.from(line).map(() => ((r() - 0.5) * 5).toFixed(1)).join(' ');
   }
 
-  function wrapText(text, maxW, fs) {
+  // family：按哪种字体量宽（默认手写体；「Claude 读到了什么」的小灰字是印刷体）
+  function wrapText(text, maxW, fs, family = FONT) {
     const out = [];
     for (const para of String(text).split(/\r?\n/)) {
       if (!para.trim()) { if (out.length && out[out.length - 1] !== '') out.push(''); continue; }
-      out.push.apply(out, wrapLine(para, maxW, fs));
+      out.push.apply(out, wrapLine(para, maxW, fs, family));
     }
     while (out.length && out[out.length - 1] === '') out.pop();
     return out.length ? out : [''];
   }
 
-  function wrapLine(text, maxW, fs) {
-    measure.font = `${fs}px ${FONT}`;
+  function wrapLine(text, maxW, fs, family = FONT) {
+    measure.font = `${fs}px ${family}`;
     const tokens = String(text).replace(/\s+/g, ' ').match(/[A-Za-z0-9.,'+\-*/^=_()[\]]+|\s|./gu) || [];
     const lines = [];
     let cur = '';
@@ -3325,6 +4686,7 @@
 
   function replay() {
     if (!S.page) return;
+    lassoOff(); // 回放时不留着套索的虚线框
     const strokes = S.page.strokes.filter((s) => s.pts.length).slice().sort((a, b) => a.t0 - b.t0);
     if (!strokes.length) { toast('本页还没有笔迹'); return; }
     const SPEED = 2, CAP = 450, ev = [];
@@ -3348,6 +4710,7 @@
     requestAnimationFrame(replayFrame);
   }
 
+  // 一帧：写到一半的几笔每帧整笔重画在上面那层（drawLive，笔尖处不收尖）；写完的那一刻画到墨迹层上，收笔这时才尖，和平时抬笔一样
   function replayFrame(now) {
     const R = S.replay;
     if (!R) return;
@@ -3362,21 +4725,18 @@
         redraw = true;
       }
     }
-    if (redraw) {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, cvInk.width, cvInk.height);
-      setT(ctx);
-      for (const a of R.shown) drawStroke(ctx, a.s, inkOf(a.s), 1, a.done);
-    }
+    const finished = [];
     for (const a of R.active) {
       const target = (t - a.v) * R.SPEED, p = a.s.pts;
       let n = a.done;
       while (n < p.length && p[n][3] <= target) n++;
-      if (a.done === 1 && p.length === 1) drawStroke(ctx, a.s, inkOf(a.s));
-      else if (n > a.done) drawStroke(ctx, a.s, inkOf(a.s), a.done, n);
       a.done = Math.max(a.done, n);
+      if (a.done >= p.length) finished.push(a);
     }
     R.active = R.active.filter((a) => a.done < a.s.pts.length);
+    if (redraw) drawInk(); // 擦掉了一笔：写完的那些重画（drawInk 回放时只画写完的）
+    else for (const a of finished) drawStroke(ctx, a.s, inkOf(a.s));
+    drawLive();
     if (R.next >= R.ev.length && !R.active.length) { setTimeout(stopReplay, 700); return; }
     requestAnimationFrame(replayFrame);
   }
@@ -3387,6 +4747,7 @@
     aiRoot.style.display = '';
     texLayer.style.display = '';
     drawInk();
+    drawLive();
   }
 
   // ------------------------------------------------------------ 本子、页面、保存
@@ -3412,27 +4773,27 @@
     };
   }
 
-  function serializePage() {
+  function serializePage(page = S.page) {
     return {
       v: 1,
-      strokes: S.page.strokes.map((s) => {
+      strokes: page.strokes.map((s) => {
         const o = { id: s.id, t0: s.t0, w: s.w, pts: s.pts };
         if (s.c) o.c = s.c;
         if (s.erasedAt) o.erasedAt = s.erasedAt;
         if (s.faded) o.faded = true;
         return o;
       }),
-      ai: S.page.ai,
-      reads: S.page.reads,
-      h: S.page.h || undefined,
-      lastSent: S.page.lastSent || undefined,
-      xw: S.page.xw || undefined,
-      ox: S.page.ox || undefined,
-      oy: S.page.oy || undefined,
-      mg: S.page.mg || undefined,
-      rot: S.page.rot || undefined,
-      judged: S.page.judged.length ? S.page.judged : undefined,
-      rev: S.page.rev || 0,
+      ai: page.ai,
+      reads: page.reads,
+      h: page.h || undefined,
+      lastSent: page.lastSent || undefined,
+      xw: page.xw || undefined,
+      ox: page.ox || undefined,
+      oy: page.oy || undefined,
+      mg: page.mg || undefined,
+      rot: page.rot || undefined,
+      judged: page.judged.length ? page.judged : undefined,
+      rev: page.rev || 0,
     };
   }
 
@@ -3622,6 +4983,179 @@
     placeVer(); // 左上角那一排变宽变窄了：右上角的提示条看还挤不挤得下同一行
   }
 
+  // -- 别的页有新回答的记号（2026-11-16 用户定，细节暂定）：Claude 的回答落在不是眼前这一页的页上（几页一起交，或交完翻走了），
+  // 页码旁出一个记号（全屏时在左上角本子名后面，退出全屏后在顶栏的 ‹ 页码 › 后面）；那一页成为当前页，它的记号就消失；
+  // 抽屉里那一页的缩略图上也带一个点。样子（2026-11-16 夜用户试过后改，暂定）：只有一页有——「● 第 3 页」，点了翻过去；
+  // 几页都有——「● 2 页有新回答 ▾」，点了在它下面出一张小单子（newAnsList，屏幕上方），每页一行「第 3 页」，点一行翻过去、收起单子，
+  // 点外面收起；看过的页从单子和数目里去掉。原来写「● 2 +1」（最靠前的那页加「+几」）：数字像是条数、「+1」不说是哪几页。
+  // 翻过去都算从别处跳过来（输入页码的小框里能「回到第 N 页」）。「眼前这一页」就是当前页 S.idx
+  // （单页时翻到的那页，连续阅读时屏幕中线落在的那页；连续阅读时落在屏幕上相邻页上的回答也出记号）。只管当前打开的这一本。
+  // 按页的键记（插页、删页、换页序后跟着那一页走）。刷新页面后还在：服务在本子信息里标出还有没落到纸上的回答的页（pageInfo 的 newAns，
+  // 从待处理队列只读地算出来）；已经落下、还没翻到过的（连续阅读时落在屏幕上的相邻页上）记在这台设备上（localStorage 的 newAns：本子 → 页的键）
+  const newAns = new Set();
+  const pageKeyAt = (i) => { const p = S.nb && S.nb.pageInfo && S.nb.pageInfo[i]; return p && p.key ? String(p.key) : null; };
+  function saveNewAns() {
+    if (!S.nb) return;
+    const all = store.get('newAns', {});
+    if (newAns.size) all[S.nb.id] = Array.from(newAns); else delete all[S.nb.id];
+    store.set('newAns', all);
+  }
+  // 打开一本时：这台设备上记着的，加上服务说还有没落到纸上的回答的页（都只认这本里现在还有的页）
+  function loadNewAns() {
+    newAns.clear();
+    if (!S.nb) return;
+    const info = S.nb.pageInfo || [], keys = new Set(info.map((p) => p && p.key && String(p.key)).filter(Boolean));
+    for (const k of store.get('newAns', {})[S.nb.id] || []) if (keys.has(k)) newAns.add(k);
+    for (const p of info) if (p && p.key && p.newAns) newAns.add(String(p.key));
+    saveNewAns();
+  }
+  // Claude 回在了这一本的第 i 页（key：服务给的那一页的键；没给按页号查）
+  function noteNewAns(i, key) {
+    const k = key ? String(key) : pageKeyAt(i);
+    if (!k || k === pageKeyAt(S.idx)) return;
+    newAns.add(k);
+    saveNewAns();
+    showNewAns();
+  }
+  // 有记号的页：现在的页号，从小到大；当前页不算
+  function newAnsPages() {
+    const out = [];
+    ((S.nb && S.nb.pageInfo) || []).forEach((p, i) => { if (p && newAns.has(String(p.key)) && i !== S.idx) out.push(i); });
+    return out;
+  }
+  // 当前页看到了：它的记号去掉（把回复落到相邻页时临时换过去的不算）；左上角、顶栏上的记号和缩略图上的点跟着换
+  function showNewAns() {
+    const cur = pageKeyAt(S.idx);
+    if (!S.landing && cur && newAns.delete(cur)) saveNewAns();
+    const list = newAnsPages(), one = list.length === 1;
+    for (const id of ['#chipNew', '#barNew']) {
+      const b = $(id);
+      b.hidden = !list.length;
+      if (!list.length) continue;
+      b.querySelector('.na-no').textContent = one ? `第 ${list[0] + 1} 页` : `${list.length} 页有新回答`;
+      b.querySelector('.na-more').textContent = one ? '' : '▾'; // 几页时点了出单子：像个菜单
+      b.setAttribute('aria-label', one ? `Claude 在第 ${list[0] + 1} 页有新回答，点一下翻过去`
+        : `Claude 在第 ${list.map((i) => i + 1).join('、')} 页有新回答，点一下列出来`);
+    }
+    document.querySelectorAll('#thumbs .th').forEach((d, i) => d.classList.toggle('new-ans', list.includes(i)));
+    // 单子开着：跟着换（看过的那页去掉）；只剩一页、没有了就收起。把回复落到相邻页时临时换过去的那一下不管
+    if (!S.landing && !$('#newAnsList').hidden) { if (list.length > 1) renderNewAnsList(); else closeNewAnsList(); }
+    placeVer(); // 左上角那一排变宽变窄了
+  }
+  // 点记号（左上角、顶栏上的）：只有一页——翻过去；几页——出、收那张小单子
+  function gotoNewAns() {
+    const list = newAnsPages();
+    if (list.length === 1) { closeNewAnsList(); jumpTo(list[0]); } else if (list.length > 1) toggleNewAnsList();
+  }
+  function toggleNewAnsList() {
+    const box = $('#newAnsList');
+    if (!box.hidden) { closeNewAnsList(); return; }
+    closePageJump();
+    renderNewAnsList();
+    box.hidden = false;
+    placeNewAnsList();
+  }
+  function renderNewAnsList() {
+    const box = $('#newAnsList');
+    box.textContent = '';
+    for (const i of newAnsPages()) {
+      const b = document.createElement('button');
+      b.className = 'row';
+      b.dataset.page = String(i);
+      const dot = document.createElement('span');
+      dot.className = 'na-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      b.append(dot, `第 ${i + 1} 页`);
+      b.addEventListener('click', () => { closeNewAnsList(); jumpTo(i); });
+      box.appendChild(b);
+    }
+  }
+  // 摆在记号正下方（全屏时在左上角那一排下面，退出全屏时在顶栏下面），左边和记号对齐，右边放不下就往左挪
+  function placeNewAnsList() {
+    const box = $('#newAnsList'), btn = $(S.collapsed ? '#chipNew' : '#barNew'), row = $(S.collapsed ? '#chipRow' : '#bar');
+    const r = btn.getBoundingClientRect(), vw = document.documentElement.clientWidth, w = box.offsetWidth;
+    Object.assign(box.style, { left: `${Math.round(clamp(r.left, 8, Math.max(8, vw - w - 8)))}px`,
+      top: `${Math.round(Math.max(r.bottom, row.getBoundingClientRect().bottom) + 6)}px` });
+  }
+  function closeNewAnsList() { $('#newAnsList').hidden = true; }
+
+  // -- 输入页码翻页（2026-11-16 夜用户定，暂定）：点页码（顶栏上 ‹ › 中间的「3/12」，全屏时左上角的页码）出一个小框：只输数字的输入框
+  // （平板上出数字键盘）加「去」，输入 1 到总页数之间的数翻到那一页；超出范围时框里说一句、不翻。从别处跳过来的（卡片里跨页、
+  // 在这个框里输入页码跳的、「Claude 在别的页写了批注」的「去看看」……，都经 noteJumpBack 记下），框里多一行「回到第 N 页」：
+  // N 是跳之前的那一页，按页的键记（插页、挪页后还对），点了回去（回去也算一次跳，之后框里是回到刚才那一页）。
+  // 只有一页的本子点页码不出这个框。框放在页码下面、屏幕上方：平板上的数字键盘从下面弹出来，挡不住它
+  function noteJumpBack() {
+    const k = pageKeyAt(S.idx);
+    S.jumpBack = S.nb && k ? { nb: S.nb.id, key: k } : null;
+  }
+  // 「回到第 N 页」回到的那一页现在是第几页（换了本子、那一页删了、就是眼前这一页：-1）
+  function jumpBackIndex() {
+    const b = S.jumpBack;
+    if (!b || !S.nb || b.nb !== S.nb.id) return -1;
+    const i = (S.nb.pageInfo || []).findIndex((p) => p && String(p.key) === b.key);
+    return i === S.idx ? -1 : i;
+  }
+  // 这一下点在左上角的页码上（连同它四周伸出去的那一圈，见 style.css 的 #chipPage::before）：页码在 #nbChip 这个按钮里面，
+  // 有的浏览器把点到按钮里面的字的事件算在按钮身上（e.target 是按钮），所以也按点的位置看
+  function onChipPage(e) {
+    const p = $('#chipPage');
+    if (!p.textContent || !p.getClientRects().length) return false;
+    if (e.target && e.target.closest && e.target.closest('#chipPage')) return true;
+    const r = p.getBoundingClientRect();
+    return e.clientX >= r.left - 6 && e.clientX <= r.right + 4 && e.clientY >= r.top - 6 && e.clientY <= r.bottom + 6;
+  }
+  // 从别处跳到第 i 页：先记下跳之前的那一页
+  function jumpTo(i) {
+    if (!S.nb || i === S.idx || i < 0 || i >= S.nb.pages) return Promise.resolve();
+    noteJumpBack();
+    return openPage(i);
+  }
+  function openPageJump() {
+    const box = $('#pageJump');
+    if (!box.hidden) { closePageJump(); return; } // 再点一下页码：收起
+    if (!S.nb || S.nb.pages < 2) return;
+    toggleDrawer(false);
+    hideMenu();
+    closeNewAnsList();
+    const input = $('#pjInput'), back = $('#pjBack'), bi = jumpBackIndex();
+    $('#pjTotal').textContent = `页（共 ${S.nb.pages} 页）`;
+    input.value = '';
+    input.placeholder = String(S.idx + 1);
+    $('#pjErr').hidden = true;
+    back.hidden = bi < 0;
+    if (bi >= 0) back.textContent = `回到第 ${bi + 1} 页`;
+    box.hidden = false;
+    placePageJump();
+    try { input.focus({ preventScroll: true }); } catch (e) { /* */ }
+  }
+  // 摆在页码正下方（左右放不下就往里挪），全屏时在左上角那一排下面，退出全屏时在顶栏下面
+  function placePageJump() {
+    const box = $('#pageJump'), num = $(S.collapsed ? '#chipPage' : '#pageNo'), row = $(S.collapsed ? '#chipRow' : '#bar');
+    const r = num.getBoundingClientRect(), vw = document.documentElement.clientWidth, w = box.offsetWidth;
+    Object.assign(box.style, { left: `${Math.round(clamp(r.left + r.width / 2 - w / 2, 8, Math.max(8, vw - w - 8)))}px`,
+      top: `${Math.round(Math.max(r.bottom, row.getBoundingClientRect().bottom) + 6)}px` });
+  }
+  function closePageJump() {
+    const box = $('#pageJump');
+    if (box.hidden) return;
+    box.hidden = true;
+    try { $('#pjInput').blur(); } catch (e) { /* */ }
+  }
+  function goPageJump() {
+    if (!S.nb) return;
+    const v = $('#pjInput').value.replace(/[^0-9]/g, ''), n = Number(v);
+    if (!v || n < 1 || n > S.nb.pages) {
+      const err = $('#pjErr');
+      err.textContent = `要输入 1 到 ${S.nb.pages} 之间的页码`;
+      err.hidden = false;
+      placePageJump();
+      try { $('#pjInput').focus({ preventScroll: true }); $('#pjInput').select(); } catch (e) { /* */ }
+      return;
+    }
+    closePageJump();
+    jumpTo(n - 1);
+  }
+
   // 抽屉里的本子列表：最上面是草稿本和「Claude 推送」（不进文件夹）；接着是文件夹（一行，点一下折叠或展开，
   // 写着里面几本；展开时里面的本子缩进列在下面）；最后是不在文件夹里的本子。文件夹只有一层。
   // 已经设了只在本地的本子，名字后面用小字写「只在本地」（2026-11-14：原来那把小锁图标去掉，设置并进「这本发往」）
@@ -3638,9 +5172,19 @@
       if (!isFolded(f)) for (const nb of inside) nbRow(box, nb, true, books);
     }
     for (const nb of list) if (!FIXED_NB.has(nb.id) && !holder.has(nb.id)) nbRow(box, nb, false, books);
+    // 正拖着一本时重画（停在收着的文件夹上展开了、别处改了文件夹）：换回原来那个元素——手指、笔后面的事件还落在它上面，
+    // iPad 上被拿掉的元素收不到后面的触摸
+    const d = dragging('nb');
+    if (d) {
+      const fresh = [...box.children].find((r) => r.dataset.nb === d.o.nb.id);
+      if (fresh) fresh.replaceWith(d.el);
+      else { d.el.hidden = true; box.appendChild(d.el); }
+    }
   }
 
-  // 一本的那一行：名字（放不下左右滑），只在本地的写个小字；右边一排图标：存回 PDF（当前这本有原 PDF 时）、文件夹、改名、删除
+  // 一本的那一行：名字（放不下左右滑），只在本地的写个小字；右边一个「⋯」，点开这本的小菜单（nbMenuItems）。
+  // 原来那里排着存回 PDF、文件夹、改名、删除四个图标，名字常要左右滑才看全（2026-11-16 用户定收成「⋯」）。
+  // 自己的本子和书按住约半秒能拖进文件夹（dragNb）；草稿本、「Claude 推送」不能拖，菜单里也没有东西，不出「⋯」
   function nbRow(box, nb, nested, books) {
     const cur = Boolean(S.nb && nb.id === S.nb.id), own = nb.id.startsWith('book:') || nb.id.startsWith('pad:');
     const row = document.createElement('div'), name = document.createElement('span'), acts = document.createElement('span');
@@ -3658,21 +5202,16 @@
     }
     row.appendChild(acts);
     row.addEventListener('click', () => openNotebook(nb.id, 0));
-    // 右边的图标：当前这本沿用原来的 id（存回 PDF 只有它有）；不能用的隐藏
-    const btn = (icon, label, id, on, fn) => {
-      const b = iconButton(icon, label);
-      if (cur && id) b.id = id;
-      b.hidden = !on;
-      b.addEventListener('click', (e) => { e.stopPropagation(); fn(nb, b); });
-      acts.appendChild(b);
-      return b;
-    };
-    if (cur) btn('save', '存回 PDF：把这本上的手写和 Claude 的批注写进原 PDF 文件（先留底，存完能撤回）', 'actSavePdf', Boolean(S.nb.savePdf), () => savePdf());
-    if (own) btn('folder', '文件夹：放进哪个文件夹、移出文件夹、新建文件夹', 'actFolder', true, openFolderPick); // 草稿本和「Claude 推送」不进文件夹
-    if (cur || own) {
-      btn('edit', '改名', 'actRename', own, renameNotebook);
-      btn('trash', '删除这本（文件还留在电脑上）', 'actDelete', own, deleteNotebook);
+    if (nbMenuItems(nb).length) {
+      const more = document.createElement('button');
+      more.className = 'nb-more';
+      more.textContent = '⋯';
+      more.setAttribute('aria-label', '更多操作');
+      more.setAttribute('aria-haspopup', 'menu');
+      more.addEventListener('click', (e) => { e.stopPropagation(); toggleNbMenu(nb, more); });
+      acts.appendChild(more);
     }
+    if (own) dragNb(row, nb);
     // 当前这本能撤回上一次修改（Claude 改的、另存的、存回 PDF 的）：名字下面另起一行一个文字按钮「撤回上次修改」。
     // 不和右边那排图标挤在一行（名字长时会被挤出抽屉）；右上角的提示条关掉以后在这里找（2026-11-14，阶段 C）
     if (cur && S.nb.undo) {
@@ -3732,7 +5271,7 @@
     if (f && isFolded(f)) setFolded(f.id, false);
   }
 
-  // 点一本旁边的文件夹图标：在它下面弹出一个小列表——现有的各个文件夹（它在的那个打 ✓）、「移出文件夹」（在文件夹里时才有）、「新建文件夹…」
+  // 点一本「⋯」菜单里的「放进文件夹…」：在「⋯」下面弹出一个小列表——现有的各个文件夹（它在的那个打 ✓）、「移出文件夹」（在文件夹里时才有）、「新建文件夹…」
   function openFolderPick(nb, anchor) {
     $('#targetPick').hidden = true;
     const box = $('#folderPick'), list = $('#folderPickList'), inF = folderOfNb(nb.id);
@@ -3777,6 +5316,226 @@
     box.style.top = (r.bottom + 4 + h <= innerHeight - 8 ? r.bottom + 4 : Math.max(8, r.top - 4 - h)) + 'px';
   }
   function closeFolderPick() { $('#folderPick').hidden = true; }
+
+  // 一本右边「⋯」点开的小菜单（2026-11-16 用户定）：写着字的几项——放进文件夹…（现有的选文件夹小列表）、改名…、删除这本…，
+  // 当前这本有原 PDF 时多一项「存回 PDF」。各项做的事和确认框都照旧，只是入口从图标换成了这里。草稿本、「Claude 推送」不改名、不删、
+  // 不进文件夹，只有存回 PDF 这一项可能有（实际上它们没有原 PDF）。当前这本的各项沿用原来图标的 id
+  function nbMenuItems(nb) {
+    const cur = Boolean(S.nb && nb.id === S.nb.id), own = nb.id.startsWith('book:') || nb.id.startsWith('pad:'), out = [];
+    if (own) out.push(['folder', '放进文件夹…', 'actFolder', (anchor) => openFolderPick(nb, anchor)]);
+    if (own) out.push(['rename', '改名…', 'actRename', () => renameNotebook(nb)]);
+    if (cur && S.nb.savePdf) out.push(['save', '存回 PDF', 'actSavePdf', () => savePdf()]);
+    if (own) out.push(['delete', '删除这本…', 'actDelete', () => deleteNotebook(nb)]);
+    return out;
+  }
+
+  // 点「⋯」：开着这本的菜单就收起，否则（先收起别的）在它下面开这本的。同时只开一张；点菜单外面收起（bindUI 里）
+  function toggleNbMenu(nb, anchor) {
+    const box = $('#nbMenu');
+    if (!box.hidden && box.dataset.nb === nb.id) { closeNbMenu(); return; }
+    closeFolderPick();
+    $('#targetPick').hidden = true;
+    closeNbMenu();
+    box.innerHTML = '';
+    const cur = Boolean(S.nb && nb.id === S.nb.id);
+    for (const [act, label, id, fn] of nbMenuItems(nb)) {
+      const b = document.createElement('button');
+      b.className = 'row';
+      b.dataset.act = act;
+      if (cur) b.id = id;
+      b.textContent = label;
+      b.addEventListener('click', (e) => { e.stopPropagation(); closeNbMenu(); fn(anchor); });
+      box.appendChild(b);
+    }
+    box.dataset.nb = nb.id;
+    box.hidden = false;
+    anchor.classList.add('on');
+    // 紧挨着「⋯」：放在它下面，靠右对齐；下面放不下就放到上面（和选文件夹的小列表一样）
+    const r = anchor.getBoundingClientRect(), w = box.offsetWidth, h = box.offsetHeight;
+    box.style.left = clamp(r.right - w, 8, innerWidth - w - 8) + 'px';
+    box.style.top = (r.bottom + 4 + h <= innerHeight - 8 ? r.bottom + 4 : Math.max(8, r.top - 4 - h)) + 'px';
+  }
+  function closeNbMenu() {
+    $('#nbMenu').hidden = true;
+    for (const b of document.querySelectorAll('#nbList .nb-more.on')) b.classList.remove('on');
+  }
+
+  // -- 抽屉里「按住抓起再拖」（2026-11-16 用户定）：把本子拖进文件夹（dragNb）、拖缩略图换页序（dragThumb）共用这一套。
+  // 按住约半秒不动（手指、笔、鼠标都行）抓起：原处那一项变淡，一个影子跟着走；不到半秒就挪动的不管，照旧是滚动列表、左右滑着看名字。
+  // 抓起以后拦下系统的滚动：iPad Safari 里手指一挪浏览器就接管滚动、发 pointercancel，所以抓起后抽屉上的 touchmove 都 preventDefault
+  // （和纸上、卡片上拦 touchmove 是同一个办法；抓起之前不拦，原来的滚动照旧）。长按的系统菜单、选字、把图片拖出去靠 style.css
+  // （-webkit-touch-callout、user-select、-webkit-user-drag）和缩略图的 draggable=false；contextmenu 本来就整页拦着。
+  // 拖到抽屉上下边缘时抽屉自己滚。松手：o.drop 放得下就放（返回 true），放不下或没挪地方就回到原处、什么都不改；
+  // 抓起以后的松手不算一次点击（紧跟着的 click 吞掉），不会去打开那本、翻到那页。
+  // o：kind（'nb' 本子、'th' 缩略图）、can()（这会儿能不能抓）、ghost(rect)（影子）、above（影子浮在手指上方，不盖住手指底下那一行）、
+  // move(L, x, y)（指着哪、标出来）、drop(L)、end(L)（收尾）
+  const HOLD_MS = 500, HOLD_SLOP = 8, EDGE_PX = 56;
+  let lift = null; // 正按着（还没到半秒）或已经抓起的那一项：{ el, o, id, x0, y0, x, y, on, ghost, dx, dy, timer }
+  let liftClickUntil = 0;
+  function holdDrag(el, o) {
+    initHoldDrag();
+    el.addEventListener('pointerdown', (e) => {
+      if ((lift && lift.on) || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      if (lift) endLift(false); // 又一根手指按下来：前一根还没到半秒的不算
+      const btn = e.target.closest && e.target.closest('button');
+      if (btn && btn !== el) return; // 一行里的按钮（「⋯」「撤回上次修改」）照常是按钮
+      const L = { el, o, id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, on: false };
+      L.timer = setTimeout(() => liftNow(L), HOLD_MS);
+      lift = L;
+    });
+  }
+  function initHoldDrag() {
+    if (initHoldDrag.done) return;
+    initHoldDrag.done = true;
+    window.addEventListener('pointermove', (e) => {
+      const L = lift;
+      if (!L || e.pointerId !== L.id) return;
+      L.x = e.clientX;
+      L.y = e.clientY;
+      if (e.pointerType === 'mouse' && !(e.buttons & 1)) { endLift(L.on); return; } // 鼠标在窗口外松开的：回来时当它松手了
+      if (!L.on) { if (Math.hypot(L.x - L.x0, L.y - L.y0) > HOLD_SLOP) endLift(false); return; } // 不到半秒就挪动：是在滚动、滑名字
+      if (e.cancelable) e.preventDefault();
+      placeGhost(L);
+      L.o.move(L, L.x, L.y);
+    }, { passive: false });
+    window.addEventListener('pointerup', (e) => { if (lift && e.pointerId === lift.id) endLift(lift.on); });
+    window.addEventListener('pointercancel', (e) => { if (lift && e.pointerId === lift.id) endLift(false); });
+    $('#drawer').addEventListener('touchmove', (e) => { if (lift && lift.on && e.cancelable) e.preventDefault(); }, { passive: false });
+    document.addEventListener('click', (e) => {
+      if (performance.now() < liftClickUntil) { e.stopImmediatePropagation(); e.preventDefault(); }
+    }, true);
+  }
+  function liftNow(L) {
+    if (lift !== L || L.on) return;
+    if (L.o.can && !L.o.can()) { lift = null; return; }
+    L.on = true;
+    const r = L.el.getBoundingClientRect();
+    L.dx = L.x - r.left;
+    L.dy = L.o.above ? r.height + 10 : L.y - r.top; // above：影子浮在手指上方，手指底下指着的那一行（标出来的文件夹）露在外面
+    L.ghost = L.o.ghost(r);
+    L.ghost.classList.add('drag-ghost');
+    Object.assign(L.ghost.style, { position: 'fixed', margin: '0', pointerEvents: 'none' }); // 缩略图的影子带着 .th 的 position: relative：这里压过它
+    document.body.appendChild(L.ghost);
+    L.el.classList.add('lifted');
+    try { L.el.setPointerCapture(L.id); } catch (err) { /* 有些浏览器不支持 */ }
+    placeGhost(L);
+    L.o.move(L, L.x, L.y);
+    requestAnimationFrame(() => dragScroll(L));
+  }
+  function placeGhost(L) {
+    L.ghost.style.left = (L.x - L.dx) + 'px';
+    L.ghost.style.top = (L.y - L.dy) + 'px';
+  }
+  // 拖到抽屉上下边缘（各约 56 像素）：抽屉往那边滚，越靠边越快；滚了就按手指现在的位置重新看指着哪
+  function dragScroll(L) {
+    if (lift !== L || !L.on) return;
+    const d = $('#drawer'), r = d.getBoundingClientRect(), top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+    let v = 0;
+    if (L.x >= r.left && L.x <= r.right) {
+      if (L.y < top + EDGE_PX) v = -Math.ceil((top + EDGE_PX - L.y) / 4);
+      else if (L.y > bottom - EDGE_PX) v = Math.ceil((L.y - bottom + EDGE_PX) / 4);
+    }
+    if (v) {
+      const before = d.scrollTop;
+      d.scrollTop += clamp(v, -16, 16);
+      if (d.scrollTop !== before) L.o.move(L, L.x, L.y);
+    }
+    requestAnimationFrame(() => dragScroll(L));
+  }
+  // 松手（drop 为真）或被系统取消：放下或回到原处
+  function endLift(drop) {
+    const L = lift;
+    lift = null;
+    if (!L) return;
+    clearTimeout(L.timer);
+    if (!L.on) return;
+    liftClickUntil = performance.now() + 400;
+    let done = false;
+    if (drop) { try { done = L.o.drop(L) === true; } catch (err) { done = false; } }
+    L.el.classList.remove('lifted');
+    const g = L.ghost;
+    if (done || !L.el.isConnected) g.remove();
+    else { // 回到原处：影子飘回原来那一项再消失
+      const r = L.el.getBoundingClientRect();
+      g.style.transition = 'left .15s ease-out, top .15s ease-out, opacity .15s';
+      g.style.left = r.left + 'px';
+      g.style.top = r.top + 'px';
+      g.style.opacity = '0';
+      setTimeout(() => g.remove(), 200);
+    }
+    if (L.o.end) L.o.end(L);
+  }
+  const dragging = (kind) => (lift && lift.on && lift.o.kind === kind ? lift : null);
+
+  // 把本子拖进文件夹（2026-11-16 用户定）：按住一本约半秒抓起，拖到文件夹那一行上（它白底加粗边框）松手放进去；收着的文件夹上停约 0.7 秒
+  // 自己展开；展开着的文件夹里那几本也算这个文件夹。文件夹里的本子拖到文件夹外面（文件夹外的本子那几行、列表里的空处，整个列表画一圈虚线）
+  // 松手是移出文件夹。拖到列表外面、或放下去不会变的地方松手：回到原处，什么都不改。放下后屏幕上方一句，带「撤销」。
+  // 「⋯」菜单里的「放进文件夹…」照旧留着：拖动是多一种做法，不是替换。草稿本、「Claude 推送」不能拖（nbRow 不给它们挂上）
+  const SPRING_MS = 700;
+  function dragNb(row, nb) {
+    holdDrag(row, {
+      kind: 'nb', nb, above: true,
+      ghost: (r) => {
+        const g = document.createElement('div');
+        g.className = 'nb-ghost';
+        g.setAttribute('data-lang-keep', ''); // 本子名是你起的，不翻译
+        g.textContent = nb.title;
+        g.style.width = r.width + 'px';
+        return g;
+      },
+      move: (L, x, y) => nbDropMark(L, nbDropAt(x, y)),
+      drop: (L) => {
+        const at = L.at, to = at && at.fid ? (S.folders || []).find((f) => f.id === at.fid) : null;
+        if (!at || (at.fid && !to)) return false;
+        const from = folderOfNb(nb.id);
+        nbToFolder(nb, to, from ? from.id : '');
+        return true;
+      },
+      end: (L) => { clearTimeout(L.spring); nbDropMark(L, null); },
+    });
+  }
+  // 手指（笔）底下是哪：{ fid（文件夹的 id，'' 是文件夹外面）, onRow（正指着文件夹那一行）}；不在本子列表上是 null
+  function nbDropAt(x, y) {
+    const list = $('#nbList'), t = document.elementFromPoint(x, y);
+    if (!t || !list.contains(t)) return null;
+    const fr = t.closest('.nf-item');
+    if (fr) return { fid: fr.dataset.fid, onRow: true };
+    const r = t.closest('.nb-item'), f = r && r.classList.contains('nested') ? folderOfNb(r.dataset.nb) : null;
+    return { fid: f ? f.id : '', onRow: false };
+  }
+  // 标出松手会放到哪（放下去会变的才标），记在 L.at；停在收着的文件夹那一行上约 0.7 秒：展开它
+  function nbDropMark(L, at) {
+    const from = (folderOfNb(L.o.nb.id) || {}).id || '', act = at && at.fid !== from ? at : null;
+    L.at = act;
+    for (const e of document.querySelectorAll('#nbList .nf-item')) e.classList.toggle('drop', Boolean(act && act.fid && e.dataset.fid === act.fid));
+    $('#nbList').classList.toggle('drop-out', Boolean(act && !act.fid));
+    const fid = at && at.onRow ? at.fid : '';
+    if (fid === L.springFid) return;
+    clearTimeout(L.spring);
+    L.springFid = fid;
+    const f = fid && (S.folders || []).find((x) => x.id === fid);
+    if (f && isFolded(f)) {
+      L.spring = setTimeout(() => {
+        if (lift !== L || L.springFid !== fid) return;
+        setFolded(fid, false);
+        renderNbList();
+        nbDropMark(L, nbDropAt(L.x, L.y));
+      }, SPRING_MS);
+    }
+  }
+  // 拖动放下：放进 to（null 是移出文件夹）；提示带「撤销」，点了回到 back（原来那个文件夹的 id，'' 是文件夹外面）
+  async function nbToFolder(nb, to, back, undone) {
+    try {
+      await folderOp('/api/folders/move', { nb: nb.id, folder: to ? to.id : '' });
+    } catch (e) { toast('没放成：' + e.message, 4000); renderNbList(); return; }
+    revealCurrent();
+    renderNbList();
+    if (undone) { toast(to ? `已放回「${to.name}」` : '已放回文件夹外面', 2200); return; }
+    toast(to ? `已放进「${to.name}」` : '已移出文件夹', 5000, '撤销', () => {
+      const f = back ? (S.folders || []).find((x) => x.id === back) || { id: back, name: '' } : null;
+      nbToFolder(nb, f, '', true);
+    });
+  }
 
   async function folderOp(path, body) {
     const res = await (await api(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
@@ -3879,6 +5638,7 @@
     updateCheck(); // 「AI」按钮换成这一本的样子（这本交过、还没走完的那一轮；只在本地）
     S.page = null; // 别把上一本的页当成这一本的相邻页
     flowReset();
+    loadNewAns(); // 别的页有新回答的记号：换成这一本的
     // 这本上没选过就上下页接在一起、滑着翻；在抽屉、左上角或顶栏里选过「单页」的照选的来
     S.flow = info.flowSet ? Boolean(info.flow) : true;
     updateSegs();
@@ -3901,7 +5661,7 @@
     const baseH0 = S.nb && S.nb.sizes && S.nb.sizes[i] ? S.nb.sizes[i].h : SCRATCH_H;
     const baseH = Turn.heightAt(page.rot, baseH0), storedH = Math.max(baseH, page.h || 0), Wp = W + (page.xw || 0);
     const Mp = needsMargin(page, Wp) ? M : 0;
-    const G = { baseH0, baseH, storedH, pageH: storedH, W: Wp, M: Mp, TW: Wp + Mp, X0: -(page.ox || 0), Y0: -(page.oy || 0), rot: page.rot || 0 };
+    const G = { baseH0, baseH, storedH, pageH: storedH, W: Wp, M: Mp, TW: Wp + Mp, X0: -(page.ox || 0), Y0: -(page.oy || 0), rot: page.rot || 0, blank: blankNb() };
     // 连续阅读的最后一页下面没有别的页：纸至少铺到屏幕底，和 fit() 里单页时的算法一样（「整页」适配时不铺）
     if (S.flow && S.fitMode !== 'page' && lastPage(i)) {
       const pad = S.collapsed ? 0 : 10;
@@ -3914,6 +5674,7 @@
   async function openPage(i) {
     S.compare = false;
     stopReplay();
+    if (S.page) rememberAnswers(S.idx, S.page); // 卡片的上一条、下一条跨页：这一页上有几条回答记下（answersAt）
     await flushSave();
     if (S.flow && S.page && S.idx !== i) { // 连续阅读：离开的这页留着（数据、底图、撤销记录）
       S.flowCache.set(S.idx, { page: S.page, img: S.bgImg, url: S.bgUrl, undo: S.undo });
@@ -3961,8 +5722,10 @@
     const i = S.idx;
     $('#pageNo').textContent = `${i + 1}/${S.nb.pages}`;
     updateChip();
+    showNewAns(); // 这一页看到了：它的「别的页有新回答」记号去掉
     $('#prev').disabled = i <= 0;
     $('#next').disabled = i >= S.nb.pages - 1;
+    updateRedo(); // 换了一页：「恢复」按这一页的重做记录亮不亮
     if (!S.landing) {
       api('/api/where', { method: 'POST', body: JSON.stringify({ nb: S.nb.id, page: i }), headers: { 'Content-Type': 'application/json' } })
         .catch(() => {});
@@ -3996,7 +5759,7 @@
       chip.hidden = false;
     } else if (nb && nb.kind === 'book' && nb.sourceChanged && !S.verHidden['src:' + nb.id]) {
       $('#verText').textContent = `原文件「${nb.source}」改过了`;
-      act.textContent = '更新到草稿纸';
+      act.textContent = '更新这本';
       act.hidden = false;
       chip.dataset.kind = 'source';
       chip.hidden = false;
@@ -4007,8 +5770,7 @@
         act.hidden = true;
       } else {
         const ch = nb.changes, [from, to] = ch.from && ch.to && ch.from !== ch.to ? diffNames(ch.from, ch.to) : ['', ''];
-        const vers = from ? `（${from} → ${to}）` : '';
-        $('#verText').textContent = S.compare ? `正在看更新前的旧版${from ? '（' + from + '）' : ''}` : `这一页更新时改过${vers}，橙框处`;
+        $('#verText').textContent = S.compare ? `正在看更新前的旧版${from ? '（' + from + '）' : ''}` : `这一页更新时改过（${from ? `${from} → ${to}，` : ''}见橙框）`;
         act.textContent = S.compare ? '回到新版' : '对比旧版';
         act.hidden = false;
         chip.classList.toggle('old', S.compare);
@@ -4124,7 +5886,7 @@
     if (!nb || !(pad || nb.id.startsWith('book:'))) return;
     // 平板上没有找回的入口：电脑上是挪开留着（PDF 进 books/_已删除，笔迹文件夹改成 _deleted 开头），要找回得让 Claude 挪回来
     if (!confirm(pad ? `从列表里删除「${nb.title}」？\n上面的手写还留在电脑上，要找回就让 Claude 帮你挪回来。`
-      : `从列表里删除《${nb.title}》？\nPDF 和上面的手写都还留在电脑上，要找回就让 Claude 帮你挪回来。`)) return;
+      : `从列表里删除《${nb.title}》？\n文件和上面的手写都还留在电脑上，要找回就让 Claude 帮你挪回来。`)) return;
     try {
       await flushSave();
       await api('/api/notebook/delete', { method: 'POST', body: JSON.stringify({ nb: nb.id }), headers: { 'Content-Type': 'application/json' } });
@@ -4170,7 +5932,8 @@
   async function updateBook() {
     const nb = S.nb;
     if (!nb || nb.kind !== 'book') return;
-    toast(`正在更新《${nb.title}》…（PPT/Word 要先转换，稍等）`, 180000);
+    // 只有原文件真要先转换的（PPT、Word 等）才说要等（阶段 D2 修的：原来 PDF 也这么说）
+    toast(`正在更新《${nb.title}》…` + (needsConvert(nb.source || '') ? '（PPT/Word 要先转换，稍等）' : ''), 180000);
     await flushSave();
     S.selfUpdate = nb.id;
     try {
@@ -4316,10 +6079,12 @@
     const d = $('#drawer');
     const on = show === undefined ? d.hidden : show;
     d.hidden = !on;
-    if (!on) closeFolderPick();
+    if (!on) { closeFolderPick(); closeNbMenu(); }
     if (on) {
       closeCard(); // 开抽屉：卡片收起
+      hideOfferBar(); // 屏幕上方「新文件」那一条：抽屉最上面就是那一组，收起
       S.thumbVer = Date.now();
+      renderOffers();
       renderNbList();
       updateTargetRow();
       renderThumbs();
@@ -4335,26 +6100,149 @@
 
   function renderThumbs() {
     const box = $('#thumbs');
+    if (dragging('th')) { thumbsLate = true; return; } // 正拖着一张：松手后再重画
     box.innerHTML = '';
     if (!S.nb) return;
     $('#thumbCount').textContent = `（${S.nb.pages} 页${S.nb.hidden ? `，已删 ${S.nb.hidden} 页` : ''}）`;
     for (let i = 0; i < S.nb.pages; i++) {
       const pi = (S.nb.pageInfo || [])[i] || {};
-      const d = document.createElement('div');
-      d.className = 'th' + (i === S.idx ? ' cur' : '') + (pi.blank && S.nb.kind !== 'scratch' && S.nb.kind !== 'pad' ? ' blank' : '')
-        + (pi.hiddenSlide ? ' hid' : '');
+      const d = document.createElement('div'), blank = pi.blank && S.nb.kind !== 'scratch' && S.nb.kind !== 'pad';
+      d.className = 'th' + (i === S.idx ? ' cur' : '') + (blank ? ' blank' : '') + (pi.hiddenSlide ? ' hid' : '');
+      if (i !== S.idx && newAns.has(String(pi.key))) d.classList.add('new-ans'); // 别的页有新回答：右上角一个蓝点
       const img = document.createElement('img');
       img.loading = 'lazy';
+      img.draggable = false; // 按住拖是换页序（dragThumb），不是把图片拖出去
       img.alt = `第 ${i + 1} 页`;
       img.src = `/api/thumb?nb=${encodeURIComponent(S.nb.id)}&i=${i}&${TOKEN ? 'd=' + encodeURIComponent(TOKEN) : 'k=' + encodeURIComponent(CODE)}&t=${S.thumbVer || 0}`;
+      // 页码后面的小字：书里插进去的空白页写「空白」，PPT 的隐藏页写「隐藏页」（以前写在 style.css 的 content 里，英文界面换不了；阶段 E 挪到这里，i18n.js 照常换）
       const label = document.createElement('span');
       label.textContent = String(i + 1);
+      for (const [on, tag] of [[blank, '空白'], [pi.hiddenSlide, '隐藏页']]) {
+        if (!on) continue;
+        const t = document.createElement('i');
+        t.className = 'th-tag';
+        t.textContent = tag;
+        label.append(' ', t);
+      }
       d.append(img, label);
       d.addEventListener('click', () => openPage(i));
+      dragThumb(d, i);
       box.appendChild(d);
     }
     const cur = box.querySelector('.th.cur');
     if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  // 拖缩略图换页序（2026-11-16 用户定）：按住一张约半秒抓起（holdDrag），拖到两页之间，一条蓝色竖线标出会落在哪，松手页就挪到那里。
+  // 拖回原处、拖到缩略图外面松手：回到原处，什么都不改。只有一页、回放书写过程、对比旧版时不能拖
+  let thumbsLate = false, thumbBarEl = null;
+  function dragThumb(d, i) {
+    holdDrag(d, {
+      kind: 'th',
+      can: () => Boolean(S.nb && S.page) && S.nb.pages > 1 && !S.replay && !S.compare,
+      ghost: (r) => {
+        const g = d.cloneNode(true);
+        g.classList.remove('cur', 'lifted');
+        g.style.width = r.width + 'px';
+        return g;
+      },
+      move: (L, x, y) => { L.slot = thumbSlot(x, y); thumbBar(L.slot, i); },
+      drop: (L) => {
+        const s = L.slot;
+        if (!s || s.k === i || s.k === i + 1) return false; // 落在它自己前后的缝里：没挪地方
+        movePage(i, s.k > i ? s.k - 1 : s.k);
+        return true;
+      },
+      end: () => { thumbBar(null, i); if (thumbsLate) { thumbsLate = false; renderThumbs(); } },
+    });
+  }
+  // 拖着的缩略图落在哪个缝里：k 是落下以后排在它前面的有几张（0 是第一页前面，n 是最后一页后面）；ref、side：竖线画在第 ref 张的
+  // 左边（before）还是右边（after）。按行算（两列，同一行的几张 top 一样），行与行之间以中线为界。不在缩略图那一块上（四周各放宽一点）返回 null
+  function thumbSlot(x, y) {
+    const ths = [...$('#thumbs').querySelectorAll('.th')], br = $('#thumbs').getBoundingClientRect();
+    if (!ths.length || x < br.left - 24 || x > br.right + 24 || y < br.top - 40 || y > br.bottom + 40) return null;
+    const rows = [];
+    ths.forEach((t, k) => {
+      const r = t.getBoundingClientRect(), row = rows.find((w) => Math.abs(w.top - r.top) < 2);
+      if (row) { row.items.push([k, r]); row.bottom = Math.max(row.bottom, r.bottom); } else rows.push({ top: r.top, bottom: r.bottom, items: [[k, r]] });
+    });
+    for (let w = 0; w < rows.length; w++) {
+      const next = rows[w + 1];
+      if (next && y > (rows[w].bottom + next.top) / 2) continue;
+      for (const [k, r] of rows[w].items) if (x < r.left + r.width / 2) return { k, ref: k, side: 'before' };
+      const k = rows[w].items[rows[w].items.length - 1][0];
+      return { k: k + 1, ref: k, side: 'after' };
+    }
+    return null;
+  }
+  // 两张缩略图之间的蓝色竖线：拖着的第 from 张会落在这里；落下去不变（或指着缩略图外面）时不画
+  function thumbBar(s, from) {
+    const t = s && s.k !== from && s.k !== from + 1 ? $('#thumbs').querySelectorAll('.th')[s.ref] : null;
+    if (!t) { if (thumbBarEl) thumbBarEl.hidden = true; return; }
+    if (!thumbBarEl) {
+      thumbBarEl = document.createElement('div');
+      thumbBarEl.className = 'drag-bar';
+      document.body.appendChild(thumbBarEl);
+    }
+    const r = t.getBoundingClientRect(), x = s.side === 'before' ? r.left - 4 : r.right + 4; // 缩略图之间隔 8 像素：画在正中
+    Object.assign(thumbBarEl.style, { left: (x - 2) + 'px', top: r.top + 'px', height: r.height + 'px' });
+    thumbBarEl.hidden = false;
+  }
+
+  // 挪页（拖缩略图放下、点提示里的「撤销」）：把第 from 页挪到第 to 页（to 按挪完以后的位置算）。只改页序，各页的笔迹文件不动、不改名。
+  // 先存好手上的字，还有没存上的就不挪：存页是按页码存的，先挪了页，没存上的那份之后会存到别的页上。
+  // 挪完眼前还是同一页（按页的键跟着走），页码跟着变；提示带「撤销」（挪回原位）
+  async function movePage(from, to, undone) {
+    const nb = S.nb, info = nb && nb.pageInfo;
+    if (!nb || !info || !info[from] || S.replay || S.compare) return;
+    const key = info[from].key;
+    let res;
+    try {
+      await flushSave();
+      if (S.nb !== nb) return;
+      if (S.dirty || [...pendingSaves.values()].some((j) => j.nb === nb.id)) { toast('有字还没存上，等存好了再挪页', 4000); return; }
+      res = await (await api('/api/page/move', { method: 'POST', body: JSON.stringify({ nb: nb.id, from, to, key }),
+        headers: { 'Content-Type': 'application/json' } })).json();
+    } catch (e) { toast((undone ? '没挪回去：' : '没挪成：') + e.message, 4000); return; }
+    if (S.nb !== nb) return;
+    relabelPages(res.notebook);
+    if (undone) { toast(`已挪回第 ${res.page + 1} 页`, 2200); return; }
+    toast(`第 ${from + 1} 页挪到了第 ${res.page + 1} 页`, 5000, '撤销', () => {
+      if (!S.nb || S.nb.id !== nb.id) { toast('没挪回去：已经换了本子', 3000); return; }
+      const k = (S.nb.pageInfo || []).findIndex((p) => p.key === key);
+      if (k >= 0) movePage(k, Math.min(from, S.nb.pages - 1), true);
+    });
+  }
+
+  // 页序变了（挪页）：眼前这一页不换——页面数据、底图、撤销记录、缩放和位置都留着，只是页码跟着它的键变。
+  // 按「本子#页码」记着的（连续阅读时各页另存的撤销记录、Claude 回了还没落下的、等滑到屏幕上再落的页）按页的键改到新页码；
+  // 相邻页的缓存丢掉重取。字迹确认卡片上的页号由服务按那一页的键现找：重新取一次
+  function relabelPages(info) {
+    const old = S.nb, oldKeys = (old.pageInfo || []).map((p) => p.key), now = new Map((info.pageInfo || []).map((p, k) => [p.key, k]));
+    const re = (pk) => {
+      const at = pk.lastIndexOf('#');
+      if (pk.slice(0, at) !== old.id) return pk;
+      const j = now.get(oldKeys[Number(pk.slice(at + 1))]);
+      return j === undefined ? null : `${old.id}#${j}`;
+    };
+    const undos = [...S.undos].map(([k, v]) => [re(k), v]).filter(([k]) => k);
+    const hl = [...held].map(([k, v]) => [re(k), v]).filter(([k]) => k);
+    const pp = [...S.pendingPages].map(re).filter(Boolean);
+    const cur = now.get(oldKeys[S.idx]);
+    S.nb = info;
+    flowReset();
+    for (const [k, v] of undos) S.undos.set(k, v);
+    held.clear();
+    for (const [k, v] of hl) held.set(k, v);
+    S.pendingPages.clear();
+    for (const k of pp) S.pendingPages.add(k);
+    S.idx = cur === undefined ? Math.min(S.idx, info.pages - 1) : cur;
+    S.baseH0 = info.sizes && info.sizes[S.idx] ? info.sizes[S.idx].h : SCRATCH_H;
+    layoutPage();
+    S.thumbVer = Date.now(); // 缩略图的地址按页码：换个版本号，不拿缓存里别的页的图
+    showPage();
+    redrawAll();
+    loadCards();
   }
 
   function pageHasContent() {
@@ -4393,6 +6281,7 @@
     closeCard();
     Turn.turnPage(S.page, dir, { h0: S.baseH0, mainW: S.W });
     S.undo = [];
+    updateRedo(); // 重做记录跟着撤销记录清掉
     layoutPage();
     markDirty();
     fit(S.fitMode || 'width');
@@ -4405,7 +6294,7 @@
   async function deletePage() {
     if (!S.nb) return;
     if (S.nb.pages <= 1) { toast('最后一页不能删'); return; }
-    if (pageHasContent() && !confirm('这一页写过字，确定从本子里删掉？\n可以在抽屉的「显示已删的页」里恢复。')) return;
+    if (pageHasContent() && !confirm('这一页写过字，确定从本子里删掉？\n可以在抽屉的「显示已删的页」里还原。')) return;
     try {
       const res = await pageOp('/api/page/delete', { nb: S.nb.id, i: S.idx });
       S.nb = res.notebook;
@@ -4414,7 +6303,7 @@
       S.page = null;
       S.thumbVer = Date.now();
       await openPage(Math.min(S.idx, S.nb.pages - 1));
-      toast('已删除这一页（可以恢复）', 2500);
+      toast('已删除这一页（可以还原）', 2500);
     } catch (e) { toast('没删成：' + e.message, 4000); }
   }
 
@@ -4431,7 +6320,7 @@
       const t = document.createElement('span');
       t.textContent = h.label + (h.ink ? '（写过字）' : '');
       const b = document.createElement('button');
-      b.textContent = '恢复';
+      b.textContent = '还原'; // 2026-11-16 夜以前叫「恢复」：「恢复」现在是撤销旁边那个按钮（重做）
       b.addEventListener('click', async () => {
         try {
           const res = await pageOp('/api/page/restore', { nb: S.nb.id, key: h.key });
@@ -4442,7 +6331,7 @@
           S.thumbVer = Date.now();
           box.hidden = true;
           await openPage(res.page);
-        } catch (e) { toast('没恢复成：' + e.message, 4000); }
+        } catch (e) { toast('没还原成：' + e.message, 4000); }
       });
       row.append(t, b);
       box.appendChild(row);
@@ -4515,7 +6404,7 @@
     const sid = $('#isSession').value, list = $('#isList'), crumbs = $('#isCrumbs');
     list.innerHTML = '';
     crumbs.innerHTML = '';
-    if (!sid) { list.textContent = '没有连着的 Claude Code 对话。在电脑上的对话里执行一次 /ink，或者从 iPad 上传。'; return; }
+    if (!sid) { list.textContent = '没有连着的 Claude Code 对话。在电脑上的对话里执行一次 /ink，或者从平板上传。'; return; }
     let d;
     try { d = await (await api(`/api/files?sid=${encodeURIComponent(sid)}&path=${encodeURIComponent(path)}`)).json(); } catch (e) {
       list.textContent = '打不开这个文件夹：' + e.message;
@@ -4532,7 +6421,7 @@
       for (const e of d.recent) list.appendChild(importRow(e, true));
       head('文件夹里');
     }
-    if (!d.entries.length) head('这里没有能导入的文件（PDF、PPT、Word、Markdown、图片）。');
+    if (!d.entries.length) head('这里没有能导入的文件（PDF、PPT、Word、EPUB、图片、Markdown 和纯文本）。'); // 和 server.py 的 IMPORT_KINDS 一样
     for (const e of d.entries) list.appendChild(importRow(e, false));
   }
 
@@ -4557,7 +6446,7 @@
     if (e.imported) {
       const b = document.createElement('span');
       b.className = 'is-badge' + (e.changed ? ' chg' : '');
-      b.textContent = e.changed ? '原文件改过 · 点了更新' : '已导入 ›';
+      b.textContent = e.changed ? '原文件改过 · 点一下更新' : '已导入 ›';
       row.appendChild(b);
       row.addEventListener('click', () => importFile(e));
     } else if (e.replace) {
@@ -4678,7 +6567,7 @@
     if (e.imported) {
       const b = document.createElement('span');
       b.className = 'is-badge' + (e.changed ? ' chg' : '');
-      b.textContent = e.changed ? '原文件改过 · 点了更新' : '已导入 ›';
+      b.textContent = e.changed ? '原文件改过 · 点一下更新' : '已导入 ›';
       row.appendChild(b);
     }
     row.addEventListener('click', () => (e.pdf ? importZotero(e) : toast('这篇在 Zotero 里没有 PDF', 2500)));
@@ -4707,7 +6596,7 @@
       const { id } = await r.json();
       await loadNotebooks(id);
       await openNotebook(id, 0);
-      toast('已打开', 1500);
+      toast(`已导入《${S.nb && S.nb.id === id ? S.nb.title : file.name}》`, 3000); // 和别处导入完的说法一样（原来写「已打开」）
     } catch (e) {
       toast('导入失败：' + e.message, 6000);
     }
@@ -4716,13 +6605,17 @@
   // ------------------------------------------------------------ 整本发送、确认字迹
 
   // 整本交给 Claude：服务器把这本里有新笔迹的页（onlyNew）或写过字的页都画成图，一起投递；各页的 ✓/× 决定由服务器从存好的页面里带上
-  async function sendAll(onlyNew) {
-    if (!S.nb || S.sending || localBlocked() || targetGone(() => sendAll(onlyNew))) return;
+  // others：这一页以外有新写的页（点「AI」时已经问过电脑；没给就再问一次）
+  async function sendAll(onlyNew, others) {
+    if (!S.nb || S.sending || localBlocked() || targetGone(() => sendAll(onlyNew, others))) return;
     const nbId = S.nb.id;
-    await flushSave();
     S.sending = true;
     updateCheck();
     try {
+      // 写在短批注上的红字：这一页和别的有新写的页上的，都先收成卡片、存好，再交（服务端按存好的页画图、挑要交的卡片）
+      followupsToCards();
+      await followupsElsewhere(others || (await newPages()).others);
+      await flushSave();
       const body = { nb: nbId, target: effectiveTarget() || '', only_new: onlyNew };
       const res = await (await api('/api/send-all', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
       startRound(res.id, nbId); // 「AI」按钮变成「已交」
@@ -4739,13 +6632,15 @@
   // 点「AI」：把上次交过之后写过的页交上去。只有这一页就整页交；别的页也有新写的，就一起交，不再问。
   // 这本只在本地：只提示，不发。上一轮还在走时也能再点（再交一次，按钮上显示新的这一轮）；只是交出去之前的这一小会儿不重复交
   async function check() {
+    lassoOff(); // 套索选中的先取消，再交（交上去的图按数据画，本来就没有虚线框；屏幕上也不留着）
     if (!S.page || S.sending || S.checking) return;
     if (localBlocked()) return;
     S.checking = true;
     try {
       const d = await newPages();
-      if (d.others.length) return await sendAll(true);
-      if (!S.page.strokes.some((s) => !s.erasedAt) && !(S.page.ai || []).length) { toast('这一页还没写字'); return; }
+      if (d.others.length) return await sendAll(true, d.others);
+      // 擦掉的（连同「清除本页 Claude 批注」清掉的）蓝字不算这一页上有东西
+      if (!S.page.strokes.some((s) => !s.erasedAt) && !(S.page.ai || []).some((a) => !a.erasedAt)) { toast('这一页还没写字'); return; }
       return await send();
     } finally {
       S.checking = false;
@@ -4942,7 +6837,7 @@
       for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) pad.addEventListener(t, padUp);
       pad.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, { passive: false });
       body.append(hint, pad);
-      foot.append(qButton('重写', 'qcRedo', () => { S.qPad = []; S.qInk = null; drawPad(); }), qButton('交回答', 'qcSend', sendPad, true));
+      foot.append(qButton('重写', 'qcRedo', () => { S.qPad = []; S.qInk = null; drawPad(); }), qButton('提交回答', 'qcSend', sendPad, true));
       updatePadBtns();
     }
   }
@@ -4993,18 +6888,25 @@
 
   // 卡片和小条的上沿：左上角那一排（全屏）、顶栏（退出全屏）、右上角的提示条、出问题时那一句、挪到屏幕上部的右下角那一条，都让开，排在它们下面；
   // 卡片最低到右下角那一条（左右和卡片有重叠时）上面为止，多了在卡片里滑。全屏时屏幕最顶上那一条归 Safari，不放东西（TOP_SAFE）
+  // 屏幕上方「Claude 生成了某某文件」那一条（阶段 D2）也在顶上：它先摆，卡片和小条排在它下面。
+  // 手写回答正写到一半（S.qInk）时卡片不挪（挪了那一笔就断了），抬笔后再摆
   function placeQ() {
+    placeOfferBar();
     const box = $('#qcard'), bar = $('#qbar');
     if (box.hidden && bar.hidden) return;
+    if (S.qInk) { S.qPlaceLater = true; return; }
+    S.qPlaceLater = false;
     const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
     const w = Math.min(560, vw - 32), L = (vw - w) / 2, R = L + w;
     let top = TOP_SAFE + 8, bottom = vh - 12;
-    for (const sel of ['#chipRow', '#bar', '#verchip', '#trouble', '#tools']) {
+    for (const sel of ['#chipRow', '#bar', '#verchip', '#trouble', '#offerBar', '#tools']) {
       const e = $(sel);
       if (!e || e.hidden || !e.getClientRects().length) continue;
       const r = e.getBoundingClientRect();
       if (!r.width || !r.height) continue;
-      if (r.top < vh / 3) top = Math.max(top, r.bottom + 8);
+      // 新文件那一条刚出来时在做落下的动画（往上偏 14px）：按它停稳后的位置算
+      const rb = sel === '#offerBar' ? e.offsetTop + e.offsetHeight : r.bottom;
+      if (r.top < vh / 3) top = Math.max(top, rb + 8);
       else if (r.right > L && r.left < R) bottom = Math.min(bottom, r.top - 8);
     }
     box.style.top = bar.style.top = `${Math.round(top)}px`;
@@ -5026,6 +6928,7 @@
     if (pad.width !== w || pad.height !== h) { pad.width = w; pad.height = h; }
     drawPad();
   }
+  // 交给 Claude 的那张 PNG 照旧用原来的画法（发给 Claude 的图画法不变）；平板上显示用纸上同一种笔触（drawPad）
   function padStrokes(x, list) {
     x.strokeStyle = INK;
     x.fillStyle = INK;
@@ -5040,6 +6943,7 @@
       x.stroke();
     }
   }
+  const PAD_PEN_W = 2.6 / Brush.PEN.w;
   function drawPad() {
     const pad = $('#qcBody .qc-pad');
     if (!pad) return;
@@ -5047,7 +6951,9 @@
     x.setTransform(1, 0, 0, 1, 0, 0);
     x.clearRect(0, 0, pad.width, pad.height);
     x.setTransform(k, 0, 0, k, 0, 0);
-    padStrokes(x, S.qInk ? S.qPad.concat([S.qInk.pts]) : S.qPad);
+    // 坐标是这块纸上的屏幕像素：线主体约 2.6 像素，和原来一样粗
+    for (const p of S.qPad) Brush.draw(x, p, PAD_PEN_W, INK, true);
+    if (S.qInk) Brush.draw(x, S.qInk.pts, PAD_PEN_W, INK, false);
     updatePadBtns();
   }
   function updatePadBtns() {
@@ -5062,7 +6968,8 @@
     sizePads();
     try { pad.setPointerCapture(e.pointerId); } catch (err) { /* 有些浏览器不支持 */ }
     const r = pad.getBoundingClientRect();
-    S.qInk = { pid: e.pointerId, pts: [[r1(e.clientX - r.left), r1(e.clientY - r.top)]] };
+    // 点：[x, y, 轻重, 离落笔多少毫秒]（轻重、时刻只给平板上的笔触用：报轻重的笔照样分粗细，收笔的尖按抬笔前的快慢）
+    S.qInk = { pid: e.pointerId, ts0: e.timeStamp, pts: [[r1(e.clientX - r.left), r1(e.clientY - r.top), pressureOf(e), 0]] };
     drawPad();
   }
   function padMove(e) {
@@ -5070,7 +6977,8 @@
     if (!st || e.pointerId !== st.pid) return;
     const r = e.currentTarget.getBoundingClientRect(), evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
     for (const ev of evs.length ? evs : [e]) {
-      const p = [r1(ev.clientX - r.left), r1(ev.clientY - r.top)], last = st.pts[st.pts.length - 1];
+      const last = st.pts[st.pts.length - 1];
+      const p = [r1(ev.clientX - r.left), r1(ev.clientY - r.top), pressureOf(ev), Math.max(last[3], Math.round(ev.timeStamp - st.ts0))];
       if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= 0.5) st.pts.push(p);
     }
     drawPad();
@@ -5082,6 +6990,7 @@
     S.qInk = null;
     S.qPad.push(st.pts);
     drawPad();
+    if (S.qPlaceLater) placeQ(); // 写的时候顶上来了（或收起了）「新文件」那一条：这时再挪卡片
   }
   // 交手写回答：这块纸上的笔迹画成白底 PNG（两倍大）交上去
   function sendPad() {
@@ -5195,6 +7104,451 @@
     }
   }
 
+  // ------------------------------------------------------------ Claude 读到了什么（阶段 D2，《产品定义》第 3 节）
+  // Claude 每次回都交红笔那几组和这次回应到的那几组的读法（ink_reply 的 read，anchor 填组号）。组会随用户接着写而变，笔迹 id 不变：
+  // 平板落下时按那组的笔迹 id 记下这条读法属于哪几笔，page.reads 里一条是 { req, t, text, anchor, ids }。
+  // 没带 anchor 的（以前的都是）、anchor 对不上这一页笔迹的：照旧存着，不显示。
+  // 在「⋯」菜单里（全屏时在抽屉最下面）打开「Claude 读到了什么」后，每条读法用小号灰色印刷体写在它那几笔的下面（下面挤着别的字就放到上面、
+  // 再不行放右边），再点一次关掉；开关记在这台设备上。那几笔都擦掉了的不写；同一笔后来又交了新的读法，只写新的；读法跟着它那几笔走，
+  // 不跟着变了的组走（接着在旁边写的字不算进去）。小灰字画在批注层上：点不着，不挡写字、不挡点圈号；是 Claude 读到的原样，不翻译
+  const READ_FS = 18, READ_LH = 22, READ_GAP = 5; // 字号、行高、离那几笔多远（页面单位）
+  const READ_FAMILY = '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+
+  function readEntry(it, T) {
+    const r = { req: T.req, t: Date.now(), text: String(it.text || '') };
+    if (T.level) r.level = T.level;
+    if (it.anchor) r.anchor = String(it.anchor);
+    const ids = refIds(it, 'anchor', T); // 组编号（g3、g3:1）→ 那组的笔迹 id，只留这一页上有的
+    if (ids) r.ids = ids;
+    return r;
+  }
+
+  // 新读法落下时清掉用不着的旧读法（阶段 E；以前 page.reads 只增不减，用久了越来越长）：一条旧读法所指的笔迹，每一笔都已经在比它新的
+  // 读法（有字、带 ids 的）里，就清掉——readLabels 本来就「同一笔后来又交了读法，旧的不写」，这样的旧条目只是占地方。
+  // 只看笔迹 id，不看擦没擦：擦掉、撤销擦除、撤销写字之后该写哪条，还是 readLabels 照原来的办法挑。不带 ids 的（以前的、整页的）不动
+  function pruneReads(list) {
+    const covered = new Set(), keep = [];
+    for (let k = list.length - 1; k >= 0; k--) { // 从新到旧
+      const r = list[k], ids = r && Array.isArray(r.ids) && r.ids.length ? r.ids : null;
+      if (ids && ids.every((id) => covered.has(id))) continue;
+      keep.push(r);
+      if (ids && String(r.text || '').trim()) for (const id of ids) covered.add(id);
+    }
+    return keep.reverse();
+  }
+
+  const overlapArea = (a, b) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+
+  // 这一页要写出来的读法和位置（页面坐标）：[{ x, y, w, h, lines, k }]，k 是那条在 page.reads 里的序号
+  function readLabels(page) {
+    const reads = page && Array.isArray(page.reads) ? page.reads : [];
+    if (!reads.length) return [];
+    const byId = new Map(inkStrokes(page).map((s) => [s.id, s])), claimed = new Set(), picked = [];
+    for (let k = reads.length - 1; k >= 0; k--) { // 后来的在前：同一笔后来又交了读法，旧的不写
+      const r = reads[k];
+      if (!r || !Array.isArray(r.ids) || !r.ids.length || !String(r.text || '').trim()) continue;
+      const live = r.ids.map((id) => byId.get(id)).filter((s) => s && !s.erasedAt && s.pts.length);
+      if (!live.length || live.some((s) => claimed.has(s.id))) continue;
+      for (const s of live) claimed.add(s.id);
+      if (r.apart) continue; // 套索只挪了这组的一部分：字分在了两处，这条读法先不写（也不让更早的读法顶上来），见 splitReads
+      picked.push({ k, r, box: boxOf(live) });
+    }
+    if (!picked.length) return [];
+    // 让开没擦掉的笔迹和 Claude 画在纸上的东西（和 Claude 的批注找空白时让开的一样，见 roomObstacles），也让开先排好的小灰字
+    const obs = roomObstacles(page), placed = [], out = [];
+    measure.font = `${READ_FS}px ${READ_FAMILY}`;
+    for (const p of picked.sort((a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0])) {
+      const B = p.box, lines = wrapText(p.r.text.trim(), clamp(B[2] - B[0], 200, 560), READ_FS, READ_FAMILY);
+      measure.font = `${READ_FS}px ${READ_FAMILY}`;
+      const w = Math.ceil(Math.max(READ_FS, ...lines.map((l) => measure.measureText(l).width))) + 2, h = lines.length * READ_LH;
+      let best = null;
+      for (const [x, y] of [[B[0], B[3] + READ_GAP], [B[0], B[1] - READ_GAP - h], [B[2] + 12, B[3] - h]]) { // 正下方、正上方、右边
+        const b = [x, y, x + w, y + h], n = obs.concat(placed).reduce((m, o) => m + overlapArea(b, o), 0);
+        if (!best || n < best.n) best = { b, n };
+        if (!n) break;
+      }
+      placed.push(best.b);
+      out.push({ x: n1(best.b[0]), y: n1(best.b[1]), w, h, lines, k: p.k });
+    }
+    return out;
+  }
+
+  function paintReads(g, labels) {
+    for (const L of labels) {
+      const t = el('g', { class: 'read', 'data-k': L.k }, g);
+      L.lines.forEach((ln, i) => {
+        el('text', { x: f1(L.x), y: f1(L.y + i * READ_LH + (READ_LH - READ_FS) / 2 + READ_FS * 0.86), 'font-size': READ_FS }, t).textContent = ln;
+      });
+    }
+  }
+
+  // 当前页的小灰字（连续阅读时连同画出来的相邻页的）：只重画这几行，不动别的蓝字
+  function drawReads() {
+    const old = aiRoot.querySelector(':scope > g.reads');
+    if (old) old.remove();
+    if (S.readsOn && S.page && !S.replay) {
+      const labels = readLabels(S.page);
+      if (labels.length) paintReads(el('g', { class: 'reads' }, aiRoot), labels);
+    }
+    drawNeighborReads();
+  }
+
+  // 连续阅读：画出来的相邻页上的读法，也画在批注层上（往下挪 D），和相邻页上的圈号一样
+  function drawNeighborReads() {
+    const old = aiRoot.querySelector(':scope > g.nbr-reads');
+    if (old) old.remove();
+    if (!S.readsOn || !S.flow || !S.page || S.replay) return;
+    const strip = flowStrip();
+    if (!strip.length) return;
+    const g = el('g', { class: 'nbr-reads' }, aiRoot);
+    for (const n of strip) {
+      const labels = readLabels(n.ent.page);
+      if (labels.length) paintReads(el('g', { class: 'reads', transform: `translate(0 ${f1(n.D)})`, 'data-page': n.i }, g), labels);
+    }
+  }
+
+  // 开、关「Claude 读到了什么」（「⋯」菜单和抽屉最下面的两个勾选框是同一个开关）
+  function setReads(on) {
+    S.readsOn = Boolean(on);
+    store.set('reads', S.readsOn);
+    for (const id of ['#optReads', '#drReads']) $(id).checked = S.readsOn;
+    drawReads();
+    if (S.readsOn && S.page && !readLabels(S.page).length && !flowStrip().some((n) => readLabels(n.ent.page).length)) {
+      toast('这一页还没有 Claude 读过的字', 2600);
+    }
+  }
+
+  // ------------------------------------------------------------ 新手引导（阶段 D2，《产品定义》第 7 节第 5 条）
+  // 一屏标注：在真实的按钮旁各浮一个小标签（细线连到按钮），中间一张短说明（三种颜色、写完点「AI」、蓝字和圈号）；一屏看完，
+  // 点「知道了」或落第一笔就消失。第一次打开出一次（记在这台设备上：guideSeen），之后在「⋯」菜单和抽屉最下面能再看。
+  // 这一层不接点按（只有「知道了」接）：落笔照常写在纸上、点真实的按钮照常起作用，同时引导消失；搭在纸上的手指（手掌、手环）不算。
+  // 标签贴着当时真在屏幕上的按钮：全屏时是左上角那一排和右下角那一条（拖到哪儿跟到哪儿），退出全屏时是顶栏和左侧工具栏；
+  // 开着时每 0.4 秒量一次，按钮挪了、出来了、收起了就重排
+  const GUIDE_TEXT = { menu: '本子和页面', turn: '翻页', pair: '单页 / 连续', add: '加一页', more: '更多', grip: '按住拖动', bars: '显示工具栏',
+    full: '只留纸', pen: '黑笔', red: '红笔', eraser: '橡皮', lasso: '套索', undo: '撤销', check: '交给 Claude' };
+  const GUIDE_GAP = 10, GUIDE_ROW = 6, GUIDE_IN = 14; // 标签离按钮那一排多远、两排标签之间、标签从按钮中线往回伸进来多少
+
+  // 当时在屏幕上的几组按钮：side 是标签放在哪边（top：顶上那一排的下面；tools：右下角那一条的上面或下面；rail：左侧工具栏的右边）
+  function guideGroups() {
+    if (S.collapsed) return [
+      { side: 'top', panel: '#chipRow', items: [['menu', '#nbChip .chip-menu'], ['turn', '#chipPrev, #chipNext'], ['pair', '#chipPair'], ['add', '#chipAdd']] },
+      { side: 'tools', panel: '#tools', items: [['grip', '#toolsGrip'], ['bars', '#toolsBars'], ['pen', '#tools [data-tool=pen]'], ['red', '#tools [data-tool=red]'],
+        ['eraser', '#tools [data-tool=eraser]'], ['lasso', '#tools [data-tool=lasso]'], ['undo', '#toolsUndo'], ['check', '#check']] },
+    ];
+    return [
+      { side: 'rail', panel: '#rail', items: [['pen', '#rail [data-tool=pen]'], ['red', '#rail [data-tool=red]'], ['eraser', '#rail [data-tool=eraser]'],
+        ['lasso', '#rail [data-tool=lasso]'], ['undo', '#undo'], ['full', '#fsBtn']] },
+      { side: 'top', panel: '#bar', items: [['menu', '#drawerBtn'], ['turn', '#prev, #next'], ['pair', '#barPair'], ['add', '#barAdd'], ['check', '#barCheck'], ['more', '#menuBtn']] },
+    ];
+  }
+
+  // 这几个元素里看得见的那些在屏幕上合起来占的地方 [左, 上, 右, 下]；都看不见是 null
+  function shownRect(sel) {
+    let out = null;
+    for (const e of document.querySelectorAll(sel)) {
+      if (e.hidden || e.closest('[hidden]') || !e.getClientRects().length) continue;
+      const r = e.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      out = out ? unionBox(out, [r.left, r.top, r.right, r.bottom]) : [r.left, r.top, r.right, r.bottom];
+    }
+    return out;
+  }
+
+  // 一段线（x1, y1 → x2, y2）有没有穿过框 b（四周再缩进 m）：沿线取点看
+  function segHits(s, b, m = 2) {
+    for (let i = 1; i < 40; i++) {
+      const x = s[0] + ((s[2] - s[0]) * i) / 40, y = s[1] + ((s[3] - s[1]) * i) / 40;
+      if (x > b[0] + m && x < b[2] - m && y > b[1] + m && y < b[3] - m) return true;
+    }
+    return false;
+  }
+  const boxesMeet = (a, b, m = 0) => a[0] < b[2] + m && b[0] < a[2] + m && a[1] < b[3] + m && b[1] < a[3] + m;
+
+  function layoutGuide() {
+    const G = S.guide;
+    if (!G) return;
+    const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    const groups = guideGroups().map((gr) => ({ side: gr.side, pr: shownRect(gr.panel),
+      items: gr.items.map(([key, sel]) => ({ key, r: shownRect(sel) })).filter((x) => x.r) }));
+    const sig = JSON.stringify([vw, vh, S.collapsed, groups.map((gr) => gr.items.map((x) => [x.key, x.r.map(Math.round)]))]);
+    if (sig === G.sig) return; // 按钮都没挪：不重排
+    G.sig = sig;
+    const tags = $('#guideTags'), lines = $('#guideLines'), tr = (s) => (window.InkLang ? window.InkLang.t(s) : s);
+    tags.textContent = '';
+    lines.textContent = '';
+    lines.setAttribute('width', vw);
+    lines.setAttribute('height', vh);
+    const buttons = groups.flatMap((gr) => gr.items.map((x) => x.r)), panels = groups.map((gr) => gr.pr).filter(Boolean);
+    const placed = [], minY = S.collapsed ? TOP_SAFE : 6;
+    const tagOf = (key) => {
+      const t = document.createElement('div');
+      t.className = 'g-tag';
+      t.dataset.for = key;
+      t.textContent = tr(GUIDE_TEXT[key]);
+      tags.appendChild(t);
+      return t;
+    };
+    const put = (t, b, seg) => {
+      Object.assign(t.style, { left: `${Math.round(b[0])}px`, top: `${Math.round(b[1])}px` });
+      placed.push({ b, seg });
+      el('line', { x1: f1(seg[0]), y1: f1(seg[1]), x2: f1(seg[2]), y2: f1(seg[3]), 'data-for': t.dataset.for }, lines);
+      el('circle', { cx: f1(seg[0]), cy: f1(seg[1]), r: 2.5 }, lines);
+    };
+    // 一个标签能不能放在框 b、连线 seg：不出屏幕；不盖住按钮和那几排（条、栏）；不压别的标签；线不穿过别的标签和别的按钮，别的线也不穿过它
+    // （线离别的标签至少留 3px：贴着标签边擦过去，看着像连在那个标签上）
+    const fits = (b, seg, own) => b[0] >= 6 && b[2] <= vw - 6 && b[1] >= minY && b[3] <= vh - 6
+      && !buttons.concat(panels).some((o) => boxesMeet(b, o, 3))
+      && !placed.some((p) => boxesMeet(b, p.b, 4) || segHits(p.seg, b, -3) || segHits(seg, p.b, -3))
+      && !buttons.some((o) => o !== own && segHits(seg, o));
+    for (const gr of groups) {
+      if (gr.side === 'rail') { // 左侧工具栏：标签就在每个按钮的右边，同一高度
+        for (const x of gr.items) {
+          const t = tagOf(x.key), w = t.offsetWidth, h = t.offsetHeight, cy = (x.r[1] + x.r[3]) / 2, x0 = (gr.pr ? gr.pr[2] : x.r[2]) + GUIDE_GAP;
+          put(t, [x0, cy - h / 2, x0 + w, cy + h / 2], [x.r[2], cy, x0, cy]);
+        }
+        continue;
+      }
+      // 横着的一排：标签排在它下面（顶上那一排）或上面（右下角那一条，上面放不下就放下面），一排排往外排。
+      // 这一排在屏幕左半边，标签都从按钮中线往右伸、从右往左排；在右半边，都往左伸、从左往右排：
+      // 后排的标签伸向已经排好的那边，前面那些标签的边都在它的中线另一侧，它的连线竖着上去（下去）不会穿过它们，挤不下就上一排，排成两三排的锯齿。
+      // 每个标签：先试正好的位置，一排排往外；都不行再在「标签还横跨按钮中线」的范围里左右挪（线还是竖的）；还不行才挪远（线斜着）
+      const E0 = gr.pr || gr.items.reduce((a, x) => unionBox(a, x.r), gr.items[0].r);
+      const dir = gr.side === 'top' || E0[1] - minY < 130 ? 1 : -1, E = dir > 0 ? E0[3] : E0[1];
+      const mid = (x) => (x.r[0] + x.r[2]) / 2, toRight = (E0[0] + E0[2]) / 2 < vw / 2;
+      const order = gr.items.slice().sort((a, b) => (toRight ? mid(b) - mid(a) : mid(a) - mid(b)));
+      for (const x of order) {
+        const t = tagOf(x.key), w = t.offsetWidth, h = t.offsetHeight, cx = mid(x), ay = dir > 0 ? x.r[3] : x.r[1];
+        const base = toRight ? cx - GUIDE_IN : cx + GUIDE_IN - w;
+        let hit = null;
+        for (const pass of ['base', 'narrow', 'wide']) {
+          for (let row = 0; row < 9 && !hit; row++) {
+            const y0 = dir > 0 ? E + GUIDE_GAP + row * (h + GUIDE_ROW) : E - GUIDE_GAP - h - row * (h + GUIDE_ROW);
+            for (let k = 0, kmax = { base: 0, narrow: Math.ceil(w / 2) + 2, wide: 160 }[pass]; k <= kmax && !hit; k++) {
+              const s = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 4, x0 = base + s;
+              if (pass === 'narrow' && (cx < x0 + 8 || cx > x0 + w - 8)) continue;
+              const b = [x0, y0, x0 + w, y0 + h], seg = [cx, ay, clamp(cx, x0 + 8, x0 + w - 8), dir > 0 ? y0 : y0 + h];
+              if (fits(b, seg, x.r)) hit = { b, seg };
+            }
+          }
+          if (hit) break;
+        }
+        if (!hit) { // 实在放不下（屏幕太小、那一条拖到了角落里）：放在第一排、正对着按钮，宁可叠着也要有
+          const y0 = dir > 0 ? E + GUIDE_GAP : E - GUIDE_GAP - h, x0 = clamp(cx - w / 2, 6, vw - 6 - w);
+          hit = { b: [x0, y0, x0 + w, y0 + h], seg: [cx, ay, cx, dir > 0 ? y0 : y0 + h] };
+        }
+        put(t, hit.b, hit.seg);
+      }
+    }
+    // 中间那张说明：放在屏幕中间（退出全屏时是纸那一块的中间），压到标签、连线就往上或往下挪
+    const card = $('#guideCard'), w = card.offsetWidth, h = card.offsetHeight;
+    measureStage();
+    const top0 = S.collapsed ? TOP_SAFE : stageRect.top + 6, bottom0 = vh - 6, left = clamp(stageRect.left + (stageRect.width - w) / 2, 8, Math.max(8, vw - 8 - w));
+    const want = clamp((top0 + bottom0 - h) / 2, top0, Math.max(top0, bottom0 - h));
+    let top = want;
+    for (let k = 0; k <= 120; k++) {
+      const y = want + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 8, b = [left, y, left + w, y + h];
+      if (y < top0 || y + h > bottom0) continue;
+      if (!placed.some((p) => boxesMeet(b, p.b, 10) || segHits(p.seg, b, -6))) { top = y; break; }
+    }
+    Object.assign(card.style, { left: `${Math.round(left)}px`, top: `${Math.round(top)}px` });
+  }
+
+  function openGuide() {
+    hideMenu();
+    toggleDrawer(false);
+    closeCard();
+    $('#targetPick').hidden = true;
+    if (S.guide) return;
+    S.guide = { sig: null };
+    $('#guide').hidden = false;
+    layoutGuide();
+    S.guide.timer = setInterval(layoutGuide, 400);
+  }
+
+  // 收起引导（点了「知道了」、落了笔、点了别的按钮）：记下看过了，这台设备上以后不再自己出来
+  function closeGuide() {
+    if (!S.guide) return;
+    clearInterval(S.guide.timer);
+    S.guide = null;
+    $('#guide').hidden = true;
+    store.set('guideSeen', true);
+  }
+
+  // ------------------------------------------------------------ 新文件提示（阶段 D2，《产品定义》第 7 节第 5 条）
+  // 插件在对话每轮结束时把对话文件夹里新生成的文件报给电脑（/bridge/offer），电脑记在 data/offers.json，有新的就发 offers 事件（带文件名）。
+  // 平板上：屏幕上方出一条「Claude 生成了某某 [加入] [忽略]」，约 8 秒后自己收起；一次来了几个合成一条（「Claude 生成了某某 等 N 个文件」
+  // [在抽屉里看] [忽略这 N 个]），还开着时又来了也并进这一条、重新计时，不叠好几条。抽屉开着时不出这一条（抽屉最上面就是那一组）。
+  // 没处理的列在抽屉最上面的「新文件」一组（条数多时这一组限高、在里面滑，不把下面那两组开关挤下去），☰ 上带一个小圆点。
+  // 电脑说它是某本的原文件改过了（update）或像某本的新版本（replace）时，按钮写清做什么、去哪：「更新《某本》」「替换《某本》」「另加一本」。
+  // 加入：电脑把它导入成一本（图片、单页 PDF 也自己成一本），平板打开它；没成就说一句属实的话。这一条出现、收起都不碰纸上正在写的那一笔
+  // （那一笔在落笔时就把笔「抓」在纸上了，之后条出来、收起都只是挪别的东西；顶上的问话卡片里手写回答写到一半时卡片不挪，写完再挪）
+  const offerKey = (o) => `${o.id}@${o.mtime || 0}`; // 同一个文件又生成了一次（电脑那边还是那一条、时间变了）：算新来的
+
+  // 取一次待处理的新文件；fresh：这是插件刚报上来的（offers 事件带着文件名），没见过的那几个在屏幕上方出一条
+  async function loadOffers(fresh) {
+    let list;
+    try { list = await (await api('/api/offers')).json(); } catch (e) { return; }
+    if (!Array.isArray(list)) return;
+    list = list.filter((o) => o && o.id && o.name).sort((a, b) => (b.t || 0) - (a.t || 0));
+    const news = fresh ? list.filter((o) => !S.offerKeys.has(offerKey(o))) : [];
+    for (const o of list) S.offerKeys.add(offerKey(o));
+    S.offers = list;
+    renderOffers();
+    if (S.offerBar) { // 条上那几个里已经处理掉的（在抽屉里、在别的设备上）：拿掉，都没了就收起
+      const keep = S.offerBar.items.map((o) => list.find((x) => x.id === o.id)).filter(Boolean);
+      if (!keep.length) hideOfferBar();
+      else if (keep.length !== S.offerBar.items.length) { S.offerBar.items = keep; fillOfferBar(); }
+    }
+    if (news.length) showOfferBar(news);
+  }
+
+  // 一条新文件的几个做法：原文件改过了的只有「更新《那本》」；像某本新版本的「替换《那本》」或「另加一本」；别的「加入」
+  function offerActions(o) {
+    if (o.update) return [{ label: `更新《${o.update}》`, mode: 'update' }];
+    if (o.replace) return [{ label: `替换《${o.replace}》`, mode: 'replace' }, { label: '另加一本', mode: 'new' }];
+    return [{ label: '加入', mode: null }];
+  }
+
+  function offerButton(label, primary, fn, cls) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (primary) b.classList.add('primary');
+    if (cls) b.classList.add(cls);
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+    return b;
+  }
+  function textSpan(text, cls, keep) {
+    const s = document.createElement('span');
+    s.textContent = text;
+    if (cls) s.className = cls;
+    if (keep) s.setAttribute('data-lang-keep', ''); // 文件名、对话的文件夹名：不翻译
+    return s;
+  }
+
+  // 抽屉最上面的「新文件」一组和 ☰ 上的小圆点：没有待处理的就都不出
+  function renderOffers() {
+    const n = S.offers.length, list = $('#offerList');
+    for (const d of document.querySelectorAll('.new-dot')) d.hidden = !n;
+    $('#offerBox').hidden = !n;
+    list.textContent = '';
+    if (!n) return;
+    $('#offerHead').textContent = `新文件（${n}）`;
+    $('#offerAll').hidden = n < 2;
+    for (const o of S.offers) {
+      const row = document.createElement('div'), top = document.createElement('div'), meta = document.createElement('div'), acts = document.createElement('div');
+      row.className = 'of-item';
+      row.dataset.id = o.id;
+      top.className = 'of-top';
+      top.append(textSpan(FILE_ICON(String(o.ext || '')), 'of-ico'), textSpan(o.name, 'of-name', true));
+      top.lastChild.title = o.name;
+      meta.className = 'of-meta';
+      // 哪个对话生成的（对话所在的文件夹名，不翻译）：英文界面用英文的引号，不带中文的「」
+      const en = window.InkLang && window.InkLang.lang === 'en';
+      if (o.label) meta.append(textSpan('来自'), textSpan(en ? `“${o.label}”` : `「${o.label}」`, '', true));
+      if (o.t) meta.append(textSpan(whenText(o.t)));
+      acts.className = 'of-acts';
+      offerActions(o).forEach((a, k) => acts.appendChild(offerButton(a.label, k === 0, () => acceptOffer(o, a.mode))));
+      acts.appendChild(offerButton('忽略', false, () => dismissOffers([o.id]), 'of-no'));
+      row.append(top, meta, acts);
+      list.appendChild(row);
+    }
+  }
+
+  // 屏幕上方那一条：items 是这次新来的（并进还开着的那一条），重新计时 S.offerMs 后收起
+  function showOfferBar(items) {
+    if (!$('#drawer').hidden) return; // 抽屉开着：最上面就是「新文件」那一组，不另出一条
+    const had = S.offerBar ? S.offerBar.items : [];
+    if (S.offerBar) clearTimeout(S.offerBar.timer);
+    S.offerBar = { items: items.concat(had.filter((o) => !items.some((x) => x.id === o.id))) };
+    fillOfferBar();
+    $('#offerBar').hidden = false;
+    placeQ(); // 这一条排在顶上（左上角那一排、顶栏下面），问话卡片排在它下面
+    S.offerBar.timer = setTimeout(hideOfferBar, S.offerMs);
+  }
+
+  function fillOfferBar() {
+    const items = S.offerBar.items, o = items[0], n = items.length, text = $('#obText'), btns = $('#obBtns');
+    text.textContent = '';
+    btns.textContent = '';
+    text.append(textSpan('Claude 生成了', 'ob-lead'), textSpan(o.name, 'ob-name', true));
+    if (n > 1) text.append(textSpan(`等 ${n} 个文件`, 'ob-more'));
+    if (n === 1) {
+      const a = offerActions(o)[0];
+      btns.append(offerButton(a.label, true, () => acceptOffer(o, a.mode)), offerButton('忽略', false, () => { hideOfferBar(); dismissOffers([o.id]); }));
+    } else {
+      btns.append(offerButton('在抽屉里看', true, () => { hideOfferBar(); toggleDrawer(true); $('#offerList').scrollTop = 0; }),
+        offerButton(`忽略这 ${n} 个`, false, () => { const ids = items.map((x) => x.id); hideOfferBar(); dismissOffers(ids); }));
+    }
+  }
+
+  function hideOfferBar() {
+    if (S.offerBar) clearTimeout(S.offerBar.timer);
+    S.offerBar = null;
+    const bar = $('#offerBar');
+    if (bar.hidden) return;
+    bar.hidden = true;
+    placeQ(); // 问话卡片挪回顶上
+  }
+
+  // 这一条的上沿：左上角那一排（全屏）、顶栏（退出全屏）、右上角的提示条、出问题时那一句、挪到屏幕上部的右下角那一条，都让开；
+  // 问话卡片、小条排在它下面（placeQ）
+  function placeOfferBar() {
+    const bar = $('#offerBar');
+    if (bar.hidden) return;
+    const vh = document.documentElement.clientHeight;
+    let top = TOP_SAFE + 8;
+    for (const sel of ['#chipRow', '#bar', '#verchip', '#trouble', '#tools']) {
+      const e = $(sel);
+      if (!e || e.hidden || !e.getClientRects().length) continue;
+      const r = e.getBoundingClientRect();
+      if (r.width && r.height && r.top < vh / 3) top = Math.max(top, r.bottom + 8);
+    }
+    bar.style.top = `${Math.round(top)}px`;
+  }
+
+  // 抽屉里的书按名字（不带 .pdf）找它的 id
+  function bookIdOf(stem) {
+    const hit = (S.nbList || []).find((n) => n.id.startsWith('book:') && n.title === stem);
+    return hit ? hit.id : `book:${stem}.pdf`;
+  }
+
+  // 加入：mode 为 update（原地更新那本）、replace（替换那本）、new（另加一本），不给是加成一本。成了打开它（更新、替换的打开有改动的那一页）
+  async function acceptOffer(o, mode) {
+    if (S.offerBusy) return;
+    S.offerBusy = true;
+    if (S.offerBar && S.offerBar.items.some((x) => x.id === o.id)) hideOfferBar();
+    toast(`正在加入 ${o.name}…` + (needsConvert(o.name) ? '（要先转换，稍等）' : ''), 180000);
+    const target = mode === 'update' || mode === 'replace' ? bookIdOf(o[mode]) : null;
+    if (target) S.selfUpdate = target; // 电脑同时发来的「已更新」事件由这里处理，不重复打开
+    try {
+      await flushSave();
+      const res = await (await api('/api/offer-accept', { method: 'POST', body: JSON.stringify(Object.assign({ id: o.id }, mode ? { mode } : {})),
+        headers: { 'Content-Type': 'application/json' } })).json();
+      await loadNotebooks();
+      toggleDrawer(false);
+      await openNotebook(res.nb, res.page || 0);
+      toast(res.updated ? updateMessage(res.title, res.prev, res.summary) : `已加入《${res.title}》`, 4000);
+    } catch (e) {
+      if (target && S.selfUpdate === target) S.selfUpdate = null;
+      toast('没加成：' + e.message, 6000);
+    } finally {
+      S.offerBusy = false;
+      loadOffers(false);
+    }
+  }
+
+  // 忽略这几条（不再提示；文件之后又改了照样会再提示）
+  async function dismissOffers(ids, all) {
+    let bad = null;
+    for (const id of all ? [null] : ids) {
+      try {
+        await api('/api/offer-dismiss', { method: 'POST', body: JSON.stringify(all ? { all: true } : { id }), headers: { 'Content-Type': 'application/json' } });
+      } catch (e) { if (e.status !== 404) bad = e; } // 404：别处已经处理过了
+    }
+    if (bad) toast('没忽略成：' + bad.message, 4000);
+    await loadOffers(false);
+  }
+
   // ------------------------------------------------------------ 界面
 
   let toastTimer = null;
@@ -5224,6 +7578,7 @@
   }
 
   function setTool(t) {
+    if (t !== S.tool) lassoOff(); // 换工具：套索选中的取消
     S.tool = t;
     document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
   }
@@ -5238,12 +7593,17 @@
   function bindUI() {
     document.querySelectorAll('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
     $('#undo').addEventListener('click', undo);
+    $('#redo').addEventListener('click', redo);
     // 右下角一条、左上角的本子名、顶栏上的「AI」
     $('#toolsUndo').addEventListener('click', undo);
+    $('#toolsRedo').addEventListener('click', redo);
     $('#check').addEventListener('click', () => check());
     $('#barCheck').addEventListener('click', () => check());
     $('#chipPrev').addEventListener('click', (e) => { e.stopPropagation(); if (S.idx > 0) openPage(S.idx - 1); });
     $('#chipNext').addEventListener('click', (e) => { e.stopPropagation(); if (S.nb && S.idx < S.nb.pages - 1) openPage(S.idx + 1); });
+    // 别的页有新回答的记号（左上角、顶栏上各一个）：只有一页时翻过去，几页时出那张小单子
+    $('#chipNew').addEventListener('click', (e) => { e.stopPropagation(); gotoNewAns(); });
+    $('#barNew').addEventListener('click', gotoNewAns);
     // 连续 / 单页（每本记在电脑上）：抽屉里那组开关、左上角和顶栏上的一对图标是同一个状态；点哪个就是哪个，点已选中的不变
     const pickFlow = (e) => { const b = e.target.closest && e.target.closest('button[data-v]'); if (b && (b.dataset.v === 'flow') !== S.flow) toggleFlow(); };
     $('#chipPair').addEventListener('click', (e) => { e.stopPropagation(); pickFlow(e); });
@@ -5256,7 +7616,24 @@
     // 全屏和退出全屏各有自己的按钮（记在这台设备上）：全屏时在右下角那一条上点「退出全屏」，退出后在左侧工具栏最下面点「全屏」
     $('#toolsBars').addEventListener('click', exitFullscreen);
     $('#fsBtn').addEventListener('click', enterFullscreen);
-    $('#nbChip').addEventListener('click', (e) => { e.stopPropagation(); toggleDrawer(); });
+    // 左上角「☰ 本子名 页码」：点 ☰ 和本子名开抽屉；点页码那几个字（2026-11-16 夜起）出输入页码的小框（只有一页时没有页码）
+    $('#nbChip').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (S.nb && S.nb.pages > 1 && onChipPage(e)) openPageJump();
+      else toggleDrawer();
+    });
+    // 顶栏上 ‹ › 中间的页码：出输入页码的小框；框里「去」、回车翻过去，Esc 收起；「回到第 N 页」
+    $('#pageNo').addEventListener('click', (e) => { e.stopPropagation(); openPageJump(); });
+    $('#pjGo').addEventListener('click', goPageJump);
+    $('#pjInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); goPageJump(); } else if (e.key === 'Escape') closePageJump();
+    });
+    $('#pjInput').addEventListener('input', (e) => { // 只收数字（键盘上打了别的字就去掉）
+      const v = e.target.value.replace(/[^0-9]/g, '');
+      if (v !== e.target.value) e.target.value = v;
+      $('#pjErr').hidden = true;
+    });
+    $('#pjBack').addEventListener('click', () => { const i = jumpBackIndex(); closePageJump(); if (i >= 0) jumpTo(i); });
     $('#actTarget').addEventListener('click', (e) => { e.stopPropagation(); openTargetPick(); });
     $('#targetPickCancel').addEventListener('click', () => { $('#targetPick').hidden = true; });
     $('#prev').addEventListener('click', () => S.idx > 0 && openPage(S.idx - 1));
@@ -5294,6 +7671,34 @@
     };
     opt('#optAi', 'aiv', 'aiVisible', renderAI);
     opt('#optFinger', 'finger', 'fingerDraw');
+    // 「Claude 读到了什么」：「⋯」菜单里一个勾选框，抽屉最下面一个（全屏时没有「⋯」），同一个开关
+    for (const id of ['#optReads', '#drReads']) {
+      $(id).checked = S.readsOn;
+      $(id).addEventListener('change', (e) => setReads(e.target.checked));
+    }
+    // 「画线停住变直」：和上面一样，「⋯」菜单里一个、抽屉最下面一个，同一个开关，记在这台设备上（默认开）；关了就完全是原来的写法。
+    // 2026-11-16 夜起先藏着：STRAIGHT_SHOWN 是 false 时两个开关都不在页面上，功能关着（showStraight、straightActive）
+    showStraight(STRAIGHT_SHOWN);
+    for (const id of ['#optStraight', '#drStraight']) {
+      $(id).checked = S.straightOn;
+      $(id).addEventListener('change', (e) => {
+        S.straightOn = e.target.checked;
+        store.set('straight', S.straightOn);
+        for (const j of ['#optStraight', '#drStraight']) $(j).checked = S.straightOn;
+      });
+    }
+    // 新手引导：「⋯」菜单里、抽屉最下面都能再看；「知道了」收起
+    $('#actGuide').addEventListener('click', () => openGuide());
+    $('#actGuide2').addEventListener('click', () => openGuide());
+    $('#guideOk').addEventListener('click', closeGuide);
+    // 引导开着时：落笔、点任何真实的按钮，引导都收起，那一下照常起作用（这里不拦）；搭在纸上的手指（挪纸、手掌、手环）不算
+    document.addEventListener('pointerdown', (e) => {
+      if (!S.guide || $('#guideOk').contains(e.target)) return;
+      if (stage.contains(e.target) && e.pointerType === 'touch' && !S.fingerDraw) return;
+      closeGuide();
+    }, true);
+    // 抽屉最上面「新文件」一组的「全部忽略」
+    $('#offerAll').addEventListener('click', (e) => { e.stopPropagation(); hideOfferBar(); dismissOffers([], true); });
     // 顶上的卡片：「稍后」缩成顶上一小条，点小条再展开
     $('#qcLater').addEventListener('click', minQ);
     $('#qbar').addEventListener('click', expandQ);
@@ -5314,13 +7719,24 @@
     });
     $('#actReplay').addEventListener('click', () => { hideMenu(); replay(); });
     $('#actFit').addEventListener('click', () => { hideMenu(); fit(S.fitMode === 'width' ? 'page' : 'width'); });
+    // 清除本页 Claude 批注：和橡皮擦蓝字同一个做法——每条记下 erasedAt、当作划掉，数据留着；整页一起记成撤销里的一步（t: 'erase'），
+    // 撤销一次整页原样回来（看过没看过、采纳、✓ × 这些都没动过）。擦掉的圈号照旧占着号，之后再来的回答接着往下编
     $('#actClearAi').addEventListener('click', () => {
       hideMenu();
-      if (!S.page || !S.page.ai.length) return;
+      const list = S.page ? S.page.ai.filter((a) => !a.erasedAt) : [];
+      if (!list.length) return;
       if (!confirm('清除本页所有 Claude 批注？（笔迹不受影响）')) return;
-      S.page.ai = [];
+      closeCard();
+      const now = Date.now(), rec = { t: 'erase', ids: [], ai: [] };
+      for (const a of list) {
+        rec.ai.push({ id: a.id, dismissed: Boolean(a.dismissed) });
+        a.erasedAt = now;
+        a.dismissed = true;
+      }
+      pushUndo(rec);
       renderAI();
       markDirty();
+      toast('已清除本页 Claude 批注（点撤销能找回）', 3000);
     });
     $('#actUpload').addEventListener('click', openImport);
     $('#isUpload').addEventListener('click', () => { $('#importSheet').hidden = true; $('#pdfFile').click(); });
@@ -5348,14 +7764,28 @@
     cardEl.addEventListener('pointermove', cardMove);
     for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) cardEl.addEventListener(t, cardUp);
     cardEl.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, { passive: false }); // 滑卡片由 cardMove 做，不让系统再滑页面
+    // 卡片顶上的「上一条」「下一条」：笔、手指、鼠标点都行。手掌、手环碰到不算（和卡片外不收卡片同几条）：接触面大的触点、
+    // 笔刚用过一秒内落下的手指、笔正在卡片上写或擦时落下的手指；系统取消的触摸本来就没有 click
+    for (const [id, d] of [['#acPrev', -1], ['#acNext', 1]]) {
+      const b = $(id);
+      b.addEventListener('pointerdown', (e) => { b._palm = e.pointerType === 'touch' && (bigTouch(e) || penJustUsed() || Boolean(S.cardInk || S.cardErase)); });
+      b.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch' && bigTouch(e)) b._palm = true; });
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const palm = b._palm;
+        b._palm = false;
+        if (!palm) stepCard(d);
+      });
+    }
     document.addEventListener('pointerdown', (e) => {
       // 长回答的卡片开着，这一下落在卡片外：笔（电脑上是鼠标）落下就收起，那一笔照常写在纸上。
-      // 手指落在纸上不马上收：轻点（touchUp）或挪纸、缩放（touchMove）时才收——搭在纸上不动的手掌、手环不收（用户写字的手上戴手环）。
-      // 笔刚用过、笔正在卡片上写时落下的手指是手掌，哪里都不收。点工具条（换笔、橡皮、撤销、AI）不收：换了红笔、橡皮接着在卡片上用
+      // 手指落在纸上不马上收：干净的一下轻点（touchUp）或明确地挪纸、缩放（touchMove 里的 firmMove）时才收——搭在纸上的手掌、手环
+      // （常被认成两三个点、会晃一点、接触面大）不收（用户写字的手上戴手环）。笔刚用过、笔正在卡片上写
+      // 时落下的手指是手掌，哪里都不收。点工具条（换笔、橡皮、撤销、AI）不收：换了红笔、橡皮接着在卡片上用
       if (S.card && !cardEl.contains(e.target) && !$('#tools').contains(e.target) && !$('#rail').contains(e.target)) {
         const finger = e.pointerType === 'touch' && !S.fingerDraw;
         if (!finger) closeCard();
-        else if (!stage.contains(e.target) && !penJustUsed() && !S.cardInk && !S.cardErase) closeCard();
+        else if (!stage.contains(e.target) && !penJustUsed() && !bigTouch(e) && !S.cardInk && !S.cardErase) closeCard();
       }
       // 顶上的卡片展开着，笔（电脑上是鼠标；「手指也能书写」时也算手指）落在纸上：卡片缩成顶上一小条，这一笔照常写上。
       // 挪纸的手指、搭着的手掌和手环不算
@@ -5366,22 +7796,39 @@
       }
       if (!$('#menu').contains(e.target) && e.target !== $('#menuBtn')) hideMenu();
       if (!$('#targetPick').hidden && !$('#targetPick').contains(e.target)) $('#targetPick').hidden = true;
+      // 输入页码的小框：点框外面收起（点的是页码时由它自己开、关）
+      if (!$('#pageJump').hidden && !$('#pageJump').contains(e.target) && !(e.target.closest && e.target.closest('#pageNo')) && !onChipPage(e)) closePageJump();
+      // 「几页有新回答」的小单子：点外面收起（点的是那个记号时由它自己开、关）
+      if (!$('#newAnsList').hidden && !$('#newAnsList').contains(e.target) && !(e.target.closest && e.target.closest('#chipNew, #barNew'))) closeNewAnsList();
       if (!$('#folderPick').hidden && !$('#folderPick').contains(e.target)) closeFolderPick();
-      // 点纸面（或别处）收起抽屉（从抽屉里点开的小列表、起名字的卡片不算别处）
+      // 一本的「⋯」菜单：点菜单外面收起（点的是某个「⋯」时由它自己开、关）
+      if (!$('#nbMenu').hidden && !$('#nbMenu').contains(e.target) && !(e.target.closest && e.target.closest('.nb-more'))) closeNbMenu();
+      // 点纸面（或别处）收起抽屉（从抽屉里点开的小列表、菜单、起名字的卡片不算别处；屏幕上方提示里的按钮也不算——
+      // 在抽屉里拖完点「撤销」，抽屉还开着）
       if (!$('#drawer').hidden && !$('#drawer').contains(e.target)
         && e.target !== $('#drawerBtn') && e.target !== $('#nbTitle') && !$('#nbChip').contains(e.target)
-        && !$('#targetPick').contains(e.target) && !$('#folderPick').contains(e.target) && !$('#nameAsk').contains(e.target)) toggleDrawer(false);
+        && !$('#targetPick').contains(e.target) && !$('#folderPick').contains(e.target) && !$('#nbMenu').contains(e.target)
+        && !$('#nameAsk').contains(e.target) && !$('#toast').contains(e.target)) toggleDrawer(false);
     });
     document.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); } else if (e.key === 'p') setTool('pen');
+      // Ctrl+Z 撤销；Ctrl+Shift+Z、Ctrl+Y 重做（Mac 上 Cmd 一样）
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); redo(); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); } else if (e.key === 'p') setTool('pen');
       else if (e.key === 'r') setTool('red');
       else if (e.key === 'e') setTool('eraser');
+      else if (e.key === 'l') setTool('lasso');
       else if (e.key === 'Enter') check();
+      else if (e.key === 'Escape' && S.guide) closeGuide();
+      else if (e.key === 'Escape' && !$('#pageJump').hidden) closePageJump();
+      else if (e.key === 'Escape' && !$('#newAnsList').hidden) closeNewAnsList();
       else if (e.key === 'Escape' && S.card) closeCard();
+      else if (e.key === 'Escape' && S.sel) lassoOff(); // 套索选中的取消
       else if (e.key === 'Escape' && !$('#drawer').hidden) toggleDrawer(false);
     });
-    window.addEventListener('resize', () => { closeCard(); resize(); }); // 转动 iPad、窗口变化：卡片收起，重新量、重新摆
+    window.addEventListener('resize', () => { closeCard(); resize(); if (S.guide) { S.guide.sig = null; layoutGuide(); } }); // 转动 iPad、窗口变化：卡片收起，重新量、重新摆（引导的标签也重排）
+    // 输入页码的小框、「几页有新回答」的单子开着时转动 iPad：不收起（输入框里可能已经打了字），跟着页码、记号挪到它们新的位置下面
+    window.addEventListener('resize', () => { if (!$('#pageJump').hidden) placePageJump(); if (!$('#newAnsList').hidden) placeNewAnsList(); });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') { resetInput(); flushSave(); return; }
       processPending();
@@ -5432,11 +7879,14 @@
     eventsLoop();
     setInterval(() => { if (S.saveTryAt) updateStatus(); }, 3000); // 有字一直没存上时，过几秒把提示亮出来（见 troubleText）
     loadCards();
+    loadOffers(false); // 以前就有、还没处理的新文件：只进抽屉那一组、☰ 上带小圆点，不在屏幕上方出那一条
+    if (!store.get('guideSeen', false)) openGuide(); // 这台设备上第一次打开：新手引导
   }
 
   // 方便自动化测试
   window.__ink = { S, check, send, sendAll, computeGroups, openPage, openNotebook, replay, processPending, loadCards, tapAiItem, inkStrokes, flowStrip, toggleFlow, setVerdict, undo, renderAI,
-    openCard, closeCard, neighborOnScreen, loadNotebooks, cardItem };
+    openCard, closeCard, neighborOnScreen, loadNotebooks, cardItem, isDot, noteTextBox, roomObstacles, writeOnZones,
+    readLabels, setReads, openGuide, closeGuide, loadOffers, showStraight };
 
   init();
 })();

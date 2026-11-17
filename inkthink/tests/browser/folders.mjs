@@ -1,7 +1,7 @@
-// 抽屉里的本子分文件夹（《产品定义》第 2 节，2026-11-14 用户定）：只有一层；底下「＋ 新建文件夹…」；每本右边一个文件夹图标，
-// 点开的小列表能放进哪个文件夹、移出文件夹（在文件夹里时才有）、新建文件夹…；文件夹一行点一下折叠 / 展开，写着里面几本，
+// 抽屉里的本子分文件夹（《产品定义》第 2 节，2026-11-14 用户定）：只有一层；底下「＋ 新建文件夹…」；每本右边的「⋯」菜单里有「放进文件夹…」
+// （2026-11-16 起原来那个文件夹图标收进了「⋯」），点开的小列表能放进哪个文件夹、移出文件夹（在文件夹里时才有）、新建文件夹…；文件夹一行点一下折叠 / 展开，写着里面几本，
 // 折叠状态记在这台设备上（刷新后还记得）；文件夹能改名、能删（删前问一句，里面的本子回到外面，本子本身不动）；
-// 草稿本和「Claude 推送」没有文件夹图标；当前打开的本子在折叠着的文件夹里时那个文件夹自动展开；新建的本子在文件夹外面；
+// 草稿本和「Claude 推送」没有「⋯」（不进文件夹）；当前打开的本子在折叠着的文件夹里时那个文件夹自动展开；新建的本子在文件夹外面；
 // 电脑上的 notebooks/folders.json 记的和抽屉里看到的一样；删掉一本、文件里有已经不在的本子，文件夹照常显示。
 // 截图存在 <临时目录>/folders/out/ 下。
 // 跑法：node tests/browser/folders.mjs [临时目录]；有一项不对退出码 1。
@@ -16,7 +16,7 @@ mkdirSync(SRC, { recursive: true });
 // 准备：三个自己建的本子、一本导入的书、Claude 推过来的一页（「Claude 推送」那本）
 const mk = async (title) => (await T.apiJson('/api/notebook/new', { method: 'POST', body: JSON.stringify({ title }) })).id;
 const P1 = await mk('随笔'), P2 = await mk('想法'), P3 = await mk('读书笔记');
-execFileSync(PY, ['-c', `import fitz,sys
+execFileSync(PY, ['-c', `import pymupdf as fitz,sys
 doc=fitz.open(); p=doc.new_page(width=960,height=540); p.insert_text((60,120),"slide",fontsize=28); doc.save(sys.argv[1])
 pix=fitz.Pixmap(fitz.csRGB, fitz.IRect(0,0,200,120), 0); pix.set_rect(pix.irect,(200,220,255)); pix.save(sys.argv[2])`, join(SRC, '例会_v47.pdf'), join(SRC, 'fig.png')]);
 await T.post('/bridge/import', { sid: 'S1', path: join(SRC, '例会_v47.pdf') });
@@ -33,10 +33,10 @@ async function tap(sel, wait = 600) {
   await T.tap(sel, wait);
 }
 const drawer = async (open) => { if ((await T.visible('#drawer')) !== open) await tap('#nbChip', 500); };
-// 抽屉里的列表从上到下：文件夹一行写「[名字 几本 折/开]」，本子一行写「名字」（在文件夹里的前面带「· 」），还有它有没有文件夹图标
+// 抽屉里的列表从上到下：文件夹一行写「[名字 几本 折/开]」，本子一行写「名字」（在文件夹里的前面带「· 」），还有它右边有没有「⋯」
 const list = () => js(`[...document.querySelectorAll('#nbList > *')].map((r) => r.classList.contains('nf-item')
   ? { f: r.querySelector('.nf-name').textContent, n: r.querySelector('.nf-count').textContent, open: r.getAttribute('aria-expanded') === 'true', mark: r.querySelector('.nf-mark').textContent, fid: r.dataset.fid }
-  : { nb: r.dataset.nb, name: r.querySelector('.nb-name').textContent, nested: r.classList.contains('nested'), folderIcon: Boolean(r.querySelector('[data-icon=folder]')),
+  : { nb: r.dataset.nb, name: r.querySelector('.nb-name').textContent, nested: r.classList.contains('nested'), more: Boolean(r.querySelector('.nb-more')),
       cur: r.classList.contains('cur') })`);
 const short = (L) => L.map((r) => (r.f !== undefined ? `[${r.f} ${r.n} ${r.open ? '开' : '折'}]` : (r.nested ? '· ' : '') + r.name));
 const saved = () => (existsSync(FILE) ? JSON.parse(readFileSync(FILE, 'utf8')) : null);
@@ -44,6 +44,11 @@ const fidOf = (name) => ((saved() || { folders: [] }).folders.find((f) => f.name
 const rowSel = (nb) => `#nbList .nb-item[data-nb=${JSON.stringify(nb)}]`;
 const folderSel = (fid) => `#nbList .nf-item[data-fid=${JSON.stringify(fid)}]`;
 const pickItems = () => js(`[...document.querySelectorAll('#folderPickList > *')].map((e) => ({ id: e.id, fid: e.dataset.fid || '', text: e.textContent, on: e.classList.contains('on') }))`);
+// 一本的「⋯」→ 菜单里的某一项（folder 放进文件夹…、rename 改名…、delete 删除这本…）
+async function menuOf(nb, act, wait = 500) {
+  await tap(rowSel(nb) + ' .nb-more', 300);
+  await tap(`#nbMenu [data-act=${act}]`, wait);
+}
 // 起名字的卡片：点名字那一格、全选删掉、打字、点「好」
 async function typeName(name) {
   await T.waitFor(`!document.querySelector('#nameAsk').hidden`);
@@ -68,15 +73,16 @@ async function sameAsFile() {
   return { ok, ui, file };
 }
 
-// 1. 打开抽屉：草稿本、Claude 推送在最上面，没有文件夹图标；自己的本子和书有（和改名、删除一排）
+// 1. 打开抽屉：草稿本、Claude 推送在最上面，没有「⋯」；自己的本子和书有，「⋯」菜单里第一项是「放进文件夹…」
 await drawer(true);
 let L = await list();
 T.ok('还没有文件夹：草稿本、Claude 推送在最上面，下面是自己的本子和书', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '随笔', '想法', '读书笔记', '例会_v47']), short(L));
-T.ok('草稿本和「Claude 推送」没有文件夹图标，别的本子都有', L.filter((r) => r.nb === 'scratch' || r.nb === 'board').every((r) => !r.folderIcon)
-  && L.filter((r) => r.nb !== 'scratch' && r.nb !== 'board').every((r) => r.folderIcon), L);
-const icon = await js(`(() => { const b = document.querySelector(${JSON.stringify(rowSel(P1) + ' [data-icon=folder]')}), row = b.parentElement;
-  return { label: b.getAttribute('aria-label'), svg: Boolean(b.querySelector('svg')), sameRow: [...row.children].map((x) => x.dataset.icon).join(), w: b.getBoundingClientRect().width }; })()`);
-T.ok('文件夹图标和改名、删除在同一排，是图标，长按有说明', icon.svg && icon.sameRow === 'folder,edit,trash' && icon.label.startsWith('文件夹：') && icon.w >= 28, icon);
+T.ok('草稿本和「Claude 推送」没有「⋯」，别的本子都有', L.filter((r) => r.nb === 'scratch' || r.nb === 'board').every((r) => !r.more)
+  && L.filter((r) => r.nb !== 'scratch' && r.nb !== 'board').every((r) => r.more), L);
+await tap(rowSel(P1) + ' .nb-more', 300);
+const menu1 = await js(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act + ':' + b.textContent)`);
+T.ok('「⋯」点开的菜单：放进文件夹…、改名…、删除这本…', JSON.stringify(menu1) === JSON.stringify(['folder:放进文件夹…', 'rename:改名…', 'delete:删除这本…']), menu1);
+await tap(rowSel(P1) + ' .nb-more', 300); // 再点一下收起
 T.ok('抽屉底部「＋ 新建本子…」旁边是「＋ 新建文件夹…」（文字按钮）', (await T.text('#actNewFolder')) === '＋ 新建文件夹…'
   && (await js(`document.querySelector('#actNewFolder').parentElement === document.querySelector('#actNewNb').parentElement`)));
 // 电脑上本子的数据（除了 folders.json）的指纹：文件夹的操作前后一样，才算没动本子
@@ -96,22 +102,22 @@ L = await list();
 T.ok('建好了：抽屉里多了「课题」文件夹（空的、开着），电脑上记下了', Boolean(F1) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 0 本 开]', '随笔', '想法', '读书笔记', '例会_v47'])
   && (await T.visible('#drawer')), short(L));
 
-// 3. 点「随笔」旁边的文件夹图标：小列表里有「课题」、没有「移出文件夹」、有「新建文件夹…」；点「课题」放进去
-await tap(rowSel(P1) + ' [data-icon=folder]', 500);
+// 3. 「随笔」的「⋯」→「放进文件夹…」：小列表里有「课题」、没有「移出文件夹」、有「新建文件夹…」；点「课题」放进去
+await menuOf(P1, 'folder');
 let pk = await pickItems();
-const near = await js(`(() => { const p = document.querySelector('#folderPick').getBoundingClientRect(), b = document.querySelector(${JSON.stringify(rowSel(P1) + ' [data-icon=folder]')}).getBoundingClientRect();
+const near = await js(`(() => { const p = document.querySelector('#folderPick').getBoundingClientRect(), b = document.querySelector(${JSON.stringify(rowSel(P1) + ' .nb-more')}).getBoundingClientRect();
   return { gap: Math.round(p.top - b.bottom), inScreen: p.left >= 0 && p.right <= innerWidth && p.bottom <= innerHeight, aboveDrawer: Number(getComputedStyle(document.querySelector('#folderPick')).zIndex) > Number(getComputedStyle(document.querySelector('#drawer')).zIndex) }; })()`);
-T.ok('点文件夹图标：紧挨着它弹出小列表——「课题」、分隔线、「新建文件夹…」（不在文件夹里，没有「移出文件夹」）', (await T.visible('#folderPick'))
-  && pk.map((r) => r.fid ? r.text : r.id || r.text).join('|') === `课题||fpNew` && !pk.some((r) => r.on), pk);
-T.ok('小列表紧挨着图标、整个在屏幕里、在抽屉上面', near.gap >= 0 && near.gap <= 8 && near.inScreen && near.aboveDrawer, near);
+T.ok('点「放进文件夹…」：紧挨着「⋯」弹出小列表——「课题」、分隔线、「新建文件夹…」（不在文件夹里，没有「移出文件夹」）；菜单收起', (await T.visible('#folderPick'))
+  && !(await T.visible('#nbMenu')) && pk.map((r) => r.fid ? r.text : r.id || r.text).join('|') === `课题||fpNew` && !pk.some((r) => r.on), pk);
+T.ok('小列表紧挨着「⋯」、整个在屏幕里、在抽屉上面', near.gap >= 0 && near.gap <= 8 && near.inScreen && near.aboveDrawer, near);
 await tap('#folderPickList [data-fid]');
 L = await list();
 T.ok('放进去了：「随笔」缩进列在「课题」下面，「课题」写着 1 本；小列表收起，抽屉还开着', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 1 本 开]', '· 随笔', '想法', '读书笔记', '例会_v47'])
   && !(await T.visible('#folderPick')) && (await T.visible('#drawer')), short(L));
 T.ok('电脑上记的：课题里是随笔', JSON.stringify(saved().folders.map((f) => [f.name, f.items])) === JSON.stringify([['课题', [P1]]]), saved());
 
-// 4. 「想法」的文件夹图标 →「新建文件夹…」：起个名字，新建的文件夹里就是它
-await tap(rowSel(P2) + ' [data-icon=folder]', 500);
+// 4. 「想法」的「⋯」→「放进文件夹…」→「新建文件夹…」：起个名字，新建的文件夹里就是它
+await menuOf(P2, 'folder');
 await tap('#fpNew', 500);
 await typeName('旧的');
 const F2 = fidOf('旧的');
@@ -119,7 +125,7 @@ L = await list();
 T.ok('从小列表里新建文件夹「旧的」，「想法」直接放进去', Boolean(F2) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 1 本 开]', '· 随笔', '[旧的 1 本 开]', '· 想法', '读书笔记', '例会_v47']), short(L));
 
 // 5. 在文件夹里的「随笔」：小列表里「课题」打 ✓，有「移出文件夹」；移出后回到外面
-await tap(rowSel(P1) + ' [data-icon=folder]', 500);
+await menuOf(P1, 'folder');
 pk = await pickItems();
 T.ok('在文件夹里的本子：小列表里它在的「课题」打 ✓，多了「移出文件夹」', pk.find((r) => r.fid === F1).on && pk.find((r) => r.fid === F1).text.endsWith('✓')
   && !pk.find((r) => r.fid === F2).on && pk.some((r) => r.id === 'fpOut' && r.text === '移出文件夹'), pk);
@@ -129,7 +135,7 @@ L = await list();
 T.ok('移出文件夹：「随笔」回到外面，「课题」变成 0 本', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 0 本 开]', '[旧的 1 本 开]', '· 想法', '随笔', '读书笔记', '例会_v47']), short(L));
 // 再把「随笔」和书放进「课题」（书换过来的：从小列表里点）
 for (const nb of [P1, BOOK]) {
-  await tap(rowSel(nb) + ' [data-icon=folder]', 500);
+  await menuOf(nb, 'folder');
   await tap(`#folderPickList [data-fid=${JSON.stringify(F1)}]`);
 }
 L = await list();
@@ -202,7 +208,7 @@ T.ok('草稿本放不进文件夹（服务也拦）', no.status === 400, no.stat
 
 // 11. 删掉文件夹里的一本：文件夹照常显示，少了它；文件里有已经不在的本子：照常显示、不报错
 await answer('confirm', true);
-await tap(rowSel(BOOK) + ' [data-icon=trash]', 1500);
+await menuOf(BOOK, 'delete', 1500);
 await drawer(true);
 L = await list();
 T.ok('删掉文件夹里的书：「课题二」照常显示，写着 1 本，里面只剩「随笔」', JSON.stringify(short(L).slice(0, 4)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题二 1 本 开]', '· 随笔']), short(L));

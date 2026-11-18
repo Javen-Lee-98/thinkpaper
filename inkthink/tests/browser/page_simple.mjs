@@ -21,7 +21,7 @@ async function gotoPage(i) {
 T.ok('只有这一套页面：没有区分新旧界面的标记', await js(`!document.body.classList.contains('simple') && !('SIMPLE' in window.__ink) && document.querySelectorAll('.full-only, .simple-only').length === 0`));
 T.ok('没有顶栏、左侧工具栏、全屏浮动条', !(await T.visible('#bar')) && !(await T.visible('#rail')) && !(await T.visible('#floatbar')));
 const btns = await js(`[...document.querySelectorAll('#tools button')].map((b) => b.dataset.tool || b.id).join(',')`);
-T.ok('右下角一条：退出全屏、黑笔、红笔、橡皮、套索、撤销、重做、AI', (await T.visible('#tools')) && btns === 'toolsBars,pen,red,eraser,lasso,toolsUndo,toolsRedo,check', btns);
+T.ok('右下角一条：退出全屏、黑笔、红笔、橡皮、套索、撤销、重做、回答要多长（2026-11-17）、AI', (await T.visible('#tools')) && btns === 'toolsBars,pen,red,eraser,lasso,toolsUndo,toolsRedo,sizeBtn,check', btns);
 const nb0 = await js(`({ title: window.__ink.S.nb.title, pages: window.__ink.S.nb.pages, idx: window.__ink.S.idx })`);
 T.ok('左上角是本子名和页码', (await T.visible('#nbChip')) && (await T.text('#chipName')) === nb0.title && nb0.pages === 3
   && (await T.text('#chipPage')) === `${nb0.idx + 1}/${nb0.pages}`, [nb0, await T.text('#chipName'), await T.text('#chipPage')]);

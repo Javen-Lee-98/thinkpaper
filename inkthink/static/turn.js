@@ -94,6 +94,8 @@
     const margin = [], lay0 = new Map();
     for (const a of page.ai) {
       if (a.type === 'write') {
+        // 摊在纸上的长回答（2026-11-17）：转页后那一段和所答笔迹的相对位置对不上了，收回圈号（用户能在卡片上再点「摊在纸上」）
+        if (a.spread) delete a.spread;
         if (Array.isArray(a.at) && a.at.length === 2) {
           a.at = apply(m, a.at[0], a.at[1]).map(r1);
           if (!a.erasedAt) grow([a.at[0] - BADGE_R, a.at[1] - BADGE_R, a.at[0] + BADGE_R, a.at[1] + BADGE_R]);

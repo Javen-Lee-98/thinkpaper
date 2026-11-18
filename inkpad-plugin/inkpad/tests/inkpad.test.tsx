@@ -19,6 +19,7 @@ type World = {
   askReply: Record<string, unknown> // ask-wait 答了时回什么
   tabletUp: boolean // 平板开着草稿纸（/bridge/ask 不在线时回 offline）
   local?: boolean // 平板上开着的是「只在本地」的本子：状态里不带名字，带 targetLocal
+  unset?: boolean // 平板上开着的那本还没选过对话、连着不止一个对话：状态里带 targetUnset
   edited: number // 「覆盖还是另存」卡片：还要等几次（edit-wait 回 pending）才选；Infinity 是一直不选
   editReply: Record<string, unknown> // edit-wait 选了时回什么
   editFail: string // /bridge/edit 出错时的话（比如留底没做成）；空的不出错
@@ -58,13 +59,16 @@ function world(on: On): World {
     const json = (obj: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(obj) } })
     if (url.pathname === '/bridge/ping') return json({ ok: true, app: 'inkthink' })
     if (url.pathname === '/bridge/hello' || url.pathname === '/bridge/status')
-      return json(w.local ? { ...HELLO, isTarget: false, targetLabel: '', targetNb: '', targetLocal: true } : HELLO)
+      return json(w.local ? { ...HELLO, isTarget: false, targetLabel: '', targetNb: '', targetLocal: true }
+        : w.unset ? { ...HELLO, isTarget: false, targetLabel: '', targetNb: '论文稿', targetUnset: true, sessions: 2 } : HELLO)
     if (url.pathname === '/bridge/poll') return json(w.queue.length ? { submission: w.queue.shift() } : {})
     if (url.pathname === '/bridge/reply') {
       const items = (body?.items as unknown[]) ?? []
       return json({ ok: true, count: items.length, page: '草稿本第 1 页（空白草稿纸）', tabletOnline: true, ...(w.replyNotes === undefined ? {} : { notes: w.replyNotes }) })
     }
     if (url.pathname === '/bridge/scan') return json({ id: 'scan1', pages: 2, text: '【草稿纸·整本】……' })
+    // 推页面（2026-11-17 起进这个对话所在项目文件夹自己的那本，服务回本子名）
+    if (url.pathname === '/bridge/show') return json({ ok: true, nb: 'board:1a2b3c4d', nbTitle: '推送 · idea', page: 1, title: '一周气温', tabletOnline: w.tabletUp })
     if (url.pathname === '/bridge/import') {
       return json({ ok: true, id: 'book:汇报.pdf', title: '汇报', pages: 2, updated: '第 2 页有改动', tabletOnline: true, remind: w.remind || null })
     }
@@ -143,24 +147,36 @@ test('平板发来的内容进入这个对话，批注能写回去（VS Code 宿
   expect(Object.keys(item).includes('revises')).toBe(false)
   const say = w.descs.ink_reply
   expect(say.includes('平板在那里标一个圈号，用户点圈号才看到全文，不占纸面')).toBe(true)
+  // 长回答摊在纸上（2026-11-17）：旁边有空又不太长时摊开；place 说想放哪、fold 收着，插件原样转给服务；书页上一律是圈号
+  expect(say.includes('草稿纸把它摊在纸上所答内容的旁边')).toBe(true)
+  expect(say.includes('书页和推送页上一律是圈号')).toBe(true)
+  expect(item.place.anyOf[0].enum).toEqual(['right', 'below', 'left', 'above'])
+  expect(item.place.anyOf[1].type).toBe('array')
+  expect(item.place.description.includes('草稿纸先试那里')).toBe(true)
+  expect(item.fold.type).toBe('boolean')
+  expect(item.fold.description.includes('不摊在纸上')).toBe(true)
   // 阶段 E：长回答从不写在页末，那句说法改成「圈号是平板自己标的」
   expect(say.includes('圈号是平板自己标的，不用另画 number 去配，write 的 anchor 也不要写 end')).toBe(true)
   expect(say.includes('页末')).toBe(false)
   expect(say.includes('回一条新的 write（anchor 填那条红笔），旧的那条用户自己擦')).toBe(true)
   expect(say.includes('解释按圈号写在页末')).toBe(false)
   expect(item.anchor.description.includes('write 填所答的那条红笔')).toBe(true)
-  expect(item.type.description.startsWith('write 长的回答（平板在 anchor 那处标一个圈号')).toBe(true)
+  expect(item.type.description.startsWith('write 长的回答（空白本子里不太长、旁边有空时摊在纸上，否则平板在 anchor 那处标一个圈号')).toBe(true)
   // 卡片上的红字（2026-11-14）：回应用 write 带 card（那张卡片的圈号），接在那张卡片下面；插件原样转给服务
   expect(item.card.type).toBe('number')
   expect(item.card.description.includes('那张卡片的圈号 n')).toBe(true)
   expect(say.includes('回应用 write，card 填 n，q 填你读到的那句红字，这段接在那张卡片最下面，不出新的圈号')).toBe(true)
-  // 纸上的短批注上写了红字（2026-11-14）：交上来时它已收成圈号、变成卡片，回应办法一样（同一个 card）
-  expect(say.includes('用户在纸上的短批注上直接写了红字时，那条短批注交上来时已收成圈号、变成这样一张卡片，回应的办法一样')).toBe(true)
-  expect(item.card.description.includes('长回答卡片（或短批注收成的卡片）')).toBe(true)
+  // 纸上的短批注上写了红字（2026-11-18 用户改的）：那条批注留在纸上、不再收成卡片，照别的红笔问题回；以前收成的卡片照卡片的办法回
+  expect(say.includes('用户在纸上的短批注上（或紧挨着它）用红笔写了字时，那条短批注照旧留在纸上，书写过程里写明那组红笔写在哪条批注上：照别的红笔问题回，anchor 填那组红笔')).toBe(true)
+  expect(say.includes('交上来时已收成圈号')).toBe(false)
+  expect(item.card.description.includes('长回答卡片（或以前由短批注收成的卡片）')).toBe(true)
   await $.tool.call({ tool: 'mcp__inkpad__ink_reply', submission: 's1', items: [{ type: 'write', card: 2, q: '这句不对', text: '改成：和店家无关' }] })
   const replies = w.calls.filter(c => c.path === '/bridge/reply')
   expect(replies.length).toBe(2)
   expect(replies[1].body).toEqual({ sid: 'sess-1', submission: 's1', items: [{ type: 'write', card: 2, q: '这句不对', text: '改成：和店家无关' }] })
+  await $.tool.call({ tool: 'mcp__inkpad__ink_reply', submission: 's1', items: [{ type: 'write', anchor: 'g1', text: '摊开的', place: 'below' }, { type: 'write', anchor: 'g2', text: '收着的', fold: true }] })
+  const replies2 = w.calls.filter(c => c.path === '/bridge/reply')
+  expect(replies2[2].body).toEqual({ sid: 'sess-1', submission: 's1', items: [{ type: 'write', anchor: 'g1', text: '摊开的', place: 'below' }, { type: 'write', anchor: 'g2', text: '收着的', fold: true }] })
   expect(item.type.enum).toContain('suggest')
   for (const t of ['tick', 'cross', 'strike', 'insert', 'wavy', 'highlight', 'brace', 'number']) expect(item.type.enum).toContain(t)
   for (const t of ['label', 'node', 'link', 'group']) expect(item.type.enum).toContain(t)
@@ -224,6 +240,26 @@ test('平板上开着的是只在本地的本子：/ink 和面板说它只在本
   expect((await ui.find({ type: 'Text', text: /只在本地/ }))?.text).toBe('平板上开着的这一本只在本地，不发给 Claude')
   expect(await ui.find({ type: 'Text', text: /发往：/ })).toBeUndefined()
   expect(await ui.find({ type: 'Button', label: '这本改发到这个对话' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('平板上开着的那本还没选过对话、连着不止一个对话：/ink 和面板说还没选，不说会进入这个对话', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  w.unset = true
+  await $.session.start({ cwd: 'E:\\proj\\idea', surface: 'vscode', isInteractive: false })
+  await clock.settle()
+  const out = JSON.stringify(await $.command.run({ command: 'ink', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } }))
+  expect(out).toContain('平板上《论文稿》还没选发往哪个对话：第一次点「AI」时在平板上选，或用 /ink here 定到这个对话。')
+  expect(out).not.toContain('会进入这个对话')
+  expect(out).not.toContain('发往「')
+  const ui = await $.ui.mount({
+    plugin: 'inkpad', component: 'Pane', requestId: 'inkpad', surface: 'vscode',
+    props: { title: '手写草稿纸', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect((await ui.find({ type: 'Text', text: /还没选/ }))?.text).toBe('平板上《论文稿》还没选发往哪个对话（点「AI」时在平板上选）')
+  expect(await ui.find({ type: 'Text', text: /会进入这个对话/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', label: '这本改发到这个对话' })).toBeDefined() // 也可以在电脑上直接定到这个对话
   await ui.unmount()
 })
 
@@ -669,4 +705,19 @@ test('/ink 启动过的服务意外停了：插件在半分钟内把它重新拉
   await clock.advance(1500 * 21)
   expect(w.runs.length).toBe(1)
   expect(w.calls.filter(c => c.path === '/bridge/hello').length).toBeGreaterThan(1)
+})
+
+test('ink_show：推到这个对话所在文件夹自己的那本，回的话说是哪一本，不再说「Claude 推送」（2026-11-17）', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  await $.session.start({ cwd: 'E:\\proj\\idea', surface: null, isInteractive: false })
+  await clock.settle()
+  expect(w.descs.ink_show.includes('推的页进你这个对话所在项目文件夹自己的那本（默认叫「推送 · 文件夹名」，没有就新开一本）')).toBe(true)
+  expect(w.descs.ink_show.includes('Claude 推送')).toBe(false)
+  const ran = await $.tool.call({ tool: 'mcp__inkpad__ink_show', path: 'figs\\temp.png', title: '一周气温' })
+  expect(w.calls.find(c => c.path === '/bridge/show')?.body).toEqual({ sid: 'sess-1', path: 'E:\\proj\\idea\\figs\\temp.png', title: '一周气温' })
+  expect(ran.result).toBe('已推到平板：「一周气温」（「推送 · idea」第 2 页），平板上会弹出提示。用户圈画后会以【草稿纸】消息发回。')
+  w.tabletUp = false
+  const later = await $.tool.call({ tool: 'mcp__inkpad__ink_show', path: 'E:\\proj\\idea\\a.png' })
+  expect(later.result).toBe('已推到平板：「一周气温」（「推送 · idea」第 2 页），平板现在没打开草稿纸，打开后在「推送 · idea」那本里。用户圈画后会以【草稿纸】消息发回。')
 })

@@ -1,4 +1,5 @@
 // 重做（界面上叫「恢复」，英文 Redo：2026-11-16 夜用户试过后改的名字；原来叫「重做」。2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」；细节暂定，用户之后在平板上试）。查：
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 撤销旁边一个「恢复」，样子和撤销一样（图标按钮，长按看说明），全屏时在右下角那一条里、退出全屏后在左侧工具栏里；撤销过才能点，否则是灰的；
 // 撤销栈里的每一种都能重做：写一笔（连同它压成小蓝点的短批注）、橡皮擦（擦掉的时刻照旧）、星号采纳、✓ × 的决定、卡片上的红字（写和擦）、
 // 清除本页 Claude 批注；连着撤几步再连着重做几步，次序对；撤销之后又有新的动作（写了一笔），重做的记录清掉；
@@ -50,7 +51,7 @@ if (await S('S.flow')) { await js(`window.__ink.toggleFlow()`); await sleep(800)
 
 // ================= 1. 按钮：全屏时右下角那一条里，紧挨撤销；样子和撤销一样；一开始是灰的、点不了
 const btns = await js(`[...document.querySelectorAll('#tools button')].map((b) => b.dataset.tool || b.id).join()`);
-T.ok('右下角那一条：撤销后面紧挨着「恢复」', btns === 'toolsBars,pen,red,eraser,lasso,toolsUndo,toolsRedo,check', btns);
+T.ok('右下角那一条：撤销后面紧挨着「恢复」', btns === 'toolsBars,pen,red,eraser,lasso,toolsUndo,toolsRedo,sizeBtn,check', btns); // 2026-11-17 起「AI」左边多了回答要多长的开关
 const look = (sel) => js(`(() => { const b = document.querySelector('${sel}'), r = b.getBoundingClientRect(), c = getComputedStyle(b), s = b.querySelector('svg');
   return { w: Math.round(r.width), h: Math.round(r.height), bg: c.backgroundColor, border: c.borderTopWidth + ' ' + c.borderTopStyle, radius: c.borderTopLeftRadius, op: Number(c.opacity),
     icon: b.dataset.icon, lines: s ? s.querySelectorAll('path').length : 0, text: b.textContent.trim(), label: b.getAttribute('aria-label'), top: Math.round(r.top) }; })()`);
@@ -116,7 +117,7 @@ const sub = await T.waitSub('S1'), meta = sub && T.metaOf(sub);
 const gRed = meta && meta.groups.find((g) => g.red), gBlack = meta && meta.groups.filter((g) => !g.red).pop();
 T.ok('（前提）交上去了：有一句红笔、有黑字', Boolean(gRed && gBlack), meta && meta.groups);
 await T.post('/bridge/reply', { sid: 'S1', submission: sub.id, items: [
-  { type: 'write', anchor: gRed.id, q: '这一步对吗？', text: '对。\n第二行。' },
+  { type: 'write', fold: true, anchor: gRed.id, q: '这一步对吗？', text: '对。\n第二行。' },
   { type: 'note', anchor: gBlack.id, text: '这里少了单位' },
   { type: 'node', anchor: gRed.id, text: '新概念', links: [gRed.id] }] });
 T.ok('（前提）三条落到这一页', await T.waitFor(`window.__ink.S.page.ai.length === 3`, 10000), await S(`S.page.ai.map((a) => a.type)`));

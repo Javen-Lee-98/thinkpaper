@@ -48,6 +48,10 @@ GONE = [
     (r"ink_relocate", "删掉的工具"),
     (r"不带(?: ?text ?)?的(?:草稿纸)?不画", "2026-11-16 起 cross、wavy、strike 不带 text 的由服务退回，工具结果里写明第几条缺什么（规则瘦身 B 组③）"),
     (r"每条不超过 40 字|note 短批注（不超过 40 字", "2026-11-16 起短批注写长了服务收成圈号卡片（NOTE_MAX），说成「约 40 字以内」（规则瘦身 B 组①）"),
+    (r"「Claude 推送」(?:本子|这本|那本)|Claude 推送 第|board=Claude 推送",
+     "2026-11-17 起推送按项目文件夹各一本（「推送 · 文件夹名」），不再是一本公用的「Claude 推送」"),
+    (r"交上来时已收成圈号|（或纸上的短批注上）|（或短批注收成的卡片）",
+     "2026-11-18 起红笔批过的短批注留在纸上，不再收成圈号卡片（《产品定义》第 2 节）；只有以前收成的卡片还照卡片的办法回"),
 ]
 
 # 2026-11-16 规则瘦身：从固定说明里删掉、挪走的话（固定说明里不再有），和它现在在哪（那里一定有）。
@@ -57,7 +61,8 @@ MOVED = [
     ("先看右边再看下面", "tool:ink_reply", "空白本子里先看右边再看下面，书页、推送页上在下面"),
     ("不出新的圈号", "tool:ink_reply", "这段接在那张卡片最下面，不出新的圈号"),
     ("要改写整段", "msg:card", "要改写整段，也写在下面"),
-    ("回应的办法一样", "tool:ink_reply", "那条短批注交上来时已收成圈号、变成这样一张卡片，回应的办法一样"),
+    # 2026-11-18 用户改的：纸上的短批注上写的红字不再收成卡片，照别的红笔问题回（那一句改了，去处还是 ink_reply 的说明）
+    ("回应的办法一样", "tool:ink_reply", "那条短批注照旧留在纸上，书写过程里写明那组红笔写在哪条批注上：照别的红笔问题回，anchor 填那组红笔"),
     ("0–4 个短选项", "tool:ink_ask", "可带 0–4 个短选项"),
     ("忽略了的问题不要再问", "tool:ink_ask", "忽略了的问题不要再问"),
     ("不替用户选", "tool:ink_ask", "不要替用户选"),
@@ -262,7 +267,7 @@ def prompt_texts():
             for k, s in v.items():
                 if isinstance(s, str) and CJK.search(s):
                     texts[f"prompt.{name}[{k!r}]"] = s
-    for role in ({"page": "blank"}, {"page": "zotero"}, {"page": "pdf"}, {"page": "board"},
+    for role in ({"page": "blank"}, {"page": "zotero"}, {"page": "pdf"}, {"page": "board"}, {"page": "board_other", "by": "paper"},
                  {"page": "editable", "src": "E:\\docs\\周末安排.docx"}):
         texts[f"build_message(role={role['page']})"] = prompt.build_message(
             meta(role=role, prev_notes=PREV, dots=1, cards=CARDS, verdicts=VERDICTS, owed=OWED,
@@ -353,11 +358,11 @@ class GoneWordsTest(unittest.TestCase):
         """词表不误伤：「检查」作动词、「上下文」「做法」的平常用法照常能写。"""
         for ok in ("解释、检查、提建议，直接做", "检查 inkpad 插件的 server_command 设置", "结合上下文判断", "按最稳妥的做法继续",
                    "书页和推送页上排在右边一栏", "接在页面内容后面", "回答红字", "点「AI」", "批改符号旁边的一句话（不超过 40 字）",
-                   "不带 text 的那一条会被退回、不画"):
+                   "不带 text 的那一条会被退回、不画", "长回答卡片（或以前由短批注收成的卡片）"):
             self.assertEqual(hits({"例句": ok}), [], ok)
         for bad in ("写完点「检查」交上来", "note：页边的短批注", "整段回答写在页末", "按做法和帮助力度来回", "最多约 100 秒",
                     "对话上下文太长，回得会慢", "新文件放进项目，不覆盖原文件", "cross、strike、wavy 不带 text 的不画", "不带的草稿纸不画",
-                    "note/question：短批注（每条不超过 40 字）"):
+                    "note/question：短批注（每条不超过 40 字）", "那条短批注交上来时已收成圈号", "长回答卡片（或短批注收成的卡片）"):
             self.assertTrue(hits({"例句": bad}), bad)
 
     def test_ts_strings_finds_the_tool_descriptions(self):
@@ -507,7 +512,7 @@ class SameStoryTest(unittest.TestCase):
             self.assertNotIn(only, self.p, only)
         self.assertIn("书页和推送页上排在右边一栏", self.reply)          # 短批注放哪：照页面实际的做法
         self.assertIn("只用在书页、推送页上印刷的内容", self.reply)       # suggest 只在文档上有 ✓ ×
-        self.assertIn("书页（或你推送的页）上印刷的内容", self.p)
+        self.assertIn("书页（或推送到平板的页）上印刷的内容", self.p)  # 2026-11-17 起推送页可能是别的对话推的，不说「你推送的」
         self.assertIn("平板当前打开的那一页", self.reply)               # 不给 submission 时写到哪：description 和参数说明说法一样
         # 服务把关的几条（B 组）：工具说明里说了写错会怎样
         self.assertIn("写长了草稿纸会把它收成圈号卡片，工具结果里会说", self.reply)

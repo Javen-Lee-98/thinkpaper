@@ -93,6 +93,16 @@ test('长回答的圈号跟着页面转（圆心和笔迹一样换算），转�
   nearPt(ans.at, [529, 300]);
 });
 
+test('摊在纸上的长回答（2026-11-17）：页面一转就收回圈号（横排的字没法跟着转），圈号照样跟着转', () => {
+  const ans = { id: 'w', type: 'write', text: '一段回答', n: 1, at: [529, 300], seen: true, on: ['s'],
+    spread: { x: 540, y: 280, w: 120, h: 37, side: 'right', by: 'auto', rows: [{ y: 0, h: 29, w: 100, t: '一段回答' }] } };
+  const st = { id: 's', t0: 1, w: 2, pts: [[400, 300, 0.5, 0], [500, 300, 0.5, 30]] };
+  const p = page({ strokes: [st], ai: [ans] });
+  T.turnPage(p, 1, { h0: 562.5, mainW: 1000 });
+  assert.ok(!('spread' in ans));
+  nearPt(ans.at, [(1000 / 562.5) * (562.5 - 300), (1000 / 562.5) * 529]);
+});
+
 test('收成小蓝点的短批注：点跟着页面转（圆心换算），浮出来时记下的换算跟着那几行字挪；转回来都回到原处', () => {
   const lay = { x: 420, y: 290, w: 200, h: 37, lines: ['车票要提前买'], fs: 21, lh: 29 };
   const n = { id: 'n', type: 'note', text: '车票要提前买', on: ['s'], lay: { ...lay }, hit: [414, 286, 620, 331], box: [100, 290, 400, 310],

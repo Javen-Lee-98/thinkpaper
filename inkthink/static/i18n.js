@@ -63,6 +63,27 @@
     '已改': 'Done',
     '没改成': 'Not changed',
     '改着呢…': 'Working on it…',
+    // 长回答摊在纸上、卡片底下一排（2026-11-17）：摊在纸上 / 收起（「收起」在别处已经是 Collapse）、再短点、展开讲
+    '摊在纸上': 'Show on paper',
+    '再短点': 'Shorter',
+    '展开讲': 'In depth', // 也是「AI」旁边那个开关的第三档
+    '被字压到的回答收成了圈号，点圈号能看': 'An answer under your writing folded into a numbered circle. Tap it to read',
+    '挪过去压到了字的回答收成了圈号，点圈号能看': 'An answer moved onto your writing folded into a numbered circle. Tap it to read',
+    '旁边没有空地方摊开它：先用套索把字挪开一点再试': 'There is no free space next to it on the paper. Move some ink aside with the lasso and try again',
+    // 短批注浮出的小卡片底下的钮（2026-11-18）：自己收成小蓝点、放回纸上
+    '收成蓝点': 'Fold to dot',
+    '放回纸上': 'Put back on paper',
+    '旁边没有空地方放回纸上：先用套索把字挪开一点再试': 'There is no free space to put it back on the paper. Move some ink aside with the lasso and try again',
+    '按「再短点」重写：': 'Rewritten after “Shorter”: ', // 卡片下面接着的一段是点了钮请 AI 重写的（不是回应红字）
+    '按「展开讲」重写：': 'Rewritten after “In depth”: ',
+    // 「AI」旁边那个开关：回答要多长（2026-11-17）
+    '点一下': 'Hint',
+    '讲清楚': 'Explain',
+    '只给记号和一两句短批注，不展开': 'Just marks and a short note or two',
+    '短批注加必要的几步推导或一段话（默认）': 'Short notes plus the key steps (default)',
+    '完整的长回答': 'A full, long answer',
+    '回答要多长（交给 AI 时带上）': 'How long the answers should be (sent along to the AI)',
+    '回答要多长：点开选': 'Answer length: tap to choose',
     // 这一轮到哪一步：「AI」按钮上的字（AI → 已交 → Claude 在看 → 在改文件；排队中；这本只在本地）。进度只写在按钮上
     '已交': 'Sent',
     '排队中': 'Queued',
@@ -74,8 +95,10 @@
     '打开': 'Open',
     // 抽屉
     '本子': 'Notebooks',
+    '这一页和同一个对话推的页发往哪个对话': 'Where this page and the other pages from the same session go',
     '草稿本': 'Scratchpad',
-    'Claude 推送': 'Pushed by Claude',
+    'Claude 推送': 'Pushed by Claude', // 以前那本公用的（2026-11-17 起新的推送按项目文件夹各一本，叫「推送 · 文件夹名」）
+    '推送': 'Pushed', // 推页面的对话没有文件夹时，那本推送本子的名字
     '＋ 新建本子…': '＋ New notebook…',
     '＋ 新建文件夹…': '＋ New folder…',
     '导入文档…': 'Import a document…',
@@ -100,6 +123,13 @@
     '有字还没存上，等存好了再挪页': 'Some ink is not saved yet. Move the page once it is saved',
     '页的先后在别处改过了：重新打开这本再挪': 'The page order was changed elsewhere: reopen this notebook and try again',
     '已经换了本子': 'You have switched to another notebook',
+    // 存页按页的键（2026-11-17）：别的设备上插了页、删了页、挪了页，这台存页时才知道；服务说那一页删掉了、页的键不对
+    '这本的页在别的设备上加过、删过或挪过：已换成新的页序，眼前还是这一页': 'Pages in this notebook were added, deleted or moved on another device. The new page order is in place, and you are still on the same page',
+    '这一页已经从这本里删掉了（可能是在别的设备上删的），可以在抽屉的「显示已删的页」里还原': 'This page has been deleted from the notebook (perhaps on another device). You can restore it under “Show deleted pages” in the drawer',
+    '页的键不对': 'Invalid page key',
+    // 书在写的时候原地更新成了新版、这台存页时才知道（2026-11-17）
+    '这本在别处更新成了新版：已重新打开': 'This document was updated to a new version elsewhere, so it has been reopened',
+    'gen 不对': 'Invalid page version',
     '改名': 'Rename',
     '改成什么名字？': 'New name?',
     '删除这本（文件还留在电脑上）': 'Delete this notebook (the files stay on the computer)',
@@ -126,13 +156,48 @@
     '好': 'OK',
     '已移出文件夹': 'Taken out of the folder',
     '已放回文件夹外面': 'Moved back out of the folder', // 拖进文件夹后点「撤销」
+    // 抽屉里改上下顺序（2026-11-18）：「⋯」里的上移、下移，拖动放下后的提示和「撤销」后的提示；文件夹那一行上的「＋」；服务拒绝时说的
+    '上移': 'Move up',
+    '下移': 'Move down',
+    '已调整顺序': 'Order changed',
+    '已挪回原处': 'Moved back',
+    '在这个文件夹里新建本子': 'New notebook in this folder',
+    '草稿本不能挪': 'The scratchpad cannot be moved',
+    '文件夹里不能再放文件夹': 'A folder cannot go inside another folder',
+    // 复制这本…、复制这一页…（2026-11-18）：「⋯」里那一项、抽屉里那个图标、带什么的卡片、复制完和撤销后的提示、不能复制时说的、服务拒绝时说的
+    '复制这本…': 'Copy this notebook…',
+    '复制这一页…（选带什么，接在这一页后面）': 'Copy this page… (choose what to keep; the copy goes right after this page)',
+    '复制时带什么': 'What to keep in the copy',
+    '全部照样': 'Everything as it is',
+    '黑笔、红笔和 AI 写的都带上': 'Black ink, red ink and everything the AI wrote',
+    '不带 AI 的蓝字': "Without the AI's blue writing",
+    '留下你写的黑笔和红笔': 'Keeps your black and red ink',
+    '只留黑笔（不带红字和蓝字）': 'Black ink only (no red, no blue)',
+    '只有你用黑笔写的': 'Only what you wrote in black',
+    '副本排在原来那本后面，原来那本不动。': 'The copy goes right after the original, and the original stays as it is.',
+    '复制出的页接在这一页后面，复制完翻过去。': 'The copy goes right after this page, and you are taken to it.',
+    '复制': 'Copy',
+    '已复制这一页': 'Page copied',
+    '已撤销复制': 'Copy undone',
+    '书页不能单独复制（可以在这本的「⋯」里复制整本）': 'A document page cannot be copied on its own (you can copy the whole notebook from its “⋯” menu)',
+    '推送的页不能复制': 'Pushed pages cannot be copied',
+    '只有空白纸能复制：书页、推送的页还不能复制（可以复制整本）': 'Only blank paper can be copied: document pages and pushed pages cannot be copied yet (you can copy the whole notebook)',
+    '推送的本子还不能复制（它的页是对话推来的图，每页记着发回哪个对话）': 'Pushed notebooks cannot be copied yet (their pages are images pushed by sessions, and each page remembers which session it goes back to)',
+    '复制时带什么要是 all（全部照样）、noai（不带 AI 的蓝字）或 ink（只留黑笔）': "What to keep must be all (everything), noai (without the AI's blue writing) or ink (black ink only)",
+    '起不出不重名的名字': 'Could not find a name that is not already taken',
     // 这本发往哪个对话（按项目文件夹分组；每个对话写最近打的一句话、什么时候开的、多久前活跃）；最下面一项是只在本地
     '这本发往哪个对话（以后都发到这里）': 'Which session this notebook is sent to (from now on)',
     '还没打过字': 'Nothing typed there yet',
+    '看不到在那里打的话': 'What was typed there is not shown', // 别的 AI 的对话（经 MCP 接进来的）报不了打过什么（2026-11-17）
     '执行过 /ink': 'ran /ink',
     '不发给 Claude（只在本地）': 'Do not send to Claude (local only)',
     '只在本地（不发给 Claude）': 'Local only (not sent to Claude)',
     '还没有连着的对话': 'no session connected yet',
+    // 没选过对话的本子、连着不止一个对话：第一次点「AI」先选（2026-11-17）
+    '还没选（点「AI」时选）': 'not chosen yet (you pick when you tap AI)',
+    '这本还没选发往哪个对话。发往：': 'No session has been chosen for this notebook yet. Send it to:',
+    '文件在这个文件夹里': 'the file is in this folder',
+    '这本还没选发往哪个对话：在抽屉里点「这本发往」选一个再发': 'No session has been chosen for this notebook yet. Tap “Sends to” in the drawer, pick one, then send again',
     '还没有连上的对话：在电脑上打开一个装了 inkpad 插件的 Claude Code 对话': 'No session connected yet: open a Claude Code session with the inkpad plugin on the computer',
     '没有连着的 Claude Code 对话。在电脑上的对话里执行一次 /ink，或者从平板上传。': 'No Claude Code session connected. Run /ink once in a session on the computer, or upload from this tablet.',
     '取消': 'Cancel',
@@ -316,8 +381,10 @@
     '没有这个文件夹': 'No such folder',
     '没有这一页': 'No such page',
     '这本里没有新写的页': 'No pages with new ink in this notebook',
-    '草稿本和「Claude 推送」不能删': 'The scratchpad and “Pushed by Claude” cannot be deleted',
-    '草稿本和「Claude 推送」不能改名': 'The scratchpad and “Pushed by Claude” cannot be renamed',
+    // 2026-11-17 起推送本子能改名、删除、放进文件夹，只剩草稿本不能
+    '草稿本不能删': 'The scratchpad cannot be deleted',
+    '草稿本不能改名': 'The scratchpad cannot be renamed',
+    '草稿本不能放进文件夹': 'The scratchpad cannot go into a folder',
     '没有安装 PyMuPDF，不能导入文档': 'PyMuPDF is not installed, so documents cannot be imported',
     '这个文件不能导入': 'This file cannot be imported',
     '图太大（超过 20 MB）': 'Image too large (over 20 MB)',
@@ -364,6 +431,7 @@
     '背景加载失败': 'Could not load the page background', '打不开这个本子': 'Cannot open this notebook',
     '打不开这个文件夹': 'Cannot open this folder', '连不上电脑上的服务': 'Cannot reach the server on the computer',
     '没发出去': 'Not sent', '没撤回': 'Could not revert', '没忽略成': 'Could not ignore',
+    '没复制成': 'Could not copy', '没撤销成': 'Could not undo',
   };
   // 「2、3」这样的页码 → 「pages 2, 3」（一页是「page 2」）
   const pagesEn = (s) => `${s.includes('、') ? 'pages' : 'page'} ${s.replace(/、/g, ', ')}`;
@@ -374,12 +442,27 @@
     [/^‹ 上一条（第 (\d+) 页）$/, '‹ Previous (page {1})'],
     [/^下一条（第 (\d+) 页）›$/, 'Next (page {1}) ›'],
     [/^被字压到的 (\d+) 条批注收成了小蓝点，点一下能看$/, '{1} notes under your writing folded into small blue dots. Tap one to read'],
+    // 长回答摊在纸上、卡片上的「再短点」「展开讲」（2026-11-17）
+    [/^被字压到的 (\d+) 条回答收成了圈号，点圈号能看$/, '{1} answers under your writing folded into numbered circles. Tap one to read'],
+    [/^挪过去压到了字的 (\d+) 条回答收成了圈号，点圈号能看$/, '{1} answers moved onto your writing folded into numbered circles. Tap one to read'],
+    [/^这条太长（超过 (\d+) 行），摊开会占太多纸，留在卡片里看$/, 'This answer is too long to show on paper (over {1} lines); read it in the card'],
+    [/^已请「(.+)」把圈号 (\d+) 写短一点$/, 'Asked “{1}” to make answer {2} shorter'],
+    [/^已请「(.+)」把圈号 (\d+) 展开讲$/, 'Asked “{1}” to go into answer {2} in depth'],
     [/^（(\d+) 页(?:，已删 (\d+) 页)?）$/, (m) => `(${m[1]} ${m[1] === '1' ? 'page' : 'pages'}${m[2] ? `, ${m[2]} deleted` : ''})`],
     [/^已交给「(.+)」$/, 'Handed to “{1}”'],
     [/^已把 (\d+) 页交给「(.+)」$/, 'Handed {1} pages to “{2}”'],
     [/^这本发往：(.*?)( ▾)?$/, (m, t) => `Sends to: ${t(m[1])}${m[2] || ''}`],
     [/^「(.+)」（不在了）$/, '“{1}” (gone)'],
     [/^这本原来发往「(.+)」，那个对话现在不在了。发往：$/, 'This notebook used to go to “{1}”, which is gone now. Send it to:'],
+    // 推送本子（2026-11-17 起按项目文件夹各一本）：各页发回推它的对话；抽屉里那一行写眼前这一页发往谁
+    [/^这一页发往：(.*?)( ▾)?$/, (m, t) => `This page sends to: ${t(m[1])}${m[2] || ''}`],
+    [/^推这一页的「(.+)」对话现在不在了。它推的页改发往：$/, (m) => `The “${m[1]}” session that pushed this page is gone. Send the pages it pushed to:`],
+    [/^这一页改发到的「(.+)」对话现在不在了。原本发给它的页改发往：$/, (m) => `The “${m[1]}” session this page was redirected to is gone. Send the pages that went to it to:`],
+    [/^推这一页的「(.+)」对话现在不在了。选一个对话再发。$/, (m) => `The “${m[1]}” session that pushed this page is gone. Pick a session and send again.`],
+    [/^这一页改发到的「(.+)」对话现在不在了。选一个对话再发。$/, (m) => `The “${m[1]}” session this page was redirected to is gone. Pick a session and send again.`],
+    [/^「(.+)」里的对话推送了一页：(.*)$/, (m) => `A session in “${m[1]}” pushed a page: ${m[2]}`],
+    [/^一个对话推送了一页：(.*)$/, (m) => `A session pushed a page: ${m[1]}`],
+    [/^推送 · (.+)$/, (m) => `Pushed · ${m[1]}`], // 推送本子没改过名时的名字（文件夹名不翻译）
     [/^(\d+) 分钟前$/, '{1} min ago'],
     [/^(\d+) 小时前$/, '{1} h ago'],
     [/^(\d+) 天前$/, '{1} d ago'],
@@ -397,6 +480,14 @@
     [/^已删除文件夹「(.+)」$/, 'Deleted the folder “{1}”'],
     [/^删除文件夹「(.+)」？\n里面的 (\d+) 本回到外面，本子本身不动。$/, (m) => `Delete the folder “${m[1]}”?\nIts ${m[2]} ${m[2] === '1' ? 'notebook moves' : 'notebooks move'} back out; the notebooks themselves are untouched.`],
     [/^已经有一个叫「(.+)」的文件夹了$/, 'There is already a folder called “{1}”'],
+    // 文件夹那一行上的「＋」新建本子（2026-11-18）：卡片上那一行、建好后的提示、那个文件夹在别处被删了
+    [/^建好放进文件夹「(.+)」$/, 'It goes into the folder “{1}”'],
+    [/^已在「(.+)」里建立「(.+)」$/, 'Created “{2}” in “{1}”'],
+    [/^已建立「(.+)」（那个文件夹已经不在了，放在了外面）$/, 'Created “{1}” (that folder is gone, so it is not in any folder)'],
+    // 复制这本…、复制这一页…（2026-11-18）：卡片的标题（本子名是你起的，不换；只有草稿本换成英文叫法）、复制完的提示（副本的名字照服务起的）
+    [/^复制《(.+)》$/, (m, t) => `Copy “${BUILT_IN.has(m[1]) ? t(m[1]) : m[1]}”`],
+    [/^复制第 (\d+) 页$/, 'Copy page {1}'],
+    [/^已复制成《(.+)》$/, (m) => `Copied as “${m[1]}”`],
     [/^今天 (\d\d:\d\d)$/, 'Today {1}'],
     [/^(\d+)月(\d+)日$/, '{1}/{2}'],
     [/^已建立「(.+)」$/, 'Created “{1}”'],
@@ -511,6 +602,16 @@
     [/^服务器出错：([\s\S]*)$/, 'Server error: {1}'],
     [/^没能把它转成 PDF：([\s\S]*)$/, 'Could not convert it to PDF: {1}'],
     [/^这一页在别的设备上改过了。你这边没存上的改动另存在电脑上：(.*)$/, 'This page was changed on another device. Your unsaved changes were kept on the computer: {1}'],
+    // 存页按页的键（2026-11-17）：那一页在别处删掉了（字存进了删掉的那一页）、眼前这一页在别处删掉了、那一页哪里都没有了（服务说的）
+    [/^第 (\d+) 页在别的设备上删掉了：刚写的字存在了那一页里，在抽屉的「显示已删的页」里还原就能看到$/,
+      'Page {1} was deleted on another device. What you just wrote was saved on that page: restore it under “Show deleted pages” in the drawer to see it'],
+    [/^眼前这一页在别的设备上删掉了，翻到了第 (\d+) 页（在抽屉的「显示已删的页」里可以还原）$/,
+      'The page you were on was deleted on another device, so you are now on page {1} (you can restore it under “Show deleted pages” in the drawer)'],
+    [/^这一页已经不在这本里了，刚写的没存进本子。你这边没存上的字另存在电脑上：(.*)$/,
+      'This page is no longer in the notebook, so what you just wrote was not saved into it. Your unsaved ink was kept on the computer: {1}'],
+    // 书在写的时候原地更新成了新版、这一页在新版里没有了（服务说的，2026-11-17）
+    [/^这本在你写的时候更新成了新版，这一页在新版里没有了，刚写的没存进本子。你这边没存上的字另存在电脑上：(.*)$/,
+      'This document was updated to a new version while you were writing, and this page is not in the new version, so what you just wrote was not saved into it. Your unsaved ink was kept on the computer: {1}'],
     [/^《(.+)》设为「只在本地」，不发给 Claude。要发的话，在平板抽屉里点「这本发往」选一个对话。$/, '“{1}” is set to local only and is not sent to Claude. To send it, tap “Sent to” in the drawer and pick a session.'],
     [/^配对于 (.+)$/, 'paired {1}'],
     [/^最近 (.+)，(.+)$/, 'last seen {1}, {2}'],
@@ -554,14 +655,15 @@
   // 标着 data-lang-keep 的（你在对话里打的话、电脑上的文件夹名、你起的文件夹名、问话卡片上 Claude 写的问题、选项和结果……）
   const CONTENT = '#aiRoot, #tex, #qcBody .opts, .is-name, [data-lang-keep]';
   const CONTENT_OWN = '#qcBody .q'; // 只跳过直接写在里面的字，里面的按钮照常换
-  // 本子名、文件夹名是你起的，不换；只有自带的两本换
+  // 本子名、文件夹名是你起的，不换；只有自带的两本、推送本子没改过名时的默认名（「推送」「推送 · 文件夹名」，文件夹名照旧）换
   const NAMES = '#chipName, #nbTitle, .nb-name, .nf-name';
   const BUILT_IN = new Set(['草稿本', 'Claude 推送']);
+  const AUTO_NAME = /^推送(?: · .+)?$/;
   function isContent(textNode) {
     const p = textNode.parentElement;
     if (!p) return true;
     if (p.closest(CONTENT) || p.matches(CONTENT_OWN)) return true;
-    if (p.closest(NAMES)) return !BUILT_IN.has((textNode.nodeValue || '').trim());
+    if (p.closest(NAMES)) { const v = (textNode.nodeValue || '').trim(); return !(BUILT_IN.has(v) || AUTO_NAME.test(v)); }
     return false;
   }
 

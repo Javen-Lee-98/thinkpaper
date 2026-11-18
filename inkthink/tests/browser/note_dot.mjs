@@ -1,13 +1,13 @@
 // 空白本子里短批注收成小蓝点（阶段 D1，《产品定义》第 3 节「短的回在原处」）：用户后来写的黑笔压到一条展开着的短批注，它自动收成
-// 所指笔迹旁的一个小蓝点（没有数字；有数字的圈号是长回答）；点一下在旁边浮出来，点别处或落笔收回；不做手动收起。查：
+// 所指笔迹旁的一个小蓝点（没有数字；有数字的圈号是长回答）；点一下在旁边浮出来，点别处或落笔收回；也能手动放回纸上。查：
 // 1. 黑笔压到第一条：它收成小蓝点（数据里记着 dot：被哪一笔压到），点紧挨所指那句的右端、不压字；屏幕上方说一句；字没了，只剩一个点。
 // 2. 手指点小蓝点：那条批注在旁边浮出来（一张窄的小卡片，原来那几行字，没有「问：」，和长回答的卡片样子不同），点上带一圈；
 //    手指点别处：收回。笔点小蓝点：浮出来，这一点不留作笔迹；在别处落笔：收回，那一笔照常写上。
 // 3. 红笔写在展开着的第二条上：不收（是批注、追问）。
-// 4. 小蓝点浮出来时红笔写在上面：不收回，红字记在那条批注上（不上纸）；收回后点上带红点。黑笔落在浮出的小卡片上：收回，这一笔不留。
-// 5. 黑笔压到第三条：也收成小蓝点。点「AI」：第一条（小卡片上写了红字）、第二条（纸上写了红字）都收成圈号变成卡片、连同红字交上去；
-//    第一条的红字在卡片上和在小卡片上一样的位置（不错位）；第三条还是小蓝点。发给 Claude 的图里第三条是一个蓝点（原来那几行字那儿没有蓝字），
-//    消息里说明了图里没有数字的小蓝点是什么、它的字在「之前写过的批注」里。圈号有数字、小蓝点没有，小蓝点比圈号小。
+// 4. 红笔、黑笔落在浮出的小卡片里都收回。另放入一笔旧版小卡片里的红字，检查它还能照旧交出去。
+// 5. 交稿后旧红字在卡片里不错位；写在第二条上的红字仍在纸上，消息写明批的是哪条蓝字。
+//    第三条仍是蓝点，整页图画出点，消息附上原文。圈号有数字，比蓝点大。
+//    旧卡片还能接着回；再写一笔红字交稿，只交没答过的那笔。
 // 6. 橡皮碰到小蓝点：擦掉这条批注；撤销：回来。小蓝点旁画星号：采纳（深蓝带 ★）；撤销：收回。
 // 7. 第 2 页：黑笔压到一条批注，它收成小蓝点；撤销这一笔：它展开回来。
 // 8. 刷新后：小蓝点还是小蓝点、在原处，点开照样浮出来。英文界面：收成小蓝点时屏幕上方那句是英文。
@@ -132,22 +132,30 @@ await T.pen(line(n2.tb[0] + 4, n2.tb[1] + 22, 60));
 const red2 = await S('S.page.strokes[S.page.strokes.length - 1].id');
 T.ok('红笔写在展开着的第二条上：它不收（照旧是纸上的字），红字留在纸上', !(await note(N2)).isDot && (await note(N2)).words.length === 1 && (await strokes()).some((s) => s.id === red2));
 
-// ================= 4. 小蓝点浮出来，红笔写在上面：不收回，红字记在这条批注上；黑笔落在小卡片上：收回、不留
-C = await tapDot(N1);
-const ln0 = C && C.lines[0];
-await penScreen(line(ln0.l + 4, ln0.b + 3, Math.min(70, ln0.r - ln0.l - 8), 8));
-C = await card();
-n1 = await note(N1);
-T.ok('红笔写在浮出的小卡片上：不收回，红字记在这条批注上（marks，最上面那块），纸上没有多出笔迹', Boolean(C) && C.id === n1.id && (n1.marks || []).length === 1
-  && n1.marks[0].blk === 'a' && !n1.marks[0].req && Boolean(n1.popMap) && (await strokes()).length === nS + 1, [C && C.id, n1.marks, (await strokes()).length]);
-const mk = n1.marks && n1.marks[0];
-const relPop = C && C.marks.length === 1 ? relTo(C.marks[0], C.lines[0], C.k * n1.popMap.u) : null;
-await T.tool('pen');
-await penScreen(line(ln0.l + 4, ln0.b + 3, 40, 6));
-T.ok('黑笔落在浮出的小卡片上：收回，这一笔不留（纸上、小卡片上都没有）', !(await card()) && (await strokes()).length === nS + 1 && ((await note(N1)).marks || []).length === 1);
-T.ok('收回后小蓝点带红点（上面有还没交的红字）', (await note(N1)).red);
+// 红笔和黑笔分别落在浮出的小卡片里：收回，两边都不多一笔。
+for (const [tool, name] of [['red', '红笔'], ['pen', '黑笔']]) {
+  await T.tool(tool);
+  C = await tapDot(N1);
+  const ln = C.lines[0];
+  await penScreen(line(ln.l + 4, ln.b - 2, Math.min(70, ln.r - ln.l - 8), 8));
+  n1 = await note(N1);
+  T.ok(name + '落在小卡片的字上，卡片收回，纸上和卡片里都没多一笔', !(await card()) && n1.isDot && !n1.marks?.length && !n1.red && (await strokes()).length === nS + 1);
+}
 
-// ================= 5. 黑笔压到第三条；点「AI」：第一、二条变成卡片交上去，第三条还是小蓝点
+// 旧版允许在小卡片上写红字。给第一条放入那时存下的换算和笔迹，保留红点、投递和位置的兼容检查。
+await js(`(() => { const a = window.__ink.S.page.ai.find((o) => o.id === ${JSON.stringify(n1.id)});
+  a.popMap = { x0: a.lay.x - 6, y0: a.lay.y - 6, w: a.lay.w + 12, h: a.lay.h + 46, u: 1 };
+  a.marks = [{ id: 'old-red', blk: 'a', c: 'r', w: 2, t0: Date.now(), pts: [[26, 30, .5, 0], [58, 32, .5, 40], [84, 30, .5, 80]] }];
+})()`);
+C = await tapDot(N1);
+n1 = await note(N1);
+const mk = n1.marks[0];
+const relPop = C?.marks.length === 1 ? relTo(C.marks[0], C.lines[0], C.k * n1.popMap.u) : null;
+T.ok('旧红字能在小卡片里看到', Boolean(relPop) && C.marks[0].id === mk.id);
+await tapPaper();
+T.ok('收回后小蓝点带红点（旧红字还没交）', (await note(N1)).red);
+
+// 黑笔压到第三条；交稿后只有带旧红字的第一条变成卡片。
 let n3 = await note(N3);
 await T.pen(line(n3.tb[0] + 40, (n3.tb[1] + n3.tb[3]) / 2, n3.tb[2] - n3.tb[0], 8));
 n3 = await note(N3);
@@ -159,10 +167,13 @@ const w1 = await note(N1), w2 = await note(N2);
 n3 = await note(N3);
 T.ok('点「AI」：第一条（小卡片上写了红字）收成圈号、变成卡片，红字跟着，换算照小卡片的（fromMap 就是 popMap）', w1.type === 'write' && w1.from && w1.from.type === 'note'
   && (w1.marks || []).length === 1 && w1.marks[0].id === mk.id && JSON.stringify(w1.fromMap) === JSON.stringify(n1.popMap) && Number.isInteger(w1.n), w1);
-T.ok('第二条（纸上写了红字）也变成了卡片', w2.type === 'write' && w2.from && (w2.marks || []).some((m) => m.id === red2), w2);
+const on = meta2?.groups.find((g) => g.ids.includes(red2));
+T.ok('第二条的蓝字和红笔仍在纸上，消息标明红笔写在这条蓝字上', w2.type === 'note' && !w2.isDot && w2.words.join('') === N2
+  && (await strokes()).some((s) => s.id === red2 && s.c === 'r') && on?.red && !on.answered && on.note_on === N2
+  && sub2.text.split('\n').some((l) => l.startsWith(on.id + '｜') && l.includes('写在蓝字批注「' + N2 + '」上')), on);
 T.ok('第三条（没写红字）还是小蓝点', n3.isDot && n3.type === 'note', n3);
 const cards2 = (meta2 && meta2.cards) || [];
-T.ok('两张卡片连同红字交上去了（都标着原来是短批注）', cards2.length === 2 && cards2.every((c) => c.note === true) && cards2.some((c) => c.id === w1.id && JSON.stringify(c.marks) === JSON.stringify([mk.id])), cards2);
+T.ok('只交第一条旧卡片和它的红字（标着原来是短批注）', cards2.length === 1 && cards2.every((c) => c.note === true) && cards2.some((c) => c.id === w1.id && JSON.stringify(c.marks) === JSON.stringify([mk.id])), cards2);
 T.ok('消息里说明了图里没有数字的小蓝点是什么，第三条的字在「之前写过的批注」里', Boolean(sub2) && sub2.text.includes('图里没有数字的蓝色小圆点是收起来的短批注') && sub2.text.includes('- ' + N3), sub2 && sub2.text.slice(-700));
 { // 发给 Claude 的整页图：第三条那儿是一个蓝点，原来那几行字那儿没有蓝字
   const c = meta2.crop, img = join(T.DATA, 'submissions', sub2.id, 'crop.jpg'), px = (b) => [(b[0] - c.x0) * c.scale, (b[1] - c.y0) * c.scale, (b[2] - c.x0) * c.scale, (b[3] - c.y0) * c.scale].map(Math.round);
@@ -173,7 +184,7 @@ T.ok('消息里说明了图里没有数字的小蓝点是什么，第三条的�
 // 圈号和小蓝点分得清
 await sleep(600);
 const B = await badges(), dot3 = (await note(N3)).dotScreen;
-T.ok('圈号里有数字（两个），小蓝点没有数字、比圈号小', B.length === 2 && B.every((b) => /^\d+$/.test(b.num)) && (await note(N3)).words.length === 0 && dot3[2] < Math.min(...B.map((b) => b.w)) * 0.7,
+T.ok('只有旧卡片有圈号，里面有数字；小蓝点没有数字、比圈号小', B.length === 1 && B.every((b) => /^\d+$/.test(b.num)) && (await note(N3)).words.length === 0 && dot3[2] < Math.min(...B.map((b) => b.w)) * 0.7,
   [B, dot3]);
 await T.waitFor(`document.querySelector('#toast').hidden`, 6000);
 await shot2('3-dot-and-badges.png');
@@ -186,6 +197,50 @@ const relCard = C && C.marks.length === 1 ? relTo(C.marks[0], C.lines[0], C.k * 
 T.ok('点开第一条的圈号：是长回答那种卡片（不是小卡片），原来那一行字和红字都在', Boolean(C) && !C.pop && C.lines.map((l) => l.s).join('|') === n1.lay.lines.join('|') && C.marks.length === 1, C);
 T.ok('红字相对那一行字的位置和在小卡片上写的时候一样（差不到 1.5 个单位）', near(relCard, relPop, 1.5), [relPop, relCard]);
 await tapPaper();
+
+// 旧卡片里的红字仍按卡片追问。这里接着用刚交过的旧数据，查看过的圈号也应重新提示有回应。
+const oldQ = '为什么先买菜', oldReply = '先备齐食材。';
+await js(`(() => {
+  window.__hops = [];
+  new MutationObserver(() => {
+    for (const g of document.querySelectorAll('#aiRoot > .badge.fresh')) {
+      const cs = getComputedStyle(g.querySelector('.bdg'));
+      window.__hops.push([g.dataset.id, cs.animationName, cs.animationIterationCount]);
+    }
+  }).observe(document.querySelector('#aiRoot'), { childList: true, subtree: true });
+})()`);
+await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', card: w1.n, q: oldQ, text: oldReply }] });
+T.ok('旧卡片上的红字得到回应，还是原来的圈号', await T.waitFor(`window.__ink.S.page.ai.find((a) => a.id === ${JSON.stringify(w1.id)})?.more?.length === 1`, 10000)
+  && (await badges()).length === 1);
+const replied = await note(N1);
+T.ok('旧卡片的原文和红字还在，新段记着回答的是哪一笔', replied.text === N1 && replied.marks[0].req === sub2.id && replied.more?.[0]?.q === oldQ
+  && replied.more[0].text === oldReply && replied.more[0].on.join() === mk.id);
+T.ok('旧圈号变回实心、跳两下，屏幕上方提示收到回应', !replied.seen && (await js('window.__hops')).some(([id, anim, count]) => id === w1.id && anim === 'badgeHop' && count === '2')
+  && (await js('window.__toasts')).includes('Claude 回了 1 条'));
+await T.saved();
+await T.reload();
+n1 = await note(N1);
+const oldBadge = (await badges()).find((b) => b.id === w1.id);
+await T.fingerTapAt(oldBadge.cx, oldBadge.cy);
+await js("document.querySelector('#answerCard').scrollTop = 0");
+C = await card();
+T.ok('刷新后旧卡片仍显示原话、红字和接着的回应，红字位置没变', !C.pop && C.lines.map((l) => l.s).join('|') === n1.from.lay.lines.join('|')
+  && C.marks.length === 1 && near(relTo(C.marks[0], C.lines[0], C.k * n1.fromMap.u), relPop, 1.5)
+  && (await js("document.querySelector('#acMore .ac-mq').textContent")) === '红字：' + oldQ);
+await T.tool('red');
+const atReply = await js(`(() => { const ln = document.querySelector('#acMore .ac-mbody .ac-line'); ln.scrollIntoView({ block: 'center' });
+  const r = ln.getBoundingClientRect(); return [r.left + 8, (r.top + r.bottom) / 2]; })()`);
+await penScreen(line(atReply[0], atReply[1], 55));
+const nextMark = (await note(N1)).marks.at(-1);
+T.ok('接着写在回应上的一笔归在新段，还没有交', nextMark.id !== mk.id && nextMark.blk === replied.more[0].id && !nextMark.req);
+await tapPaper();
+await T.tool('pen');
+await T.saved();
+await T.tap('#check');
+const nextSub = await T.waitSub('S1', 80), nextCards = nextSub && T.metaOf(nextSub).cards;
+T.ok('再交旧卡片，只交新写的那一笔，消息里保留原文和上一段回应', nextCards?.length === 1 && nextCards[0].id === w1.id && nextCards[0].note
+  && nextCards[0].marks.join() === nextMark.id && nextSub.text.includes('圈号 ' + w1.n + '（原来是短批注）：' + N1)
+  && nextSub.text.includes('接着（回应红字「' + oldQ + '」）：' + oldReply));
 
 // ================= 6. 橡皮、撤销、采纳对小蓝点照常有用
 n3 = await note(N3);

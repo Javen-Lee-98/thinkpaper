@@ -45,9 +45,20 @@ def asking(g):
 
 
 def red_label(g):
+    """answered_by 为 "other"（2026-11-17）：指着它的蓝字都是别的对话写的（server.App.answered_elsewhere），写明不是这个对话答的。
+    note_on（2026-11-18）：这组红笔写在纸上的一条短批注上（服务 pages.red_on_notes 认的），写明是哪条——那条批注和红字都留在纸上，
+    照别的红笔问题回在红字旁边（以前那条批注会收成圈号卡片）。"""
     if not g.get("red"):
         return ""
-    return "｜红笔（回答过）" if g.get("answered") else "｜红笔（问题）"
+    if g.get("answered"):
+        return "｜红笔（回答过：别的对话答的）" if g.get("answered_by") == "other" else "｜红笔（回答过）"
+    on = " ".join(str(g.get("note_on") or "").split())
+    if on:
+        return f"｜红笔（问题，写在蓝字批注「{on[:NOTE_ON_HEAD]}{'…' if len(on) > NOTE_ON_HEAD else ''}」上）"
+    return "｜红笔（问题）"
+
+
+NOTE_ON_HEAD = 16  # 红笔写在哪条批注上：写出那条批注的开头几个字
 
 
 def timeline_hints(listed):
@@ -187,7 +198,7 @@ ROWS_HINT = ("分了几行的组只想指其中一行时，anchor 写 {g}:1（�
              "只写 {g} 会落在整组中间，看着像指别的行。")
 
 
-# 一条改动规则。②：红字写在卡片（或短批注）上的，改写接在卡片下面（write 带 card，消息里「卡片上的红字」那一段说怎么回）；
+# 一条改动规则。②：红字写在卡片上的，改写接在卡片下面（write 带 card，消息里「卡片上的红字」那一段说怎么回）；
 # 写在纸上别处的，才回一条新的
 EDIT_RULE = (
     "改东西只按这一条规则：① 解释、检查、提建议，直接做；"
@@ -204,6 +215,8 @@ PAGE_FACTS = {
     # 2026-11-16 用户定留着（一本 PDF 可能是自己的稿子也可能是文献，服务分不出来）
     "pdf": "这一页是 PDF 的书页：看内容判断是我的稿子还是参考资料。",
     "board": "这一页是你推送到平板的东西。",
+    # 推送页按页记着是谁推的（2026-11-17）：推它的对话不在了、或用户改发到你这里时，这一页是别的对话推的
+    "board_other": "这一页是另一个对话推送到平板的东西，你没有它推这一页时的上下文，当成纸上已有的内容看。",
 }
 
 
@@ -212,6 +225,8 @@ def role_facts(meta):
     r = meta.get("role") or {}
     if r.get("page") == "editable":
         page = f"这一页是文档的书页，原文件是 {r.get('src')}（要改它，先调 mcp__inkpad__ink_edit，见「改文件」那一条）。"
+    elif r.get("page") == "board_other" and r.get("by"):
+        page = f"这一页是另一个对话（「{r['by']}」文件夹里的）推送到平板的东西，你没有它推这一页时的上下文，当成纸上已有的内容看。"
     else:
         page = PAGE_FACTS.get(r.get("page"), "")
     chosen = [g for g in meta.get("groups") or [] if (g.get("inSel") or asking(g)) and g.get("n", 1) > g.get("erased", 0)]
@@ -223,7 +238,10 @@ def role_facts(meta):
     return "这次：" + text if text else ""
 
 
-COLORS = ("颜色：红笔是我要问你的问题或对你的要求，黑笔是我自己的推导和草稿，蓝色是你之前写回来的批注；"
+# 蓝色那半句（2026-11-17 用户定，《产品定义》第 2 节「纸是跨对话、跨 AI 的共同记忆」）：一本可以换着发给不同的对话，纸上的蓝字
+# 不一定都是收消息的这个对话写的；哪几条不是，消息里说（others_line），这里只说怎么看
+COLORS = ("颜色：红笔是我要问你的问题或对你的要求，黑笔是我自己的推导和草稿，蓝色是之前写回来的批注，多半是你写的"
+          "（消息里说了哪几条不是，就当成纸上已有的内容）；"
           "之前几轮回答过的红笔问题在书写过程里标着「回答过」，深蓝带 ★ 的是我采纳的。")
 
 # 空白本子里收成小蓝点的短批注（阶段 D1，2026-11-15 补的一句）：图里只画一个点，消息里说明那些点是什么
@@ -235,7 +253,7 @@ DOT_HINT = ("图里没有数字的蓝色小圆点是收起来的短批注：被�
 TWO_LAYERS = (
     "两层：我写完一段点「AI」才交上来，不用赶快。"
     "① 红字是我明确要你办的，一条条办完：问的就答，要的就给，要生成或修改文件就照做（改已导入的文档照「改文件」那一条走）；"
-    "红字里说了要怎么回（比如「只给提示」），就照那样回。"
+    "红字里说了要怎么回（比如「只给提示」），就照那样回；没说的，长短照消息里「这次要的长短」，没写就是讲清楚（短批注加必要的几步推导或一段话）。"
     "② 红字之外，自己通读整页，只指出真正的错和漏，少而准，没有就一条都不写；其中最多一条点拨——我没想到的那个关键点，"
     "用 insert 放在它该在的位置（缺一支就用 box 指两支之间的空白），点到为止，不替我写；每条都写出依据：哪一步、哪篇文献、项目里哪个文件。"
     "红字没要求的，不改电脑上的文件。"
@@ -296,11 +314,15 @@ MAP_KIND = {"label": "建议的关系词", "node": "建议加的概念", "link":
 def verdict_block(vs):
     """「修改建议的决定」一段：我对你提的修改（以及概念图上建议加的概念、连线、分组）逐条点的 ✓/×。"""
     where = {"doc": "（在文档上）", "mine": "（在我写的内容上）"}
-    rows = [f"- {v['id']}{MAP_KIND[v['kind']] if v.get('kind') in MAP_KIND else where.get(v.get('on'), '')}「{str(v.get('text') or '')[:120]}」："
+    # other（2026-11-17）：那条建议是别的对话提的（server 按页面数据里的作者标），前面标 OTHERS_TAG，上面那句不再全说成「你提的」
+    rows = [f"- {v['id']}{OTHERS_TAG if v.get('other') else ''}{MAP_KIND[v['kind']] if v.get('kind') in MAP_KIND else where.get(v.get('on'), '')}"
+            f"「{str(v.get('text') or '')[:120]}」："
             f"{'采纳' if v.get('verdict') == 'yes' else '不采纳'}{'；旁边写了 ' + str(v['near']) if v.get('near') else ''}" for v in vs]
     edits = [v for v in vs if v.get("kind", "suggest") not in MAP_KIND]
     maps = [v for v in vs if v.get("kind") in MAP_KIND]
     what = "虚线框是你提的修改" if not maps else "虚线是你在概念图上建议加的东西" if not edits else "虚线是你提的修改和概念图上建议加的东西"
+    if any(v.get("other") for v in vs):
+        what = what.replace("你", "之前", 1) + f"（标着{OTHERS_TAG}的是别的对话提的）"
     tail = []
     if edits:
         tail.append(("修改里" if maps else "") + "同意的照改：在文档上的，动手前先调 mcp__inkpad__ink_edit（path 填原文件，不带 mode："
@@ -334,22 +356,109 @@ def _head(text, n=ANSWER_HEAD):
     return f"{text[:n]}{'…' if len(text) > n else ''}"
 
 
-def fmt_prev(note):
+def fmt_prev(note, by=None):
     """「你之前在这一页写过的批注」里的一条：短批注是原话；长回答（平板上的圈号）写成「圈号 n（问：q）：前 200 个字…」，
     卡片下面接着回过的各段（回应卡片上的红字）另起一行接在后面：「  - 接着（回应红字「…」）：前 200 个字…」。
-    纸上的短批注被我写了红字、收成的卡片（note 为真）写成「圈号 n（原来是短批注）：原话」。"""
+    纸上的短批注被我写了红字、收成的卡片（note 为真）写成「圈号 n（原来是短批注）：原话」。
+    by（2026-11-17）：{other, more}，这一条（other）、下面接着回的第几段（more，和 note["more"] 一一对应）是别的对话写的，
+    前面标 OTHERS_TAG（server.App.mark_others 按页面数据里的作者定）。"""
+    by = by if isinstance(by, dict) else {}
+    tag = OTHERS_TAG if by.get("other") else ""
     if isinstance(note, str):
-        return note.strip()
+        return tag + note.strip() if note.strip() else ""
     if not isinstance(note, dict) or not str(note.get("text") or "").strip():
         return ""
     head = f"圈号 {note['n']}" if note.get("n") else "长回答"
     q = "（原来是短批注）" if note.get("note") else f"（问：{note['q']}）" if note.get("q") else ""
-    out = f"{head}{q}：{_head(note['text'])}"
-    for m in note.get("more") or []:
+    where = OPEN_TAG if note.get("open") else ""  # 摊在纸上的（2026-11-17）：图里是那一段字，不是圈号
+    out = f"{head}{tag}{where}{q}：{_head(note['text'])}"
+    segs = by.get("more") if isinstance(by.get("more"), list) else []
+    for k, m in enumerate(note.get("more") or []):
         if isinstance(m, dict) and str(m.get("text") or "").strip():
-            mq = f"（回应红字「{m['q']}」）" if m.get("q") else ""
-            out += f"\n  - 接着{mq}：{_head(m['text'])}"
+            mq = (f"（按「{REDO_WANT[m['redo']][0]}」重写）" if m.get("redo") in REDO_WANT  # 点钮请重写的那一段（2026-11-17）
+                  else f"（回应红字「{m['q']}」）" if m.get("q") else "")
+            mt = OTHERS_TAG if k < len(segs) and segs[k] else ""
+            out += f"\n  - 接着{mt}{mq}：{_head(m['text'])}"
     return out
+
+
+PREV_MAX = 12  # 单页消息里「之前写过的批注」最多列这么多条（最近的）
+
+# 长回答摊在纸上（2026-11-17 用户定方向，细节暂定）：平板按空间把不太长的长回答直接排在纸上；列表里标出来，并说一句图里是什么样
+OPEN_TAG = "（摊在纸上）"
+OPEN_HINT = "标着「摊在纸上」的长回答，图里是它那一段蓝字本身，不是圈号。"
+
+
+def has_open(notes):
+    """列出来的之前写回的批注里有没有摊在纸上的长回答（要不要带 OPEN_HINT）。"""
+    return any(isinstance(n, dict) and n.get("open") for n in notes or [])
+
+
+# 回答要多长（2026-11-17 用户定「事先一档」）：平板「AI」旁边那个开关选的档，交上来时带着（size）。讲清楚是默认档，消息里不写；
+# 另两档写一句。红字里写了怎么回的以红字为准（固定说明 TWO_LAYERS 里那半句）
+SIZE_LINE = {
+    "brief": "这次要的长短：点一下——只给记号和一两句短批注，不展开讲。",
+    "full": "这次要的长短：展开讲——完整地讲，该推的推一遍、每步写出依据，长的写成 write。",
+}
+
+
+def size_line(size):
+    """这一次交上来时带的档（brief / clear / full）对应的那一句；讲清楚（默认）和认不出的返回空串。"""
+    return SIZE_LINE.get(size, "") if isinstance(size, str) else ""
+
+
+def prev_shown(notes):
+    """单页消息里「之前写过的批注」列出平板带来的哪几条（下标）：有字的，最后 PREV_MAX 条（server.App.mark_others 按它数列出了几条）。"""
+    return [k for k, x in enumerate(notes or []) if fmt_prev(x)][-PREV_MAX:]
+
+
+# -- 别的对话写的蓝字（2026-11-17 用户定，《产品定义》第 2 节「纸是跨对话、跨 AI 的共同记忆」）：一本换了发往的对话（以后还可能
+#    换成别的 AI）之后，新的一方看得到纸上以前的蓝字，却没有写它们的那个对话的思路。交给它时，这一页上有别的对话写的，
+#    就说明哪几条不是它写的（server.App.others_on 按页面数据里记的作者数）；全是它自己写的（或查不出）一个字都不多
+
+OTHERS_TAG = "〔不是你写的〕"  # 列表里别的对话写的那几条前面标这个
+BARE_MAX = 8  # 没在列表里的，最多写出这么多条是什么
+
+KIND_ZH = {"note": "短批注", "question": "短批注", "suggest": "修改建议", "underline": "下划线", "circle": "圈", "arrow": "箭头",
+           "tick": "勾", "cross": "叉", "strike": "删除线", "insert": "插入符", "wavy": "波浪线", "highlight": "荧光笔",
+           "brace": "大括号", "number": "编号", "label": "关系词", "node": "建议的概念", "link": "建议的连线", "group": "建议的分组",
+           "sketch": "示意图", "figure": "图", "formula": "公式"}
+
+
+def item_brief(it, sid2g=None):
+    """一条蓝字简单说是什么（others_line 里没在列表中的那几条）：「勾（g3）」「短批注「先看边界条件」（g2）」「圈号 2」。
+    sid2g：笔迹 id → 组号，指着哪几组写在括号里（最多三组）。"""
+    t = it.get("type")
+    if t == "write":
+        name = f"圈号 {it['n']}" if it.get("n") else "圈号"
+    else:
+        dot = t in ("note", "question") and isinstance(it.get("dot"), dict) and it["dot"].get("at")
+        name = "收成小蓝点的短批注" if dot else KIND_ZH.get(t, "批注")
+        text = " ".join(str(it.get("text") or "").split())
+        if text and t != "formula":
+            name += f"「{text[:16]}{'…' if len(text) > 16 else ''}」"
+    gs = []
+    for x in list(it.get("on") or []) + list(it.get("on2") or []):
+        g = (sid2g or {}).get(x)
+        if g and g not in gs:
+            gs.append(g)
+    return name + (f"（{'、'.join(gs[:3])}）" if gs else "")
+
+
+def others_line(o):
+    """这一页上有别的对话写的蓝字时，消息里的那一句。o = {n, who: [[怎么称呼, 几条]], listed, bare}（server.App.others_on）：
+    listed 是在下面的列表里标着 OTHERS_TAG 的有几条，bare 是没在列表里的那几条是什么。"""
+    who = [w for w in o.get("who") or [] if isinstance(w, (list, tuple)) and len(w) == 2]
+    by = f"是{who[0][0]}写的" if len(who) == 1 else "，".join(f"{c} 条是{w}写的" for w, c in who)
+    out = (f"这一页上有 {o['n']} 条蓝色批注不是这个对话写的（{by}），你没有它们的上下文："
+           "当成纸上已有的内容看，不要当成自己说过的话。")
+    tail, listed, bare = [], o.get("listed") or 0, [b for b in o.get("bare") or [] if b]
+    if listed:
+        tail.append(f"下面列出的批注里标着{OTHERS_TAG}的" + ("就是这几条" if listed >= o["n"] else f"是其中 {listed} 条"))
+    if bare:
+        more = f" 等 {len(bare)} 条" if len(bare) > BARE_MAX else ""
+        tail.append(("另外的是：" if listed else "它们是：") + "、".join(bare[:BARE_MAX]) + more)
+    return out + ("；".join(tail) + "。" if tail else "")
 
 
 ZH_NUM = "一两三四五六七八九十"
@@ -362,17 +471,20 @@ def count_zh(n):
 
 def card_lines(cards, page=None):
     """卡片上的红字（2026-11-14）：用户在长回答的卡片上用红笔写了批注，附了卡片的图。cards：[{n, img, note?}]；page：整本消息里的页码。
-    note 为真的是纸上的短批注收成的卡片：用户在你写在纸上的一条短批注上用红笔写了字，交稿时它收成了圈号。"""
+    note 为真的是纸上的短批注收成的卡片：用户在你写在纸上的一条短批注上用红笔写了字，交稿时它收成了圈号。
+    2026-11-18 起短批注上写红字不再收成卡片（批注和红字都留在纸上，见 red_label 的 note_on）；这里只剩以前收成的那些卡片。"""
     out = []
     for c in cards or []:
         if not isinstance(c, dict) or not c.get("img"):
             continue
         n = c.get("n") or ""
+        by = c.get("by")  # 那张卡片是别的对话写的（2026-11-17，server.App.card_images）：不说成「你」的
         if c.get("note"):
-            head = (f"圈号 {n} 的卡片原来是你写在纸上的一条短批注：我在它上面用红笔写了字，它就收成了圈号 {n}，见图 {c['img']}："
-                    "蓝字是你那条短批注（照纸上的换行），红字是我写的。")
+            head = (f"圈号 {n} 的卡片原来是{by + '（不是你）' if by else '你'}写在纸上的一条短批注：我在它上面用红笔写了字，"
+                    f"它就收成了圈号 {n}，见图 {c['img']}：蓝字是{'那' if by else '你那'}条短批注（照纸上的换行），红字是我写的。")
         else:
-            head = f"圈号 {n} 的卡片上我用红笔写了批注，见图 {c['img']}：蓝字是你之前的回答，红字是我写的。"
+            head = (f"圈号 {n} 的卡片上我用红笔写了批注，见图 {c['img']}："
+                    f"蓝字是{by + '之前的回答（不是你写的）' if by else '你之前的回答'}，红字是我写的。")
         out.append(head + f"回应用 ink_reply 的 write，card 填 {n}{'（再带上 page=' + str(page) + '）' if page else ''}，"
                    "q 填你读到的那句红字，text 写回应；回应接在那张卡片下面（要改写整段，也写在下面）。")
     return out
@@ -380,7 +492,8 @@ def card_lines(cards, page=None):
 
 def card_image_line(c):
     """「先用 Read 看这几张图」里卡片那一行。"""
-    what = "蓝字是你原来写在纸上的短批注，红字是我在它上面写的" if c.get("note") else "蓝字是你之前的回答，红字是我在卡片上写的"
+    who = c["by"] if c.get("by") else "你"  # 那张卡片是别的对话写的（2026-11-17）
+    what = f"蓝字是{who}原来写在纸上的短批注，红字是我在它上面写的" if c.get("note") else f"蓝字是{who}之前的回答，红字是我在卡片上写的"
     return f"- 圈号 {c.get('n') or ''} 的卡片：{c['img']}（{what}）"
 
 
@@ -431,10 +544,18 @@ def build_message(meta, paths, page_label, book_text, sub_id, snapshot=False, sr
     lines += text_block(book_text, src)
     lines.append(build_timeline(groups, meta.get("now") or 0, include_process))
     lines += memory_lines(meta)
-    prev = [t for t in (fmt_prev(x) for x in meta.get("prev_notes") or []) if t][-12:]
+    if isinstance(meta.get("others"), dict) and meta["others"].get("n"):  # 这一页上有别的对话写的蓝字（2026-11-17）
+        lines.append(others_line(meta["others"]))
+    notes = meta.get("prev_notes") if isinstance(meta.get("prev_notes"), list) else []
+    by = meta.get("prev_by") if isinstance(meta.get("prev_by"), list) else []
+    shown = prev_shown(notes)
+    prev = [fmt_prev(notes[k], by[k] if k < len(by) else None) for k in shown]
     if prev:
-        lines.append("你之前在这一页写过的批注：\n" + "\n".join(f"- {t}" for t in prev)
-                     + ("\n" + DOT_HINT + "它们的字就在上面这几条里。" if meta.get("dots") else ""))
+        tagged = any(isinstance(by[k], dict) and (by[k].get("other") or any(by[k].get("more") or [])) for k in shown if k < len(by))
+        head = f"这一页上之前写回的批注（标着{OTHERS_TAG}的是别的对话写的）：" if tagged else "你之前在这一页写过的批注："
+        lines.append(head + "\n" + "\n".join(f"- {t}" for t in prev)
+                     + ("\n" + DOT_HINT + "它们的字就在上面这几条里。" if meta.get("dots") else "")
+                     + ("\n" + OPEN_HINT if has_open([notes[k] for k in shown]) else ""))
     if cards:
         lines.append("卡片上的红字：\n" + "\n".join(f"- {t}" for t in card_lines(cards)))
     vs = [v for v in meta.get("verdicts") or [] if isinstance(v, dict) and v.get("id")][:20]
@@ -443,6 +564,8 @@ def build_message(meta, paths, page_label, book_text, sub_id, snapshot=False, sr
     owed = [o for o in meta.get("owed") or [] if isinstance(o, dict) and o.get("sub") and o.get("ids")]
     if owed:  # 之前采纳的修改还没回报的（服务记着）
         lines.append(owed_block(owed))
+    if not snapshot and size_line(meta.get("size")):  # 「AI」旁边那个开关选的档（2026-11-17）；快照不是用户交的，不带
+        lines.append(size_line(meta.get("size")))
     # 别的旧批注不请 Claude 整理：采纳、擦掉都由我在平板上用笔定
     lines.append(f'写回用 mcp__inkpad__ink_reply（submission="{sub_id}"）。')
     return "\n\n".join(lines)
@@ -460,7 +583,8 @@ WRITE_HINT = (
     "放在哪由草稿纸定，你只要把 anchor 指对：填笔迹编号，指印刷文字或没有编号的地方用 box。"
     "回答红字：短的用 note（问句用 question），anchor 填那个红笔问题的编号：它成为一条用细线连过去的短批注"
     "（空白本子里挡了我后来写的字，就收成一个小蓝点）。"
-    "长的用 write，anchor 填所答的那条红字（或它讲的那处笔迹），q 填问题原文：平板在那里标一个圈号，我点圈号才看到全文，不占纸面。"
+    "长的用 write，anchor 填所答的那条红字（或它讲的那处笔迹），q 填问题原文：旁边有空又不太长，草稿纸把它摊在纸上；"
+    "否则标一个圈号，我点开才看到全文，不占纸面（想放哪、要收着，用 ink_reply 的 place、fold）。"
     "红笔是指令（标出、圈出、排序、整理……）时，可以只用标记回应，再用 tick 标在那条红笔上（anchor 填它的编号），表示处理过了。"
     "每次回都给红笔那几组和回应到的那几组各交一条 read（照写的原样转写）。"
     "标记用来代替大段的话，不是越多越好，只标要紧的：对我写的东西（或书页上的字）直接标在上面，各种批改符号怎么用见 ink_reply 的说明。"
@@ -468,9 +592,11 @@ WRITE_HINT = (
     "对话里只用半句话说写了什么；代码、文件改动这类纸上放不下的照常在对话里做。"
 )
 
-# 卡片上的红字（2026-11-14）：用户在长回答的卡片上（或纸上的短批注上）用红笔批注、追问，Claude 的回应接在同一张卡片下面。
-# 怎么回在每条附了卡片的消息里（card_lines、card_image_line）和插件 ink_reply 的说明里，这里只指路（2026-11-16 规则瘦身）
-CARD_HINT = "卡片上的红字：我在长回答的卡片上（或纸上的短批注上）写了红字时，消息里附那张卡片的图和怎么回，照那一段做（write 带 card）。"
+# 卡片上的红字（2026-11-14）：用户在长回答的卡片上用红笔批注、追问，Claude 的回应接在同一张卡片下面。
+# 怎么回在每条附了卡片的消息里（card_lines、card_image_line）和插件 ink_reply 的说明里，这里只指路（2026-11-16 规则瘦身）。
+# 纸上的短批注上写的红字（2026-11-18 用户改的）：那条批注不再收成卡片，红字照旧是纸上的红笔问题（书写过程里写明写在哪条批注上）
+CARD_HINT = ("卡片上的红字：我在长回答的卡片上写了红字时，消息里附那张卡片的图和怎么回，照那一段做（write 带 card）；"
+             "写在纸上蓝字批注上的红字照纸上别的红笔问题回。")
 
 # 问话卡片（2026-11-14，阶段 C）：只有这两种情况才发卡片到平板；没答就停手等着、忽略了不再问——这些在插件 ink_ask 的说明和
 # 它的返回里（ASK_IGNORED、插件的 ASK_PENDING），这里只留什么时候用（2026-11-16 规则瘦身）
@@ -489,7 +615,7 @@ ASK_IGNORED = ("用户忽略了这个问题，没有回答。不要再问同一�
 
 # 修改建议：页面只把指着书页（或推送页）上印刷内容的 suggest 画成带 ✓ × 的虚线框；空白本子上、指着用户手写的字的，画成普通短批注
 SUGGEST_HINT = (
-    "suggest 只用在改文档：书页（或你推送的页）上印刷的内容，按改动规则第④条，一处一条，anchor 或 box 指着要改的那块，"
+    "suggest 只用在改文档：书页（或推送到平板的页）上印刷的内容，按改动规则第④条，一处一条，anchor 或 box 指着要改的那块，"
     "text 写改成什么（如「改为：……」「删去这句」）。我自己写的字有错，用批改符号（strike 写改成什么、insert、cross 写理由），不用 suggest："
     "指着手写的字或写在空白本子上的 suggest，草稿纸只当一条短批注画，没有 ✓ ×。"
     "我在平板上点建议框旁的 ✓ / ×，决定随我下一次交上来的消息带给你，照那里说的做。"
@@ -517,7 +643,7 @@ IMPORT_REMIND = ("提醒：这个文件在上次导入之后改过，留底里�
 
 # ink_reply 写回时服务查出来的，接在工具结果后面告诉 Claude（2026-11-16 规则瘦身 B 组：原来写在固定说明里的几条改成服务把关，
 # 见 server.settle_items、App.reads_owed）。k 是 items 里的第几条（从 1 数）
-REPLY_LONG_NOTE = ("第 {k} 条 {type} 约 {n} 字，比短批注长（超过 {max} 字），收成了圈号卡片，放在{where}旁边；"
+REPLY_LONG_NOTE = ("第 {k} 条 {type} 约 {n} 字，比短批注长（超过 {max} 字），当成长回答放在{where}旁边（草稿纸按空间摊在纸上或收成圈号卡片）；"
                    "长的回答直接用 write（回答红字时带上 q，卡片顶上显示问的是什么）。")
 REPLY_END_ANCHOR = ("第 {k} 条 write 的 anchor 写了 end，当成没指明答哪句：圈号由草稿纸放（这一轮最后一句还没答的红笔问题旁边）；"
                     "write 的 anchor 填所答的那条红笔。")
@@ -574,6 +700,37 @@ def build_undo_message(u):
     return "【草稿纸·撤回】" + body + "这条只是告诉你，不用回复，也不用动手。"
 
 
+# 卡片上的「再短点」「展开讲」（2026-11-17 用户定「事后一键」，细节暂定）：用户点了，服务把这一条交给写它的那个对话重写，
+# 回应接在那张卡片下面（write 带 card，和回应卡片上的红字同一条路）。钮上的字、要怎么改
+REDO_WANT = {
+    "brief": ("再短点", "写短一点：只留最要紧的一两句（需要的话一个式子），别的删掉"),
+    "full": ("展开讲", "展开讲：完整地讲，该推的推一遍、每步写出依据"),
+}
+
+
+def build_redo_message(r, sub_id):
+    """用户在长回答的卡片上点了「再短点」或「展开讲」。r：{n 圈号, want（brief / full）, q, text 原来的回答,
+    more（卡片下面接着回过的各段 [{q, text}]）, label（页面）, by（这条是别的对话写的时怎么称呼它；是收消息的对话写的为空）}。"""
+    name, how = REDO_WANT[r["want"]]
+    n = r.get("n") or ""
+    lines = [f"【草稿纸·重写】我在平板上点了圈号 {n} 那张卡片上的「{name}」：请把这条回答{how}。", f"页面：{r.get('label') or ''}。"]
+    if r.get("by"):
+        lines.append(f"这条回答是{r['by']}写的（不是你），你没有它的上下文：照下面的原文重写。")
+    lines.append("原来的回答" + (f"（问：{r['q']}）" if r.get("q") else "") + "：\n" + str(r.get("text") or "").strip())
+    segs = [m for m in r.get("more") or [] if isinstance(m, dict) and str(m.get("text") or "").strip()]
+    if segs:
+        def seg_head(m):
+            if m.get("redo") in REDO_WANT:
+                return f"（按「{REDO_WANT[m['redo']][0]}」重写）"
+            return f"（回应红字「{m['q']}」）" if m.get("q") else ""
+        lines.append("卡片下面接着回过的：\n" + "\n".join(f"- {seg_head(m)}{_head(m['text'])}" for m in segs))
+    # 这里不带平时交页用的「这次要的长短」那句：「点一下」那句说的是「只给记号和一两句短批注」，和下面要的一条 write 对不上
+    # （2026-11-18，审查指出的）；要多长上面第一句已经说了
+    lines.append(f'写回用 mcp__inkpad__ink_reply（submission="{sub_id}"）：一条 write（再短也用 write，不用 note），card 填 {n}，'
+                 "text 写重写后的整条回答；它接在那张卡片下面，不出新的圈号。")
+    return "\n\n".join(lines)
+
+
 # 概念图（label、node、link、group 是建议，画成虚线，点 ✓ 才变实线；连错的用 cross、有疑问用 question、中心概念用 circle）：
 # 怎么给在插件 ink_reply 的说明里，这里只指路（2026-11-16 规则瘦身）
 MAP_HINT = ("我画概念图（框、圈着的词用箭头连起来）时，在图上互动：补关系词、建议加概念、加连线、归类"
@@ -592,11 +749,12 @@ CONFIRM_HINT = (
 )
 
 
-def build_scan_message(title, infos, sub_id, origin="claude", only_new=False, skipped_old=0, truncated=0, owed=None):
+def build_scan_message(title, infos, sub_id, origin="claude", only_new=False, skipped_old=0, truncated=0, owed=None, size=None):
     """整本检测：一本里写过字的每一页各一张图，附各页的书写过程（固定说明在对话的系统提示里，这里不附）。
 
     infos: [{no, image, label, scale, h, groups, now, first, clip, pdf?}]，groups 里 inSel 表示上次之后新写的。
     owed：之前采纳了、还没回报的修改（owed_block），放在最后那句「写回某一页用……」前面。
+    size：用户点「AI」几页一起交时「AI」旁边那个开关选的档（2026-11-17，size_line），也放在那句前面。
     """
     if origin == "tablet":  # 点「AI」时别的页也有新写的：平板带 only_new 一起交
         head = f"【草稿纸·整本】我把《{title}》里{'有新笔迹' if only_new else '写过字'}的页一起发给你（共 {len(infos)} 页）。"
@@ -635,7 +793,12 @@ def build_scan_message(title, infos, sub_id, origin="claude", only_new=False, sk
         if p.get("pdf"):
             bits.append(f"书页原文在 {p['pdf']} 第 {p.get('pdf_page', p['no'])} 页（要核对印刷内容时再读）")
         if p.get("unplaced"):
-            bits.append(f"你之前写回这一页的 {p['unplaced']} 条批注还在排队，平板打开这一页时才会落下，图里还看不到；别重复写。")
+            k = p.get("unplaced_other") or 0  # 其中别的对话写的（2026-11-17）：不全算在收消息的这个对话头上
+            if k:
+                bits.append(f"这一页还有 {p['unplaced']} 条写回的批注在排队（{'都' if k >= p['unplaced'] else f'其中 {k} 条'}不是这个对话写的），"
+                            "平板打开这一页时才会落下，图里还看不到；别重复写。")
+            else:
+                bits.append(f"你之前写回这一页的 {p['unplaced']} 条批注还在排队，平板打开这一页时才会落下，图里还看不到；别重复写。")
         if p.get("first"):
             bits.append("这一页你第一次看，全部笔迹都算新写的。")
         elif not new:
@@ -644,9 +807,15 @@ def build_scan_message(title, infos, sub_id, origin="claude", only_new=False, sk
         if facts:
             bits.append(facts)
         bits.append(build_timeline(p["groups"], p.get("now") or 0, True, star="上次之后新写或擦改的"))
-        answers = [t for t in (fmt_prev(a) for a in p.get("answers") or []) if t]
-        if answers:  # 图里只有圈号：让 Claude 知道自己在这一页答过什么
-            bits.append("你之前在这一页写过的长回答（图里的蓝色圈号）：\n" + "\n".join(f"- {t}" for t in answers))
+        if isinstance(p.get("others"), dict) and p["others"].get("n"):  # 这一页上有别的对话写的蓝字（2026-11-17）
+            bits.append(others_line(p["others"]))
+        listed = [a for a in p.get("answers") or [] if fmt_prev(a)]
+        answers = [fmt_prev(a, a.get("by") if isinstance(a, dict) else None) for a in listed]
+        if answers:  # 图里只有圈号：让 Claude 知道自己在这一页答过什么；有别的对话写的就标出来
+            tagged = any(isinstance(a, dict) and a.get("by") for a in listed)
+            head = (f"这一页之前写回的长回答（图里的蓝色圈号；标着{OTHERS_TAG}的是别的对话写的）：" if tagged
+                    else "你之前在这一页写过的长回答（图里的蓝色圈号）：")
+            bits.append(head + "\n" + "\n".join(f"- {t}" for t in answers) + ("\n" + OPEN_HINT if has_open(listed) else ""))
         if p.get("dots"):  # 图里只有小蓝点：让 Claude 知道那几个点是哪几条短批注
             bits.append(DOT_HINT + "这一页收起来的是：\n" + "\n".join(f"- {t}" for t in p["dots"]))
         if p.get("cards"):  # 长回答卡片上我写了红字：每张卡片另一张图
@@ -657,6 +826,8 @@ def build_scan_message(title, infos, sub_id, origin="claude", only_new=False, sk
     owed = [o for o in owed or [] if isinstance(o, dict) and o.get("sub") and o.get("ids")]
     if owed:
         lines.append(owed_block(owed))
+    if origin == "tablet" and size_line(size):
+        lines.append(size_line(size))
     lines.append(f'写回某一页用 mcp__inkpad__ink_reply（submission="{sub_id}"，page=页码），anchor 用那一页的笔迹编号，box 用那一页图里的像素坐标；'
                  f'不同页分别调用。ink_confirm 也要带 submission="{sub_id}" 和 page。')
     return "\n\n".join(lines)

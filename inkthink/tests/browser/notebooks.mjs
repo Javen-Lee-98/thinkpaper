@@ -167,9 +167,12 @@ T.ok('原文件的记录也跟着走（还指着电脑上那份原文件）', Bo
 // 6. 草稿本不能改名、不能删
 await tap(rowOf('草稿本') + ' .nb-name');
 await nbIs('scratch');
-T.ok('草稿本那一行没有「⋯」（没有改名和删除）', (await T.count('#nbList .nb-item.cur')) === 1 && (await T.count('#nbList .nb-item.cur .nb-more')) === 0
+await tap(rowOf('草稿本') + ' .nb-more', 300); // 2026-11-18 起草稿本也有「⋯」，里面只有「复制这本…」
+T.ok('草稿本那一行的「⋯」里没有改名和删除（只有「复制这本…」）', (await T.count('#nbList .nb-item.cur')) === 1
+  && JSON.stringify(await js(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act)`)) === '["copy"]'
   && !(await T.visible('#actRename')) && !(await T.visible('#actDelete')),
-  await js(`[...document.querySelectorAll('#nbList .nb-item.cur .nb-acts button')].map((b) => b.className + ':' + b.textContent)`));
+  await js(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act + ':' + b.textContent)`));
+await tap(rowOf('草稿本') + ' .nb-more', 300); // 收起
 const no6 = await T.api('/api/notebook/rename', { method: 'POST', body: JSON.stringify({ nb: 'scratch', title: '改不了' }) });
 T.ok('直接让服务改草稿本的名字也不行', no6.status === 400 && (await T.apiJson('/api/notebooks'))[0].title === '草稿本', no6.status);
 

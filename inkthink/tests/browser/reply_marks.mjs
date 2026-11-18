@@ -1,4 +1,5 @@
 // Claude 的短批注和批改符号：写回后画在所指的那组笔迹旁边、带的话显示出来、存到电脑上、刷新后还在；
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 擦掉所指的字，符号跟着不画；橡皮擦蓝字；平板不在那一页时先排队；「⋯」菜单里的显示开关和清除（撤销能整页找回）。
 // 跑法：node tests/browser/reply_marks.mjs [临时目录]；有一项不对退出码 1。
 import { existsSync, readFileSync } from 'node:fs';
@@ -184,7 +185,7 @@ T.ok('再点一次：蓝字又都画出来', nDrawn >= 14 && (await T.count('#ai
 // 9. 「清除本页 Claude 批注」：先问一句；按取消不清，按确定清空，我的字不动。清除能撤销（2026-11-16 用户定）：
 //    撤销一次整页原样回来，连圈号看过没看过都和清除前一样；再清一次、刷新后还是清掉的；清空了再点清除不再问
 // 先来两条长回答（圈号），点开其中一条（看过、空心），另一条没看过（实心）
-await T.post('/bridge/reply', { sid: 'S1', submission: sub.id, items: [{ type: 'write', anchor: 'g1', q: '问一', text: '回答一' }, { type: 'write', anchor: 'g4', q: '问二', text: '回答二' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: sub.id, items: [{ type: 'write', fold: true, anchor: 'g1', q: '问一', text: '回答一' }, { type: 'write', fold: true, anchor: 'g4', q: '问二', text: '回答二' }] });
 T.ok('（前提）两条长回答落下了', await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 2`, 10000));
 if (await T.visible('#menu')) await T.tap('#menuBtn'); // 上一步开着的「⋯」菜单先收起，免得挡着圈号
 await sleep(1200); // 笔刚用过的一秒内手指不算

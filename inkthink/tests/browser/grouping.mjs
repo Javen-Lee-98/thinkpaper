@@ -6,8 +6,9 @@
 //    交上去的分组是 3 组，第一组带 late、lateAt、tw；书写过程写着「其中 1 笔是 … 回头补的」，下一组「之前停顿」（按 tw 算，不按补的那一点）；
 //    服务端按存好的这一页自己分组，编号和每组的笔迹一样；整本检测这一页，组号和每组的笔迹也一样。截两张图：交给 Claude 的图（带编号）、
 //    纸上画出分组框和编号。
-// 3. 短批注上的红字按新的分组算（noteFollowups）：一个词写在批注上、停了 2.5 秒接着写到批注外——整个词进卡片（以前后半截留在纸上）；
-//    一句很长的红字从正文写进批注、中间停过——整句留在纸上、照旧是一组普通的红笔（以前压着批注的那半句被收进卡片）。
+// 3. 短批注上的红字按新的分组算：一个词写在批注上、停了 2.5 秒接着写到批注外——整个词是一组，书写过程里写明它写在那条批注上；
+//    一句很长的红字从正文写进批注、中间停过——整句是一组普通的红笔（太宽，不算冲着那条批注）。
+//    （2026-11-18 起红笔批过的短批注留在纸上，红字也都留在纸上，不再收成卡片；以前查的是「整个词进卡片」）
 // 笔是 pointerType 为 pen 的鼠标事件；只在无头 Edge 里跑过。
 // 跑法：node tests/run_browser.mjs <临时目录> --only grouping；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
@@ -196,19 +197,20 @@ T.ok('（前提）按原来的规则这两截是两组：中间停了 1.8 秒以
   && partB.every((id) => mk(id).x0 > nA.right + 10), [mk(partB[0]).t0 - mk(partA[2]).t1, partB.map((id) => mk(id).x0), nA.right]);
 const gNow = await js(`window.__ink.computeGroups(window.__ink.S.page.strokes).map((g) => g.strokes.map((s) => s.id))`);
 T.ok('（页面）现在的分组：这个词是一组，这句话是一组', gNow.some((ids) => same(ids, [...partA, ...partB])) && gNow.some((ids) => same(ids, sentence)), gNow.map((ids) => ids.length));
-T.ok('（前提）这句话从正文写进批注：最后一截压着批注的字，整句比卡片放得下的（约 510）宽', sentence.slice(-8).some((id) => mk(id).x1 > nB.lay.x + 2)
+T.ok('（前提）这句话从正文写进批注：最后一截压着蓝字，整句超过算作追问的宽度（510）', sentence.slice(-8).some((id) => mk(id).x1 > nB.lay.x + 2)
   && Math.max(nB.right, ...sentence.map((id) => mk(id).x1)) - Math.min(...sentence.map((id) => mk(id).x0)) > 520, [nB.lay.x, nB.right, sentence.map((id) => [mk(id).x0, mk(id).x1])]);
 await T.tap('#check');
 const sub4 = await T.waitSub('S1', 80), meta4 = sub4 && T.metaOf(sub4);
 const wA = await item(nA.id), wB = await item(nB.id);
-const onPaper = await S(`S.page.strokes.map((s) => s.id)`);
-T.ok('写在第一条上的那个词：整个词（停顿前后两截）都收进了卡片，纸上一笔不剩', Boolean(wA) && wA.type === 'write' && same((wA.marks || []).map((m) => m.id), [...partA, ...partB])
-  && ![...partA, ...partB].some((id) => onPaper.includes(id)), [wA && wA.type, wA && (wA.marks || []).map((m) => m.id), partA, partB]);
-T.ok('投递里有这张卡片，交的是这个词的 6 笔', Boolean(meta4) && (meta4.cards || []).length === 1 && meta4.cards[0].id === nA.id && same(meta4.cards[0].marks, [...partA, ...partB]),
-  meta4 && meta4.cards);
-T.ok('从正文写进第二条的那句话：整句留在纸上，第二条照旧是纸上的批注', Boolean(wB) && wB.type === 'note' && sentence.every((id) => onPaper.includes(id)), [wB && wB.type, sentence.filter((id) => !onPaper.includes(id))]);
-T.ok('这句话作为一组普通的红笔交上去了（整句一组，没拆开）', Boolean(meta4) && meta4.groups.some((g) => g.red && !g.answered && same(g.ids, sentence)),
-  meta4 && meta4.groups.map((g) => [g.id, g.red, g.ids.length]));
+const onPaper = await S(`S.page.strokes.filter((s) => !s.erasedAt).map((s) => s.id)`);
+const gWord = meta4 && meta4.groups.find((g) => same(g.ids, [...partA, ...partB])), gSent = meta4 && meta4.groups.find((g) => same(g.ids, sentence));
+T.ok('写在第一条上的那个词：两条批注都照旧在纸上，整个词（停顿前后两截）留在纸上，投递里没有卡片', Boolean(wA && wB) && wA.type === 'note' && wB.type === 'note'
+  && !wA.dot && !wB.dot && (await noteOf(NA)).right > nA.lay.x && (await noteOf(NB)).right > nB.lay.x
+  && [...partA, ...partB, ...sentence].every((id) => onPaper.includes(id)) && Boolean(meta4) && !meta4.cards, [wA && wA.type, wB && wB.type, meta4 && meta4.cards]);
+T.ok('这个词作为一组红笔交上去（6 笔一组），书写过程里写明写在批注「牛奶买两盒」上', Boolean(gWord) && gWord.red && !gWord.answered && gWord.note_on === NA
+  && sub4.text.split('\n').some((l) => l.startsWith(gWord.id + '｜') && l.includes('｜红笔（问题，写在蓝字批注「牛奶买两盒」上）')), [gWord, sub4 && sub4.text.slice(0, 1200)]);
+T.ok('从正文写进第二条的那句话：整句一组普通的红笔（没拆开），太宽、不算冲着第二条', Boolean(gSent) && gSent.red && !gSent.answered && !gSent.note_on
+  && sub4.text.split('\n').some((l) => l.startsWith(gSent.id + '｜') && l.includes('｜红笔（问题）')), meta4 && meta4.groups.map((g) => [g.id, g.red, g.ids.length, g.note_on]));
 
 T.ok('页面没有报错', !T.errors.length, T.errors);
 await T.finish();

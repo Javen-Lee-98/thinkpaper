@@ -1,7 +1,8 @@
 // 套索（2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」第二批）：选了「套索」，用笔画一圈，圈里没擦掉的笔迹被选中，
-// 按住框里拖到别处；只指着这几笔的 Claude 的东西跟着平移同样的量。
+// 按住框里拖到别处；只指着这几笔的 Claude 的东西跟着平移同样的量；箭头、连线只有一头指着这几笔的，那一头跟着走（2026-11-17）。
 // 这里只有纯计算：点在不在圈里（inPolygon）、哪几笔被圈中（pick）、挪一笔的点（shiftPts）、挪 Claude 的一条东西（shiftItem，
-// 连同它的 SVG 路径 shiftPath）、哪几条跟着走（follows）、拖动时夹在纸内（clampDelta）。什么时候算选中、怎么画、撤销重做，在 static/app.js。
+// 连同它的 SVG 路径 shiftPath）、哪几条怎么跟着走（followMode）、只挪箭头连线的一头（bendItem）、撤销恢复时照原样放回的坐标字段
+// （fieldsOf、putFields）、拖动时夹在纸内（clampDelta）。什么时候算选中、怎么画、书页页边的短批注怎么排、撤销重做，在 static/app.js。
 // 平板和 node 测试（tests/test_lasso.mjs）共用。门槛是暂定，用户在平板上试过再定。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -97,8 +98,7 @@
   // 小蓝点浮出的小卡片、短批注收成的卡片最上面那块的换算 popMap、fromMap 的 x0、y0（和纸上那几行一起挪，卡片里画出来的一点不变）；
   // 短批注收成卡片时原样留下的那条 from（递归）。卡片上的红字 marks、排版快照 sheet 是卡片里的坐标，不挪。
   // 换成新的数组、对象，不在原处改：有的条目几个字段共用同一个数组（概念图的建议 box 和 vbox 是同一个），原处改会挪两次。
-  // 走一遍这些字段（mapCoords）：X、Y 换一个横、竖坐标，D 换一条路径；挪（shiftItem）、取下来（coordsOf）、放回去（putCoords）都用它，
-  // 字段只在这里列一次，先后也一样
+  // 走一遍这些字段（mapCoords）：X、Y 换一个横、竖坐标，D 换一条路径。撤销、恢复时照原样放回的是这些字段整个的样子（FIELDS、fieldsOf）
   const BOX_KEYS = ['box', 'vbox', 'hit', 'sym', 'labelOf'];
   function mapCoords(a, X, Y, D) {
     if (!a || typeof a !== 'object') return;
@@ -115,24 +115,97 @@
     if (a.dot && typeof a.dot === 'object' && isPt(a.dot.at)) a.dot = Object.assign({}, a.dot, { at: [X(a.dot.at[0]), Y(a.dot.at[1])] });
     if (a.popMap) a.popMap = x0y0(a.popMap);
     if (a.fromMap) a.fromMap = x0y0(a.fromMap);
+    // 摊在纸上的长回答（2026-11-17）：那一段的左上角挪，各行是相对它的、不用挪；连到所答笔迹的细线（lead，一条路径）跟着挪
+    if (a.spread && typeof a.spread === 'object' && num(a.spread.x) && num(a.spread.y)) {
+      a.spread = Object.assign({}, a.spread, { x: X(a.spread.x), y: Y(a.spread.y) }, typeof a.spread.lead === 'string' ? { lead: D(a.spread.lead) } : {});
+    }
     if (a.from && typeof a.from === 'object') mapCoords(a.from, X, Y, D);
   }
   function shiftItem(a, dx, dy) {
     mapCoords(a, (v) => shiftNum(v, dx), (v) => shiftNum(v, dy), (d) => shiftPath(d, dx, dy));
     return a;
   }
-  // 一条东西身上的页面坐标，按 mapCoords 走的先后排成一列（不改它）。撤销、重做时照它原样放回去（putCoords）：
-  // 有的坐标不是一位小数（箭头旁那句话的位置之类），加了又减会差最后一位，放回原数才分毫不差
-  function coordsOf(a) {
-    const out = [], take = (v) => { out.push(v); return v; };
-    if (a && typeof a === 'object') mapCoords(JSON.parse(JSON.stringify(a)), take, take, take);
+  // 一条东西身上带页面坐标的字段（mapCoords 走的那些），整个取下来一份（深拷贝，不改它；值是 undefined 的当没有）。撤销、恢复时照它原样
+  // 放回去（putFields）：有的坐标不是一位小数（箭头旁那句话的位置之类），加了又减会差最后一位；书页页边的短批注挪动时细线是重画的、
+  // 可能多一条少一条（app.js 的 colShift），只有整个放回去才分毫不差
+  const FIELDS = BOX_KEYS.concat(['at', 'lay', 'fig', 'labels', 'paths', 'dot', 'popMap', 'fromMap', 'from', 'spread']);
+  const copy = (v) => JSON.parse(JSON.stringify(v));
+  function fieldsOf(a) {
+    const out = {};
+    if (a && typeof a === 'object') for (const k of FIELDS) if (a[k] !== undefined) out[k] = copy(a[k]);
     return out;
   }
-  function putCoords(a, list) {
-    let i = 0;
-    const next = () => list[i++];
-    mapCoords(a, next, next, next);
+  // 放回去：f 里有的字段换成它（一份拷贝），没有的从 a 上拿掉；别的字段不动
+  function putFields(a, f) {
+    for (const k of FIELDS) { if (f && f[k] !== undefined) a[k] = copy(f[k]); else delete a[k]; }
     return a;
+  }
+
+  // 箭头、连线（arrow；概念图上建议的连线 link）画出来的线：第一条路径是线身「M 起点 Q 控制点 终点」（app.js 的 arrowPaths），
+  // 第二条是终点处的箭头「M 一边 L 终点 L 另一边」。返回 { p1, c, p2, head: [一边, 另一边] | null }；线身认不出来返回 null
+  const NUM = '([-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)', SEP = '[\\s,]+';
+  const SHAFT = new RegExp(`^\\s*M\\s*${NUM}${SEP}${NUM}\\s*Q\\s*${NUM}${SEP}${NUM}${SEP}${NUM}${SEP}${NUM}\\s*$`);
+  const HEAD = new RegExp(`^\\s*M\\s*${NUM}${SEP}${NUM}\\s*L\\s*${NUM}${SEP}${NUM}\\s*L\\s*${NUM}${SEP}${NUM}\\s*$`);
+  function shaftOf(a) {
+    const ps = a && Array.isArray(a.paths) ? a.paths : [];
+    const m = ps[0] && typeof ps[0].d === 'string' ? ps[0].d.match(SHAFT) : null;
+    if (!m) return null;
+    const v = m.slice(1).map(Number), h = ps[1] && typeof ps[1].d === 'string' ? ps[1].d.match(HEAD) : null, u = h && h.slice(1).map(Number);
+    return { p1: [v[0], v[1]], c: [v[2], v[3]], p2: [v[4], v[5]], head: u ? [[u[0], u[1]], [u[4], u[5]]] : null };
+  }
+
+  // 关系词按线排在哪（和 app.js 的 arrowPaths、buildMap 同一个算法，改那边要跟着改这里）：线身弯出去的那一侧，离首尾连线的中点
+  // 「弯出去的量的一半 + 14」；连线（link）的关系词再按字的宽高（lay.w、lay.h）往外让，返回字那一块的中心；箭头（arrow）返回字的左端
+  function labelSpot(type, p1, c, p2, lay) {
+    const D = [p2[0] - p1[0], p2[1] - p1[1]], len = Math.hypot(D[0], D[1]) || 1, n = [-D[1] / len, D[0] / len];
+    const m = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2], bow = (c[0] - m[0]) * n[0] + (c[1] - m[1]) * n[1];
+    const off = bow / 2 + 14 * Math.sign(bow || 1), l = [m[0] + n[0] * off, m[1] + n[1] * off];
+    if (type !== 'link' || !lay || !num(lay.w) || !num(lay.h)) return l;
+    const L = Math.hypot(l[0] - m[0], l[1] - m[1]) || 1, u = [(l[0] - m[0]) / L, (l[1] - m[1]) / L];
+    const k = -14 + 8 + Math.abs(u[0]) * lay.w / 2 + Math.abs(u[1]) * lay.h / 2;
+    return [l[0] + u[0] * k, l[1] + u[1] * k];
+  }
+
+  // 箭头、连线只有一头跟着选中的笔迹走（2026-11-17 用户说可以处理的毛病：原来整条留在原处，被挪走的那一头落在空白上）。
+  // end 是 'to'（终点、带箭头的那头，对应 on）或 'from'（起点，对应 on2）：那一头的端点挪 (dx, dy)，另一头一点不动，线跟着变斜、变长。
+  // 弯的样子不变：控制点在首尾连线上的位置（沿线、垂直于线，都按连线长量）照旧；箭头那两笔按终点处线的走向转过去，长短、张开的角度不变；
+  // 关系词（lay）、连线的 ✓ × 钮围着的框（box、vbox）按 labelSpot 在新线上该在的地方挪过去（挪的量是新旧两处之差，原来排字时让开的一点照旧）；
+  // 点、擦的范围 hit 按新的首尾重算（arrowPaths、buildMap 的算法：首尾外面 10，连线连同关系词那一块）；箭头的 box（终点那块）终点跟着走时挪。
+  // 换成新的数组、对象，不在原处改。线身认不出来（不是「M Q」一段）返回 false，什么都不改（留在原处）
+  function bendItem(a, end, dx, dy) {
+    const g = shaftOf(a);
+    if (!g || (end !== 'to' && end !== 'from')) return false;
+    const f = (v) => String(r1(v)), isBox = (b) => Array.isArray(b) && b.length === 4 && b.every(num);
+    const mv = (p) => [shiftNum(p[0], dx), shiftNum(p[1], dy)];
+    const p1 = end === 'from' ? mv(g.p1) : g.p1, p2 = end === 'to' ? mv(g.p2) : g.p2;
+    const D = [g.p2[0] - g.p1[0], g.p2[1] - g.p1[1]], L2 = D[0] * D[0] + D[1] * D[1], q = [g.c[0] - g.p1[0], g.c[1] - g.p1[1]];
+    const u = L2 ? (q[0] * D[0] + q[1] * D[1]) / L2 : 0.5, w = L2 ? (q[1] * D[0] - q[0] * D[1]) / L2 : 0; // 沿线、垂直于线（向左为正）
+    const E = [p2[0] - p1[0], p2[1] - p1[1]];
+    const c = [r1(p1[0] + u * E[0] - w * E[1]), r1(p1[1] + u * E[1] + w * E[0])];
+    const paths = a.paths.slice();
+    paths[0] = Object.assign({}, a.paths[0], { d: `M${f(p1[0])} ${f(p1[1])} Q${f(c[0])} ${f(c[1])} ${f(p2[0])} ${f(p2[1])}` });
+    if (g.head) {
+      const unit = (x, y) => { const l = Math.hypot(x, y); return l > 1e-9 ? [x / l, y / l] : null; };
+      const t0 = unit(g.p2[0] - g.c[0], g.p2[1] - g.c[1]) || unit(D[0], D[1]) || [1, 0];
+      const t1 = unit(p2[0] - c[0], p2[1] - c[1]) || unit(E[0], E[1]) || t0;
+      const turn = (h) => { // 在终点处线的走向上（沿线 s、向左 t）的位置不变
+        const r = [h[0] - g.p2[0], h[1] - g.p2[1]], s = r[0] * t0[0] + r[1] * t0[1], t = r[1] * t0[0] - r[0] * t0[1];
+        return [p2[0] + s * t1[0] - t * t1[1], p2[1] + s * t1[1] + t * t1[0]];
+      };
+      const h1 = turn(g.head[0]), h2 = turn(g.head[1]);
+      paths[1] = Object.assign({}, a.paths[1], { d: `M${f(h1[0])} ${f(h1[1])} L${f(p2[0])} ${f(p2[1])} L${f(h2[0])} ${f(h2[1])}` });
+    }
+    a.paths = paths;
+    const s0 = labelSpot(a.type, g.p1, g.c, g.p2, a.lay), s1 = labelSpot(a.type, p1, c, p2, a.lay), lx = s1[0] - s0[0], ly = s1[1] - s0[1];
+    if (a.lay && num(a.lay.x) && num(a.lay.y)) a.lay = Object.assign({}, a.lay, { x: a.lay.x + lx, y: a.lay.y + ly });
+    if (a.type === 'link') { for (const k of ['box', 'vbox']) if (isBox(a[k])) { const b = a[k]; a[k] = [r1(b[0] + lx), r1(b[1] + ly), r1(b[2] + lx), r1(b[3] + ly)]; } }
+    else if (end === 'to' && isBox(a.box)) a.box = [shiftNum(a.box[0], dx), shiftNum(a.box[1], dy), shiftNum(a.box[2], dx), shiftNum(a.box[3], dy)];
+    if (isBox(a.hit)) {
+      let h = [Math.min(p1[0], p2[0]) - 10, Math.min(p1[1], p2[1]) - 10, Math.max(p1[0], p2[0]) + 10, Math.max(p1[1], p2[1]) + 10];
+      if (a.type === 'link' && isBox(a.vbox)) h = [Math.min(h[0], a.vbox[0]), Math.min(h[1], a.vbox[1]), Math.max(h[2], a.vbox[2]), Math.max(h[3], a.vbox[3])];
+      a.hit = h.map(r1);
+    }
+    return true;
   }
 
   // 概念图上建议加的概念（node）连到别的组的虚线：每条的终点。第一条路径是椭圆本身，后面的是连线（M 起点 Q 控制点 终点）
@@ -145,16 +218,24 @@
     return out;
   }
 
-  // Claude 的这一条跟不跟着选中的笔迹走：它指着的、没擦掉的笔迹（on，箭头、连线另有起点 on2）至少有一笔，而且全在选中的里面（sel）。
-  // live 是这一页没擦掉的笔迹 id。还指着别的笔迹的、没指着笔迹的（指着印刷文字的 box、页面末尾、图和公式本来就不记 on）、
-  // 指着书页上印刷文字的修改建议（onDoc）、以前的「挪动、收起」提议（proposal，不画）都不跟。
+  // Claude 的这一条怎么跟着选中的笔迹走：'go' 整条平移，'to'、'from' 只有箭头、连线的那一头跟着走（bendItem），'' 不跟。
+  // 一般的：它指着的、没擦掉的笔迹（on）至少有一笔，而且全在选中的里面（sel），整条平移。live 是这一页没擦掉的笔迹 id。
+  // 还指着别的笔迹的、没指着笔迹的（指着印刷文字的 box、页面末尾、图和公式本来就不记 on）、指着书页上印刷文字的修改建议（onDoc）、
+  // 以前的「挪动、收起」提议（proposal，不画）都不跟。
+  // 箭头、连线（arrow、link）两头分开看：终点指着的笔迹记在 on，起点的记在 on2。一头指着的（没擦掉的）全在选中的里面，那一头跟着走；
+  // 两头都是，整条平移；另一头指着没选中的笔迹、只选中了一部分、或者指着印刷文字（那一头没记笔迹），那一头不动（2026-11-17）。
   // 概念图上建议的新概念（node）还连到别的组（连线的另一头只记在路径里，没记是哪几笔）：linkOk(终点) 说那一头也在选中的里面才跟
-  function follows(a, sel, live, linkOk) {
-    if (!a || typeof a !== 'object' || a.type === 'proposal' || a.onDoc) return false;
-    const ids = [].concat(Array.isArray(a.on) ? a.on : [], Array.isArray(a.on2) ? a.on2 : []).filter((id) => live.has(id));
-    if (!ids.length || !ids.every((id) => sel.has(id))) return false;
-    if (a.type === 'node') for (const p of linkEnds(a)) if (!linkOk || !linkOk(p)) return false;
-    return true;
+  function followMode(a, sel, live, linkOk) {
+    if (!a || typeof a !== 'object' || a.type === 'proposal' || a.onDoc) return '';
+    const alive = (v) => (Array.isArray(v) ? v : []).filter((id) => live.has(id));
+    const all = (ids) => ids.length > 0 && ids.every((id) => sel.has(id));
+    if (a.type === 'arrow' || a.type === 'link') {
+      const to = all(alive(a.on)), from = all(alive(a.on2));
+      return to && from ? 'go' : to ? 'to' : from ? 'from' : '';
+    }
+    if (!all(alive(a.on).concat(alive(a.on2)))) return '';
+    if (a.type === 'node') for (const p of linkEnds(a)) if (!linkOk || !linkOk(p)) return '';
+    return 'go';
   }
 
   // 拖动夹在纸内：box 是拖着走的这一块 [x0, y0, x1, y1]（选中的笔迹连同跟着走、看得见的蓝字），bounds 是纸 [x0, y0, x1, y1]。
@@ -165,5 +246,5 @@
     return [Math.max(lx, Math.min(hx, dx)), Math.max(ly, Math.min(hy, dy))];
   }
 
-  return { SHARE, inPolygon, pick, shiftNum, shiftPts, shiftPath, shiftItem, coordsOf, putCoords, linkEnds, follows, clampDelta };
+  return { SHARE, inPolygon, pick, shiftNum, shiftPts, shiftPath, shiftItem, FIELDS, fieldsOf, putFields, shaftOf, labelSpot, bendItem, linkEnds, followMode, clampDelta };
 });

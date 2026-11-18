@@ -18,6 +18,13 @@
   const NOTE_MAXW = 300, NOTE_GAP = 16, NOTE_CLEAR = 8, NOTE_REACH = 260, ZONE_COST = 120;
   const SIDE_COST = { right: 0, below: 40, left: 320, above: 360 };
   const BLOCK_GAP = 30, BLOCK_REACH = 200; // 图、公式、示意图：离所指内容 BLOCK_GAP，往右、往下各最多找出 BLOCK_REACH 远
+  // 长回答摊在纸上（2026-11-17 用户定方向，《产品定义》第 2 节「蓝字摊在纸上」；下面的数是用户不在时暂定的）：
+  // 按 OPEN_W 宽折行（约 20 个汉字一行，按字收窄），字和短批注一样（NOTE_FS、NOTE_LH）；单独一行的 $$…$$ 按 OPEN_TEX_FS 排成公式。
+  // 到的时候自己摊开的：排出来不超过 OPEN_LINES 行高（公式按它的高折算）、最宽的公式不超过 OPEN_W_MAX；用户在卡片上点「摊在纸上」
+  // 的放宽到 OPEN_USER_LINES 行。找空的地方和短批注同一个办法（findRoom：先右、再下、再左、再上，不压字和别的蓝字，尽量不占接着
+  // 往下写的那一行），每个方向最多找出 OPEN_REACH 远（用户点的放宽到 OPEN_USER_REACH），不出纸、纸也不为它加长加宽
+  const OPEN_W = 420, OPEN_W_MAX = 560, OPEN_LINES = 10, OPEN_USER_LINES = 24, OPEN_REACH = 240, OPEN_USER_REACH = 520, OPEN_TEX_FS = 22;
+  const OPEN_SIDES = ['right', 'below', 'left', 'above'];
   const ROOM_TYPES = new Set(['note', 'question', 'suggest', 'sketch', 'figure', 'formula']); // 空白本子里自己找空白落下的几种
   // 收成的小蓝点（短批注被后来写的黑笔压到，或到的时候旁边放不下）：半径、外面一圈淡的光晕、离字多远
   const DOT_R = 7, DOT_HALO = 3, DOT_GAP = 8;
@@ -41,6 +48,8 @@
     single: '<path d="M6 2.5h8.5l4 4v15H6z"/><path d="M14.5 2.5v4h4"/>', // 单页：一张带折角的纸
     cont: '<path d="M3.5 2.5h8l2.5 2.5v6H3.5z"/><path d="M11.5 2.5V5H14"/><path d="M3.5 13h10.5v8.5H3.5z"/><path d="M19 3.5v15.5M16.5 16.5L19 19l2.5-2.5"/>', // 连续：上下两张纸，旁边一个向下的箭头
     folder: '<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"/>', // 文件夹：带一个小耳朵
+    plus: '<path d="M12 5v14M5 12h14"/>', // 文件夹那一行上的「＋」：在这个文件夹里新建本子（2026-11-18）
+    copy: '<rect x="8.5" y="8" width="11.5" height="13" rx="1.6"/><path d="M15.5 8V4.6A1.6 1.6 0 0 0 13.9 3H5.6A1.6 1.6 0 0 0 4 4.6v10.3a1.6 1.6 0 0 0 1.6 1.6h2.9"/>', // 复制这一页（2026-11-18）：叠着的两张纸
   };
   const FLOW_GAP = 40, FLOW_MAX = 3, FLOW_KEEP = 4; // 连续阅读：页缝、上下各画几页、缓存留前后几页
   const GROUP_GAP_MS = 1800, GROUP_DIST = 60;
@@ -109,10 +118,11 @@
       throw new Error('访问码不对');
     }
     if (!r.ok) {
-      let msg = r.statusText;
-      try { msg = (await r.json()).error || msg; } catch (e) { /* 不是 JSON */ }
+      let msg = r.statusText, data = null;
+      try { data = await r.json(); msg = data.error || msg; } catch (e) { /* 不是 JSON */ }
       const err = new Error(msg);
       err.status = r.status;
+      err.data = data; // 服务回的整个 JSON（比如存页时那一页已经不在了：pageGone）
       throw err;
     }
     return r;
@@ -144,10 +154,13 @@
     // 与 Claude Code 对话的连接
     sessions: [], defaultTarget: null, // 连着的对话（最近打字的在前）；没绑过对话的本子发往 defaultTarget
     evSeq: 0, online: false,
-    folders: [], // 抽屉里的文件夹（只是归类，记在电脑上）：[{id, name, items: [本子 id], folded?}]
+    folders: [], // 抽屉里的文件夹（只是归类，记在电脑上）：[{id, name, items: [本子 id，按抽屉里的先后], folded?, ordered?}]
+    top: null, // 抽屉最外层从上到下的顺序（文件夹的 id 和不在文件夹里的本子的 id 混排，不含草稿本；服务排好，2026-11-18）
     // 「AI」按钮上的进度：mine 是这个页面交出去的投递（编号 → 哪本）；rounds 是每本最近交的那一轮（本子 → {id, stage, t, end}）；
     // roundWait 是一直没有下一步时等多久（测试里调短）；checking 是点了「AI」、还没交出去（防连点交两次）
     mine: new Map(), rounds: new Map(), roundWait: ROUND_WAIT_MS, checking: false,
+    // 卡片上「再短点」「展开讲」：redoGot 是重写的回应已经到了的那些投递编号（回应比交出去的回话先到时，「已交」照样恢复）；askTimer 到点刷新开着的卡片
+    redoGot: new Set(), askTimer: null,
     // 顶上的卡片（问话卡片、字迹确认卡片，一个队）：cards 按先后排，队首那张显示；qShown 是填好的那张、qMin 是缩成了小条；
     // qPad 是手写回答那块纸上的笔迹（qInk 是正写着的一笔）；qBusy 是正在交；qGen 防先发的晚回来；confirmInputs 是确认卡片的更正框
     cards: [], qShown: null, qMin: false, qPad: [], qInk: null, qBusy: false, qGen: 0, qDone: new Set(), confirmInputs: [],
@@ -161,6 +174,9 @@
     landing: false, pendingPages: new Set(),
     // 输入页码的小框里「回到第 N 页」：从别处跳过来之前的那一页（{nb, key}，按页的键记；见 noteJumpBack）
     jumpBack: null,
+    // 回答要多长（2026-11-17）：「AI」旁边那个开关选的档（brief 点一下 / clear 讲清楚 / full 展开讲），记在这台设备上，默认讲清楚；
+    // sizeFrom：小单子是从哪个钮点开的
+    size: ['brief', 'clear', 'full'].includes(store.get('size', 'clear')) ? store.get('size', 'clear') : 'clear', sizeFrom: null,
     // 「Claude 读到了什么」开着没有（记在这台设备上）；新手引导开着时是 { sig, timer }
     readsOn: store.get('reads', false), guide: null,
     // 新文件提示：待处理的（offers）、见过的（offerKeys：编号@文件时间）、屏幕上方那一条（offerBar：{items, timer}）、那一条几毫秒后收起（offerMs，测试里调短）
@@ -216,13 +232,24 @@
     redrawAll();
   }
 
+  const BLANK_KEEP = 0.25; // 空白本子挪纸：屏幕上至少还留这么大一部分（宽、高的几分之几）是已有的纸，别的可以是纸外面的空白
   // 缩放范围：适配宽度的 0.4–8 倍；纸面至少留 60 像素在屏幕里
   function clampView(v) {
     const s = clamp(v.s, S.fitS * 0.4, S.fitS * 8), w = paperW() * s, m = 60;
     const [y0, y1] = S.flow ? flowSpan() : [S.Y0, S.pageH], h = (y1 - y0) * s; // 连续阅读：连同上下已画出的页
     const lim = (t, size, view) => (size + 2 * m <= view ? clamp(t, m, view - size - m) : clamp(t, view - size - m, m));
     // 夹的是纸的左上角在屏幕上的位置
-    return { s, tx: lim(v.tx + S.X0 * s, w, VW) - S.X0 * s, ty: lim(v.ty + y0 * s, h, VH) - y0 * s };
+    let px = lim(v.tx + S.X0 * s, w, VW), py = lim(v.ty + y0 * s, h, VH);
+    if (blankNb()) {
+      // 空白本子：整屏都画成纸（drawBlankBg），纸边看不见，纸跟着字往左、右、上长（growSides）。所以这三边不按那条看不见的边卡住：
+      // 可以一直挪到屏幕上只剩 BLANK_KEEP 那么宽（高）还是原来的纸，露出来的空白上落笔，纸就长过去，又能接着挪。
+      // 往下照旧（写到靠近页底纸自己加长；连续时下面接着下一页）。
+      // （2026-11-18 用户放大很多倍写字时：「无法向右拖动…即使看起来右侧完全有空间」——原来和书页一样，纸边最多离屏幕边 60 像素。）
+      const kx = VW * BLANK_KEEP, ky = VH * BLANK_KEEP;
+      px = clamp(v.tx + S.X0 * s, Math.min(px, kx - w), Math.max(px, VW - kx));
+      if (!S.flow || S.idx === 0) py = clamp(v.ty + y0 * s, py, Math.max(py, VH - ky)); // 上面没有接着别的页时，往上也一样
+    }
+    return { s, tx: px - S.X0 * s, ty: py - y0 * s };
   }
 
   // 事件的屏幕坐标（横竖屏交给 iPad 自己转：界面内旋转跟不上系统的滚动、键盘和随手写，已去掉）
@@ -498,14 +525,12 @@
     await Promise.all(missing.map(async (i) => {
       let page, bg = null;
       try {
-        const job = pendingSaves.get(nb.id + '#' + i); // 刚离开、还没存上的那页：用排着队的那份
-        [page, bg] = await Promise.all([
-          job ? JSON.parse(job.body) : api(`/api/page?nb=${encodeURIComponent(nb.id)}&i=${i}`).then((r) => r.json()),
-          fetchBg(nb, i).catch(() => null),
-        ]);
+        const job = pendingSaves.get(jobKey(nb.id, keyAt(nb, i), i, nbGen(nb))); // 刚离开、还没存上的那页：用排着队的那份
+        [page, bg] = await Promise.all([job ? normalizePage(JSON.parse(job.body)) : fetchPage(nb, i), fetchBg(nb, i).catch(() => null)]);
+        if (job && job.key) { pageKeys.set(page, job.key); if (typeof job.gen === 'number') pageGens.set(page, job.gen); } // fetchPage 取来的已经记下了
       } catch (e) { return; }
       if (S.flowGen !== gen || S.nb !== nb || S.flowCache.has(i) || i === S.idx) { if (bg) URL.revokeObjectURL(bg.url); return; }
-      S.flowCache.set(i, { page: normalizePage(page), img: bg && bg.img, url: bg && bg.url, undo: [] });
+      S.flowCache.set(i, { page, img: bg && bg.img, url: bg && bg.url, undo: [] });
     }));
     if (S.flowGen === gen && S.nb === nb) { redrawAll(); landSoon(); } // 新画出来的相邻页上有 Claude 还没落下的回复：落下
   }
@@ -800,11 +825,12 @@
     const live = liveIds();
     for (const a of S.page.ai) {
       if (a.dismissed || gone(a, live)) continue;
-      const b = isBadge(a) ? badgeBox(a, 4) : isDot(a) ? dotBox(a, 4) : a.lay ? [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h] : null; // 圈号、小蓝点也要在图里
+      const b = isOpen(a) ? openBox(a, 4) : isBadge(a) ? badgeBox(a, 4) : isDot(a) ? dotBox(a, 4) : a.lay ? [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h] : null; // 圈号、小蓝点、摊开的长回答也要在图里
       if (!b) continue;
       if (b[2] > S.W) right = S.TW;
       bottom = Math.max(bottom, b[3]);
       left = Math.min(left, b[0] - 20);
+      if (isOpen(a)) top = Math.min(top, b[1] - 20); // 摊在笔迹上面的一段长回答（2026-11-17）：也整个在图里
     }
     return { x0: Math.max(S.X0, left), y0: Math.max(S.Y0, top), x1: right, y1: clamp(bottom + 30, 200, S.pageH) };
   }
@@ -983,7 +1009,8 @@
   // 在圈里，static/lasso.js 的 pick）被选中，虚线消失，选中的笔迹外面画一个虚线框，笔迹本身一点不变。用笔按住框里拖：这几笔跟着走
   // （拖的时候画在上面那层），抬笔定下，可以接着再拖。点框外面、再画一圈、换工具、翻页、换本子、点「AI」、撤销、重做：取消选中。
   // 圈本身不是笔迹：不存、不进撤销。只能挪：一次挪动是撤销里的一步（t: 'move'），只改这几笔的点坐标（同一个平移量），id、时刻、
-  // 别的字段都不动。跟着走的：Claude 的东西里只指着这几笔的（Lasso.follows），读法能跟就跟（见 splitReads）。
+  // 别的字段都不动。跟着走的：Claude 的东西里只指着这几笔的（Lasso.followMode），读法能跟就跟（见 splitReads）；
+  // 箭头、连线只有一头指着这几笔的，那一头跟着走（Lasso.bendItem）；书页、推送页页边那一栏里的短批注留在栏里，只跟着上下走（colShift）。
   // 选中的状态（S.sel）认它选在哪一本、哪一页、转到多少度：换了就作废（把 Claude 的回复落到相邻页时临时换过去不算）
   const LASSO_PAD = 8;   // 虚线框离笔迹多远（屏幕像素）；按在框里（连这一圈）才是拖
   const LASSO_SLOP = 4;  // 拖不到这么多屏幕像素算没挪（暂定）
@@ -1013,35 +1040,113 @@
     return b;
   }
 
-  // 跟着这几笔走的 Claude 的东西（Lasso.follows）。概念图上建议的新概念连到别的组的线：那一头落在选中的笔迹那一块旁边、附近又没有
-  // 没选中的笔迹，才算那一头也选中了（连线只记在路径里，没记连的是哪几笔）
+  // 跟着这几笔走的 Claude 的东西，各怎么走：Map(id → 'go' 整条平移 | 'to'、'from' 箭头连线只挪那一头 | 'col' 页边一栏里的短批注)。
+  // 概念图上建议的新概念连到别的组的线：那一头落在选中的笔迹那一块旁边、附近又没有没选中的笔迹，才算那一头也选中了
+  // （连线只记在路径里，没记连的是哪几笔）
   function lassoFollowers(L) {
-    const live = liveIds(), b = lassoBoxOf(L), r = LINK_NEAR;
+    const live = liveIds(), b = lassoBoxOf(L), r = LINK_NEAR, out = new Map();
     const linkOk = (p) => Boolean(b) && p[0] >= b[0] - r && p[0] <= b[2] + r && p[1] >= b[1] - r && p[1] <= b[3] + r
       && !inkStrokes().some((s) => !s.erasedAt && s.pts.length && !L.set.has(s.id) && ptBoxDist(strokeBox(s), p[0], p[1]) <= r);
-    return S.page.ai.filter((a) => Lasso.follows(a, L.set, live, linkOk));
+    for (const a of S.page.ai) {
+      let m = Lasso.followMode(a, L.set, live, linkOk);
+      if (m === 'go' && inColumn(a)) m = 'col';
+      if (m) out.set(a.id, m);
+    }
+    return out;
   }
-  // 拖着走的这一块：选中的笔迹，连同跟着走、看得见的蓝字（圈号、小蓝点、别的按点擦的范围 hit）——夹在纸内时整块一起夹
-  function lassoReach(L, items) {
+  // 拖着走的这一块：选中的笔迹，连同整条跟着走、看得见的蓝字（圈号、小蓝点、别的按点擦的范围 hit），箭头连线跟着走的那一头的端点
+  // ——夹在纸内时整块一起夹。页边一栏里的短批注不算（它不左右走，上下自己夹在纸内，见 colY），免得它顶到纸边、笔迹拖不动
+  function lassoReach(L, how) {
     let b = lassoBoxOf(L);
-    for (const a of items) {
-      if (a.erasedAt) continue;
+    for (const a of S.page.ai) {
+      const m = how.get(a.id);
+      if (!m || m === 'col' || a.erasedAt) continue;
+      if (m === 'to' || m === 'from') {
+        const g = Lasso.shaftOf(a), p = g && (m === 'to' ? g.p2 : g.p1);
+        if (p) b = unionBox(b, [p[0], p[1], p[0], p[1]]);
+        continue;
+      }
       const h = isBadge(a) ? badgeBox(a) : isDot(a) ? dotBox(a, DOT_HALO) : Array.isArray(a.hit) && a.hit.length === 4 ? a.hit : null;
       if (h) b = unionBox(b, h);
+      if (isOpen(a)) b = unionBox(b, openBox(a)); // 摊在纸上的一段长回答：整块跟着走，夹在纸内时也算它
     }
     return b;
+  }
+
+  // 书页、推送页上排在页边那一栏里的短批注（note、question，见 buildItem；空白本子没有这一栏，短批注在笔迹旁找空白放，照旧整条平移）
+  function inColumn(a) {
+    return !blankNb() && Boolean(a) && FOLLOW_TYPES.has(a.type) && !isDot(a) && Boolean(a.lay) && Array.isArray(a.lay.lines) && typeof a.lay.y === 'number';
+  }
+  // 页边一栏里的短批注跟着所指的笔迹挪 (dx, dy) 后排在哪一高度（2026-11-17 用户说可以处理的毛病：原来整条平移，往左拖压到印刷的字上，
+  // 往右拖先顶到纸边、笔迹拖不动）。它留在栏里（x 不变），只跟着上下走：从原来的高度加 dy 处（夹在纸内，上下各留 6）起，
+  // 用它到的时候排页边的办法（findFreeY）找一段空，只是只让开这一栏里的东西（别的批注、写进栏里的字（连同拖进栏里的这几笔）和圈号；
+  // opt 见 findFreeY）：那里空着就放那里，不空就放到离那里最近的空处；栏里找不到空处就照样放在那里（会叠住）
+  function colY(c, dy, opt) {
+    const L = c.lay, h = L.h || 0;
+    const y = clamp(Lasso.shiftNum(L.y, dy), S.Y0 + 6, Math.max(S.Y0 + 6, S.pageH - h - 6));
+    return findFreeY(y, h, L.x - 6, L.x + (L.w || NOTE_W), Object.assign({ colOnly: true }, opt));
+  }
+  // 页边一栏里的短批注：所指的那块（box）挪 (dx, dy)，字和点擦的范围往下挪 ny（不左右挪），连到所指笔迹的细线按新的两头重画
+  // （和 buildItem 同一个画法、同一个随机种子：两头没变的话一笔不差）。换成新的对象，不在原处改
+  function colShift(c, dx, dy, ny) {
+    const isBox = (b) => Array.isArray(b) && b.length === 4 && b.every((v) => typeof v === 'number');
+    if (ny) {
+      c.lay = Object.assign({}, c.lay, { y: c.lay.y + ny });
+      if (isBox(c.hit)) c.hit = [c.hit[0], c.hit[1] + ny, c.hit[2], c.hit[3] + ny];
+    }
+    if (isBox(c.box)) c.box = [Lasso.shiftNum(c.box[0], dx), Lasso.shiftNum(c.box[1], dy), Lasso.shiftNum(c.box[2], dx), Lasso.shiftNum(c.box[3], dy)];
+    const keep = (c.paths || []).filter((p) => !p || p.cls !== 'leader'), b = c.box, L = c.lay;
+    let lead = null;
+    if (isBox(b) && b[0] < L.x - 26) { // buildItem：所指的那块左边在页边以左（S.W − 4，即 noteX() − 26）才连线
+      const sx = L.x - 8, sy = L.y + NOTE_LH * 0.55, px = clamp(sx, b[0], b[2]), py = clamp(sy, b[1], b[3]);
+      lead = { d: sketchLine(px + 6, py, sx, sy, rng(c.id), 10), cls: 'leader', w: 1.3 };
+    }
+    c.paths = lead ? [lead].concat(keep) : keep;
+    return c;
+  }
+
+  // 这一拖（挪 dx、dy）定下后，跟着走的 Claude 的东西各在哪：Map(id → 挪过的一份拷贝)，不改原来的。拖的时候画（lassoDecor）、
+  // 抬笔定下（lassoDrop）都用它，所以拖的时候看到的就是定下的样子。线身认不出来的箭头连线不在里面（留在原处）。
+  // 页边一栏里的几条短批注按原来从上到下的先后一条条排，每条让开这一栏里已经在新位置上的东西（选中的笔迹按挪过的位置算）
+  function lassoPlan(d, dx, dy) {
+    const out = new Map(), cols = [], set = S.sel.set;
+    for (const a of S.page.ai) {
+      const m = d.how.get(a.id);
+      if (!m) continue;
+      const c = JSON.parse(JSON.stringify(a));
+      if (m === 'col') { cols.push(c); continue; }
+      if (m === 'go') Lasso.shiftItem(c, dx, dy);
+      else if (!Lasso.bendItem(c, m, dx, dy)) continue;
+      out.set(a.id, c);
+    }
+    if (!cols.length) return out;
+    const boxes = [];
+    for (const st of inkStrokes()) {
+      if (st.erasedAt || !st.pts.length) continue;
+      const b = strokeBox(st);
+      boxes.push(set.has(st.id) ? [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] : b);
+    }
+    const view = S.page.ai.map((a) => out.get(a.id) || a), skip = new Set(cols.map((c) => c.id));
+    cols.sort((p, q) => p.lay.y - q.lay.y);
+    for (const c of cols) {
+      colShift(c, dx, dy, colY(c, dy, { ai: view, boxes, skip }) - c.lay.y);
+      view[view.findIndex((a) => a.id === c.id)] = c;
+      skip.delete(c.id);
+      out.set(c.id, c);
+    }
+    return out;
   }
 
   function lassoDown(e, x, y) {
     const L = lassoSel(), F = L && lassoFrame(L);
     if (F && x >= F[0] && x <= F[2] && y >= F[1] && y <= F[3]) { // 按在选中的框里：拖
-      const items = lassoFollowers(L), live = liveIds(), reads = new Map();
+      const how = lassoFollowers(L), live = liveIds(), reads = new Map();
       (S.page.reads || []).forEach((r, k) => { // 读法的小灰字：整组都选中的跟着挪；只选中了一部分的拖的时候先藏起来（定下后见 splitReads）
         const ids = r && Array.isArray(r.ids) ? r.ids.filter((id) => live.has(id)) : [], n = ids.filter((id) => L.set.has(id)).length;
         if (n) reads.set(k, n === ids.length ? 'go' : 'hide');
       });
-      L.drag = { pid: e.pointerId, kind: e.pointerType, x0: x, y0: y, dx: 0, dy: 0, items: items.map((a) => a.id), ids: new Set(items.map((a) => a.id)),
-        reads, box: lassoReach(L, items), lim: lassoBounds() };
+      L.drag = { pid: e.pointerId, kind: e.pointerType, x0: x, y0: y, dx: 0, dy: 0, items: [...how.keys()], ids: new Set(how.keys()), how,
+        bent: [...how.values()].some((m) => m !== 'go'), reads, box: lassoReach(L, how), lim: lassoBounds() };
       drawInk();
       drawLive();
       return;
@@ -1092,11 +1197,22 @@
     L.drag = null;
     const dx = r1(d.dx), dy = r1(d.dy);
     if (Math.hypot(dx, dy) * S.view.s < LASSO_SLOP || L !== lassoSel()) { drawInk(); renderAI(); drawLive(); return; }
-    const rec = { t: 'move', ids: lassoInk(L).map((s) => s.id), ai: d.items, dx, dy }, apart = splitReads(L.set); // 选中后又被橡皮键擦掉的不挪
+    const rec = { t: 'move', ids: lassoInk(L).map((s) => s.id), ai: d.items, how: Object.fromEntries(d.how), dx, dy }, apart = splitReads(L.set); // 选中后又被橡皮键擦掉的不挪
     if (apart.length) rec.apart = apart;
-    const items = S.page.ai.filter((a) => d.ids.has(a.id)), snap = () => Object.fromEntries(items.map((a) => [a.id, Lasso.coordsOf(a)]));
+    const items = S.page.ai.filter((a) => d.ids.has(a.id)), snap = () => Object.fromEntries(items.map((a) => [a.id, Lasso.fieldsOf(a)]));
+    const plan = lassoPlan(d, dx, dy); // 先排好（选中的笔迹按挪过的位置算），再动数据
     rec.pre = snap();
-    shiftSel(rec, 1);
+    rec.ny = {}; // 页边一栏里的短批注往下挪了多少（撤销、恢复时它的样子变了，按这个量挪，见 shiftSel）
+    for (const a of items) if (d.how.get(a.id) === 'col' && plan.has(a.id)) rec.ny[a.id] = plan.get(a.id).lay.y - a.lay.y;
+    shiftInk(rec.ids, dx, dy);
+    for (const a of items) if (plan.has(a.id)) Lasso.putFields(a, Lasso.fieldsOf(plan.get(a.id)));
+    // 跟着走的摊开的长回答落到了没选中的字上：收成圈号（和别处「放不下就收」一个道理；不挪用户的字）。挪前的样子在 rec.pre 里，
+    // 撤销时连同 spread 照原样放回去，恢复时又收起（2026-11-18 外部审查）
+    const still = inkStrokes().filter((s) => !s.erasedAt && s.pts.length && !L.set.has(s.id));
+    let shut = 0;
+    for (const a of items) if (isOpen(a) && openRowBoxes(a).some((b) => still.some((s) => inkInBox(s, b)))) { delete a.spread; shut++; }
+    if (shut) toast(shut > 1 ? `挪过去压到了字的 ${shut} 条回答收成了圈号，点圈号能看` : '挪过去压到了字的回答收成了圈号，点圈号能看', 2200);
+    for (const r of apart) r.apart = true;
     rec.post = snap();
     pushUndo(rec);
     drawInk();
@@ -1130,17 +1246,27 @@
     drawLive();
   }
 
-  // 一次挪动（撤销里的 t: 'move'）做一遍（k = 1）或撤回（k = -1）：这几笔的点、跟着走的 Claude 的东西挪同一个量，
-  // 只选中了一部分的那几条读法记上 apart（不显示，见 readLabels）或去掉。找不到的（撤销写字拿掉了、收进了卡片）跳过。
-  // Claude 的东西：第一次挪时记下挪前（pre）、挪后（post）的坐标，撤销、重做时它还是那个样子就照原数放回去（笔迹的点都是一位小数，
-  // 加减本来就分毫不差）；样子变了（比如短批注收成了卡片）就按量挪
+  // 选中的这几笔的点都挪 (dx, dy)（找不到的跳过）
+  function shiftInk(ids, dx, dy) {
+    const set = new Set(ids);
+    for (const st of S.page.strokes) if (set.has(st.id)) { st.pts = Lasso.shiftPts(st.pts, dx, dy); delete st._box; }
+  }
+
+  // 撤销（k = -1）、恢复（k = 1）一次挪动（撤销里的 t: 'move'，lassoDrop 记的）：这几笔的点挪回去 / 再挪过去，只选中了一部分的那几条
+  // 读法记上 apart（不显示，见 readLabels）或去掉。找不到的（撤销写字拿掉了、收进了卡片）跳过。
+  // Claude 的东西：定下时记了挪前（pre）、挪后（post）带坐标的字段（Lasso.fieldsOf），它还是那个样子就照原样放回去（笔迹的点都是一位小数，
+  // 加减本来就分毫不差）；样子变了（比如短批注收成了卡片）就按这一步的量重算：整条走的平移，只挪一头的箭头连线挪那一头，
+  // 页边一栏里的短批注上下挪记下的量（rec.ny，不重新找空）
   function shiftSel(rec, k) {
-    const dx = rec.dx * k, dy = rec.dy * k, ids = new Set(rec.ids), ai = new Set(rec.ai || []);
+    const dx = rec.dx * k, dy = rec.dy * k, ai = new Set(rec.ai || []), how = rec.how || {};
     const from = k > 0 ? rec.pre : rec.post, to = k > 0 ? rec.post : rec.pre;
-    for (const st of S.page.strokes) if (ids.has(st.id)) { st.pts = Lasso.shiftPts(st.pts, dx, dy); delete st._box; }
+    shiftInk(rec.ids, dx, dy);
     for (const a of S.page.ai) {
       if (!ai.has(a.id)) continue;
-      if (from && to && from[a.id] && to[a.id] && JSON.stringify(Lasso.coordsOf(a)) === JSON.stringify(from[a.id])) Lasso.putCoords(a, to[a.id]);
+      if (from && to && from[a.id] && to[a.id] && JSON.stringify(Lasso.fieldsOf(a)) === JSON.stringify(from[a.id])) { Lasso.putFields(a, to[a.id]); continue; }
+      const m = how[a.id] || 'go';
+      if ((m === 'to' || m === 'from') && (a.type === 'arrow' || a.type === 'link')) Lasso.bendItem(a, m, dx, dy);
+      else if (m === 'col' && inColumn(a)) colShift(a, dx, dy, ((rec.ny || {})[a.id] || 0) * k);
       else Lasso.shiftItem(a, dx, dy);
     }
     for (const r of rec.apart || []) { if (k > 0) r.apart = true; else delete r.apart; }
@@ -1158,15 +1284,35 @@
     return out;
   }
 
-  // 拖动中：跟着走的蓝字、读法的小灰字在批注层上一起挪（只是挪画出来的，抬笔后按数据重画）
+  // 拖动中：跟着走的蓝字、读法的小灰字在批注层上一起挪（只是挪画出来的，抬笔后按数据重画）。整条走的整组平移；只挪一头的箭头连线、
+  // 页边一栏里的短批注照 lassoPlan 排好的样子：线（这一组直接带的几条路径）换成新的，字、✓ × 钮、★ 挪关系词（短批注的字）挪的量
   function lassoDecor(d) {
-    const t = `translate(${f1(d.dx)} ${f1(d.dy)})`;
-    for (const g of aiRoot.querySelectorAll(':scope > [data-id]')) if (d.ids.has(g.dataset.id)) g.setAttribute('transform', t);
+    const t = `translate(${f1(d.dx)} ${f1(d.dy)})`, plan = d.bent ? lassoPlan(d, d.dx, d.dy) : null;
+    for (const g of aiRoot.querySelectorAll(':scope > [data-id]')) {
+      const id = g.dataset.id, m = d.how.get(id);
+      if (m === 'go') g.setAttribute('transform', t);
+      else if (m && plan && plan.has(id)) reshapeDrawn(g, S.page.ai.find((a) => a.id === id), plan.get(id));
+    }
+    // 摊在纸上的长回答里的公式（排在公式那一层，记着是哪一条）：和那一段字一起挪
+    for (const x of texLayer.querySelectorAll('.tx[data-id]')) if (d.how.get(x.dataset.id) === 'go') x.style.transform = `translate(${f1(d.dx)}px, ${f1(d.dy)}px)`;
     for (const g of aiRoot.querySelectorAll(':scope > g.reads > g.read')) {
       const m = d.reads.get(Number(g.dataset.k));
       if (m === 'go') g.setAttribute('transform', t);
       else if (m === 'hide') g.setAttribute('display', 'none');
     }
+  }
+  // 拖动中改画一条 Claude 的东西（a0 是数据里的，a1 是排好的拷贝）：drawItem 画的这一组里，直接带的路径按 a1.paths 的先后换成新的
+  // （a1 少了的那条先藏起来，多出来的抬笔后才画）；别的（字、✓ × 钮和它的细线、状态字、★）挪关系词或短批注的字挪的量
+  function reshapeDrawn(g, a0, a1) {
+    if (!a0 || !a1) return;
+    g.querySelectorAll(':scope > path').forEach((p, i) => {
+      const q = (a1.paths || [])[i];
+      if (q && typeof q.d === 'string') { p.setAttribute('d', q.d); p.removeAttribute('display'); } else p.setAttribute('display', 'none');
+    });
+    const pair = (k, i, j) => (a0[k] && a1[k] ? [a1[k][i] - a0[k][i], a1[k][j] - a0[k][j]] : null);
+    const o = (a0.lay && a1.lay ? [a1.lay.x - a0.lay.x, a1.lay.y - a0.lay.y] : null) || pair('vbox', 0, 1) || pair('hit', 0, 1) || [0, 0];
+    const t = `translate(${f1(o[0])} ${f1(o[1])})`;
+    for (const c of g.children) if (c.tagName.toLowerCase() !== 'path') c.setAttribute('transform', t);
   }
 
   // 画在上面那层：正在画的圈（细虚线，不画回起点的那一段）；选中的笔迹外面的虚线框；拖动中的那几笔（跟着笔挪）
@@ -1222,7 +1368,8 @@
     drawLive();
     markDirty();
     // 空白本子：黑笔压到了一条展开着的短批注，它收成小蓝点（红笔写在上面是批注、追问，不收）。撤销这一笔时它展开回来
-    if (blankNb() && st.c !== 'r') { const f = foldUnder(st); if (f.length) rec.fold = f; }
+    // 压到了摊在纸上的一段长回答：它收回圈号（2026-11-17）；撤销这一笔时照原样摊回去
+    if (blankNb() && st.c !== 'r') { const f = foldUnder(st); if (f.length) rec.fold = f; const w = foldOpenUnder(st); if (w) rec.wfold = w; }
     if (S.readsOn) drawReads(); // 「Claude 读到了什么」开着：小灰字让开新写的这一笔
     keepHeight(strokeBox(st)[3]);
     // 书页连续阅读时下一页接在下面，要更多纸点「＋ 加长」。空白本子的纸跟着字长：快写到底就往下长，写出左、右、上边就往那边长
@@ -1505,10 +1652,13 @@
   function eraseBlue(x, y, r) {
     let hit = false;
     for (const a of blueLive()) {
-      if (blueDist(a, x, y) > r / 2) continue; // 一条蓝字是一个整体：要擦到它身上才算，挨得近的另一条不跟着没
-      S.erasing.ai.push({ id: a.id, dismissed: Boolean(a.dismissed) });
-      a.erasedAt = Date.now();
-      a.dismissed = true;
+      if (a.erasedAt || blueDist(a, x, y) > r / 2) continue; // 一条蓝字是一个整体：要擦到它身上才算，挨得近的另一条不跟着没
+      // 批改符号和另成一条短批注的它那句话（buildMarkNote，of 记着是哪个符号的）是一个整体：擦到哪个都一起擦，撤销一起回来
+      for (const b of [a].concat(S.page.ai.filter((o) => o !== a && !o.erasedAt && ((a.of && o.id === a.of) || (o.of && o.of === a.id))))) {
+        S.erasing.ai.push({ id: b.id, dismissed: Boolean(b.dismissed) });
+        b.erasedAt = Date.now();
+        b.dismissed = true;
+      }
       hit = true;
     }
     return hit;
@@ -1516,6 +1666,7 @@
   function ptBoxDist(b, x, y) { return Math.hypot(Math.max(b[0] - x, 0, x - b[2]), Math.max(b[1] - y, 0, y - b[3])); }
   function blueDist(a, x, y) { // 点到这条蓝字自己画出来的地方的距离（线类留 4 的余量）
     const lay = a.lay && [a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h];
+    if (a.type === 'write' && isOpen(a)) return Math.min(...openRowBoxes(a).map((b) => ptBoxDist(b, x, y))); // 摊在纸上的一段：认它的字
     if (a.type === 'write') return isBadge(a) ? Math.max(0, Math.hypot(x - a.at[0], y - a.at[1]) - BADGE_R) : Infinity; // 圈号
     if (isDot(a)) return Math.max(0, Math.hypot(x - a.dot.at[0], y - a.dot.at[1]) - DOT_R); // 收成小蓝点的短批注：只认那个点
     if (a.type === 'circle' && a.box) { // 只认圈线：圈里是我的字。沿着从圈心出发的方向量到圈线
@@ -1575,6 +1726,22 @@
         if (it && it.dot && it.dot.by === a.id && !marksOf(it).length) { a.dots[id] = it.dot; delete it.dot; }
       }
       if (S.card && (a.fold || []).includes(S.card.id)) closeCard();
+      // 这一笔压到、收回圈号的摊开的长回答：照原样摊回去（之后用户自己又摊开过的不动；之后又到了重写的一段、
+      // 摊的那几行已经不是现在的样子了的也不动——见 sameOpenSrc）
+      for (const id of Object.keys(a.wfold || {})) {
+        const it = S.page.ai.find((o) => o.id === id);
+        if (it && !isOpen(it) && !it.erasedAt && sameOpenSrc(it, a.wfold[id])) it.spread = JSON.parse(JSON.stringify(a.wfold[id]));
+      }
+    } else if (a.t === 'spread') { // 卡片上点的「摊在纸上」「收起」：回到原样（连同用户收起过的记号 shut）
+      const it = S.page.ai.find((o) => o.id === a.id);
+      if (it) {
+        if (!a.from) delete it.spread; else if (sameOpenSrc(it, a.from)) it.spread = JSON.parse(JSON.stringify(a.from));
+        if (a.shut0) it.shut = true; else delete it.shut;
+      }
+      if (S.card && S.card.id === a.id) { const c = cardItem(); if (c) { updateCardActs(); placeCard(c); } }
+    } else if (a.t === 'nfold') { // 短批注上点的「收成蓝点」「放回纸上」：回到原样（连同位置、细线）；它的小卡片开着就收起
+      putNoteSnap(S.page.ai.find((o) => o.id === a.id), a.pre);
+      if (S.card && S.card.id === a.id) closeCard();
     } else if (a.t === 'erase') {
       a.at = {}; // 擦掉的时刻：重做时照原样记回去（交给 Claude 的书写过程里写着什么时候擦的）
       for (const st of S.page.strokes) if (a.ids.indexOf(st.id) >= 0) { a.at[st.id] = st.erasedAt; delete st.erasedAt; }
@@ -1630,7 +1797,20 @@
         // 撤销以后才到的短批注落在这一笔底下：和写这一笔时一样收成小蓝点（撤销这一笔时它展开回来）
         const f = blankNb() && a.st.c !== 'r' ? foldUnder(a.st) : [];
         if (f.length) a.fold = Array.from(new Set((a.fold || []).concat(f)));
+        // 压到的摊开的长回答：照旧收回圈号（撤销以后才摊开的、落在这一笔底下的，也收）
+        const w = blankNb() && a.st.c !== 'r' ? foldOpenUnder(a.st) : null;
+        if (w) a.wfold = Object.assign({}, a.wfold || {}, w);
       }
+    } else if (a.t === 'spread') {
+      const it = find(a.id);
+      if (it) {
+        if (!a.to) delete it.spread; else if (sameOpenSrc(it, a.to)) it.spread = JSON.parse(JSON.stringify(a.to));
+        if (a.shut1) it.shut = true; else delete it.shut;
+      }
+      if (S.card && S.card.id === a.id) { const c = cardItem(); if (c) { updateCardActs(); placeCard(c); } }
+    } else if (a.t === 'nfold') {
+      putNoteSnap(find(a.id), a.post);
+      if (S.card && S.card.id === a.id) closeCard();
     } else if (a.t === 'erase') {
       const now = Date.now();
       for (const st of S.page.strokes) if (a.ids.indexOf(st.id) >= 0) st.erasedAt = (a.at && a.at[st.id]) || now;
@@ -1813,7 +1993,8 @@
       if (it.dismissed || gone(it, live)) continue;
       ctx.globalAlpha = it.verdict === 'no' ? 0.35 : 1; // 不采纳的建议：画淡
       ctx.fillStyle = ctx.strokeStyle = it.adopted ? ADOPTED : AI; // 采纳的画成深蓝：和几页一起交时服务器画的图一样（服务器那边也不画 ★）
-      if (it.type === 'write') { // 长回答：圈号。没看过的实心（蓝底白字），看过的空心（白底蓝圈蓝字）
+      if (it.type === 'write') { // 长回答：摊开的画那一段字（和纸上一样）；收着的是圈号，没看过的实心（蓝底白字），看过的空心（白底蓝圈蓝字）
+        if (isOpen(it)) { paintOpen(ctx, it); continue; }
         if (!badges || !isBadge(it)) continue;
         const [x, y] = it.at, col = ctx.fillStyle;
         ctx.beginPath();
@@ -1878,8 +2059,10 @@
   function payloadFor(groups, sel, imgs) {
     // 回答过的红笔问题，不再当新问题（faded 是以前发送时记下的「回答过」）
     const ans = answeredIds(), done = (g) => g.c === 'r' && redAnswered(g.strokes, ans);
+    const prev = S.page.ai.filter((a) => a.text && !a.dismissed && a.type !== 'arrow' && !gone(a, liveIds()));
     return {
       nb: S.nb.id, page: S.idx, include_process: true, now: Date.now(),
+      key: curKey() || undefined, // 这一页的键（2026-11-17）：服务按它找这一页现在是第几页，页序在别处改过也交对那一页
       sel: { x0: sel.x0, y0: sel.y0, x1: sel.x1, y1: sel.y1 },
       crop: imgs.cropInfo,
       page_size: { w: S.W, margin: M, h: S.pageH, x0: S.X0, y0: S.Y0 },
@@ -1893,9 +2076,11 @@
       }, g.late ? { late: g.late, lateAt: g.lateAt, tw: g.tw } : {})),
       // 之前写过的批注：短的是原话；长回答（圈号）带上圈号、问题和全文，消息里写成「圈号 n（问：q）：前 200 个字…」（prompt.fmt_prev）；
       // 卡片下面接着回过的各段（回应卡片上的红字）也带上；纸上的短批注收成的卡片标上 note（消息里写「原来是短批注」）
-      prev_notes: S.page.ai.filter((a) => a.text && !a.dismissed && a.type !== 'arrow' && !gone(a, liveIds()))
-        .map((a) => (a.type === 'write' ? Object.assign({ n: a.n, q: a.q, text: a.text }, fromNote(a) ? { note: true } : {},
-          moreOf(a).length ? { more: moreOf(a).map((m) => ({ q: m.q, text: m.text })) } : {}) : a.text)),
+      // 摊在纸上的长回答标上 open（2026-11-17）：消息里写「摊在纸上」，图里是那一段字、不是圈号
+      prev_notes: prev.map((a) => (a.type === 'write' ? Object.assign({ n: a.n, q: a.q, text: a.text }, fromNote(a) ? { note: true } : {},
+        isOpen(a) ? { open: true } : {}, moreOf(a).length ? { more: moreOf(a).map((m) => Object.assign({ q: m.q, text: m.text }, m.redo ? { redo: m.redo } : {})) } : {}) : a.text)),
+      // 和 prev_notes 一一对应的条目 id（2026-11-17）：服务按存好的这一页找到那一条，看是不是别的对话写的，消息里标出来
+      prev_ids: prev.map((a) => a.id),
       // 收成小蓝点的短批注有几条（图里是没有数字的小蓝点）：消息里说一句那些点是什么（字照旧在上面的 prev_notes 里）
       dots: S.page.ai.filter((a) => isDot(a) && !a.erasedAt && !a.dismissed && !gone(a, liveIds())).length || undefined,
       images: { crop: imgs.crop },
@@ -1973,7 +2158,7 @@
     let best = null, bestArea = Infinity;
     for (const a of S.page.ai) {
       if (a.erasedAt || VOTE_TYPES.has(a.type) || gone(a, live)) continue;
-      const h = a.type === 'write' ? (isBadge(a) ? badgeBox(a) : null) : isDot(a) ? dotBox(a) : a.hit;
+      const h = a.type === 'write' ? (isOpen(a) ? openBox(a) : isBadge(a) ? badgeBox(a) : null) : isDot(a) ? dotBox(a) : a.hit;
       if (!h) continue;
       const area = (h[2] - h[0]) * (h[3] - h[1]);
       if (pt[0] >= h[0] - pad && pt[0] <= h[2] + pad && pt[1] >= h[1] - pad && pt[1] <= h[3] + pad && area < bestArea) { best = a; bestArea = area; }
@@ -2097,11 +2282,18 @@
     const b = strokeBox(st);
     return b[2] - b[0] <= 16 && b[3] - b[1] <= 16 && tapVote(st.pts[0][0], st.pts[0][1]);
   }
-  // 用笔（电脑上是鼠标）点一下圈号：打开那条长回答的卡片；点一下小蓝点：那条短批注在旁边浮出来。这一点不留作笔迹
+  // 用笔（电脑上是鼠标）点一下圈号：打开那条长回答的卡片；点一下小蓝点：那条短批注在旁边浮出来。这一点不留作笔迹。
+  // 摊在纸上的一段长回答：黑笔点在它的字上，和点圈号一样打开卡片；红笔落在它的字上一律照常写字（2026-11-18 外部审查：小数点、
+  // 短负号、小下标这种很小的红笔原来被当成「点开卡片」吞掉）——那是一段字，红笔是用来批它的，和短批注的字上写红字同一个道理。
+  // 圈号、小蓝点上没有字可批，红笔点一下照旧是打开。
+  // 空白本子里纸上的短批注（2026-11-18）：和摊开的一段一样——黑笔点在它的字上浮出它的小卡片（底下「收成蓝点」），这一点不留、
+  // 也不算黑笔写到它上面（不自动收）；红笔落在它的字上照常写字
   function penTapBadge(st) {
     const b = strokeBox(st);
     if (b[2] - b[0] > 16 || b[3] - b[1] > 16) return false;
-    const a = badgeAtWorld(st.pts[0][0], st.pts[0][1]) || dotAtWorld(st.pts[0][0], st.pts[0][1], S.page, DOT_R + DOT_HALO + 3);
+    const x = st.pts[0][0], y = st.pts[0][1];
+    const a = badgeAtWorld(x, y) || dotAtWorld(x, y, S.page, DOT_R + DOT_HALO + 3)
+      || (st.c !== 'r' ? openAtWorld(x, y, S.page, 0) : null) || (st.c !== 'r' && blankNb() ? noteAtWorld(x, y, S.page, 0) : null);
     if (!a) return false;
     tapBadge(a);
     return true;
@@ -2115,14 +2307,23 @@
     return ['', '']; // 还没发：✓ × 钮的颜色就说明了定没定
   }
 
-  // 这本里有新笔迹（Claude 上次看过之后新写或擦改）的页：others 是这一页以外的（从 0 起），n 是一共几页
+  // 这本里有新笔迹（Claude 上次看过之后新写或擦改）的页：others 是这一页以外的（这台手上的页码，从 0 起），
+  // more 是这一页以外有几页（这台手上的页序过时了、不知道是第几页的也算），n 是一共几页。
+  // 服务给了各页的键（2026-11-17）就按键认：页序在别处改过、这台还没刷新时，不把眼前这一页当成「别的页」，也不弄错是哪几页
   async function newPages() {
     try {
       await flushSave();
-      const all = (await (await api(`/api/new-pages?nb=${encodeURIComponent(S.nb.id)}`)).json()).pages || [];
-      return { others: all.filter((i) => i !== S.idx), n: all.length };
+      // key：眼前这一页（推送本子里按它发往的对话算「新写的」，2026-11-17）
+      const ck = curKey();
+      const d = await (await api(`/api/new-pages?nb=${encodeURIComponent(S.nb.id)}${ck ? '&key=' + encodeURIComponent(ck) : ''}`)).json(), all = d.pages || [];
+      if (Array.isArray(d.keys) && d.keys.length === all.length) {
+        const cur = curKey(), keys = d.keys.map(String).filter((k) => k !== cur);
+        return { others: keys.map(indexOfKey).filter((i) => i >= 0 && i !== S.idx), more: keys.length, n: all.length };
+      }
+      const others = all.filter((i) => i !== S.idx);
+      return { others, more: others.length, n: all.length };
     } catch (e) {
-      return { others: [], n: 0 };
+      return { others: [], more: 0, n: 0 };
     }
   }
 
@@ -2130,13 +2331,15 @@
   async function send() {
     if (!S.page || S.sending || localBlocked() || targetGone(send)) return;
     const nbId = S.nb.id, sentPage = S.page;
-    // 写在短批注上的红字：这条批注先收成卡片（红字挪进卡片），存好后随这次交上去（服务端按存好的页挑要交的卡片）
+    // 以前在小蓝点浮出的小卡片上写下、还没交的红字（旧数据）：先收成卡片，存好后随这次交上去（服务端按存好的页挑要交的卡片）。
+    // 纸上的短批注被红笔批过不再收成卡片（2026-11-18，见 followupsToCards）
     followupsToCards();
     const groups = computeGroups(inkStrokes());
     const raw = wholePageSel();
     await flushSave(); // 服务器按存好的这一页做本机手写识别
     const { sel, imgs, vs } = prepare(raw, groups, true);
-    const body = Object.assign(payloadFor(groups, sel, imgs), { target: effectiveTarget() || '',
+    // size：「AI」旁边那个开关选的档（2026-11-17），服务在消息里带一句这次要多长
+    const body = Object.assign(payloadFor(groups, sel, imgs), { target: sendTargetArg(), size: S.size,
       verdicts: vs.length ? vs.map((v) => ({ id: v.id, ref: v.a.id, kind: v.a.type, text: v.a.text, verdict: v.a.verdict,
         on: v.a.onDoc ? 'doc' : 'mine', near: v.near || undefined })) : undefined });
     S.sending = true;
@@ -2182,10 +2385,16 @@
   const held = new Map(); // 本子#页 → 取来了、还没落下的待处理条目
   async function fetchPending(nbId, i) {
     let list = [];
-    try { list = await (await api(`/api/pending?nb=${encodeURIComponent(nbId)}&i=${i}`)).json(); } catch (e) { return false; }
+    // 按手上那一页的键取（2026-11-17）：页序在别处改过、这台还没刷新时，不把别的页的回答取来落到这一页上
+    // 书页再带 gen（取那一页时这本书更新过几次）：书在那之后更新过，服务按新旧页对照换成新版里的键再取
+    const pk = S.nb && S.nb.id === nbId ? keyOfIndex(i) : '', pg = pk ? genOfIndex(i) : undefined;
+    const q = pk ? '&key=' + encodeURIComponent(pk) + (typeof pg === 'number' ? '&gen=' + pg : '') : '';
+    try { list = await (await api(`/api/pending?nb=${encodeURIComponent(nbId)}&i=${i}${q}`)).json(); } catch (e) { return false; }
     // 里面有公式：先等 KaTeX 用到的字体载入，落下时量的宽度才对（landHere 是同步的，等不了）
-    const texes = (Array.isArray(list) ? list : []).flatMap((p) => (p && Array.isArray(p.items) ? p.items : []))
-      .filter((it) => it && it.type === 'formula').map((it) => String(it.tex || it.text || ''));
+    // 长回答里单独一行的 $$…$$ 也算（摊在纸上时要量公式多大，2026-11-17）
+    const texes = (Array.isArray(list) ? list : []).flatMap((p) => (p && Array.isArray(p.items) ? p.items : [])).flatMap((it) => (!it ? []
+      : it.type === 'formula' ? [String(it.tex || it.text || '')]
+        : it.type === 'write' ? String(it.text || '').split(/\r?\n/).map((ln) => /^\s*\$\$(.+)\$\$\s*$/.exec(ln)).filter(Boolean).map((m) => m[1].trim()) : []));
     if (texes.length) await texFontsReady(texes);
     const key = nbId + '#' + i;
     S.pendingPages.delete(key);
@@ -2218,7 +2427,7 @@
         if (markCardsSent(S.page, p.msent, p.req)) { renderAI(); markDirty(); }
         continue;
       }
-      if (typeof p.lsent === 'number') { // 几页一起交带上了这一页：记下交到了哪一笔为止（noteFollowups 的「上次交稿之后」）
+      if (typeof p.lsent === 'number') { // 几页一起交带上了这一页：记下交到了哪一笔为止（以前给 noteFollowups 用，2026-11-18 起只是记着）
         markPageSent(S.page, p.lsent);
         markDirty(); // 手上这份可能早由事件改过、还没存：待处理队列取过就没了，这里一定存一次
         continue;
@@ -2231,6 +2440,7 @@
       const s = p.sel || { x0: S.X0, y0: S.Y0, x1: S.W, y1: S.pageH };
       const T = {
         req: p.req, level: p.level, selBox: p.sel ? fix([s.x0, s.y0, s.x1, s.y1]) : [s.x0, s.y0, s.x1, s.y1], conv,
+        author: authorOf(p), // 这一次是哪个对话写回的（2026-11-17）：抄到落下的每一条上，存进页面数据
         crop: p.crop || { x0: 0, y0: 0, x1: S.TW, y1: S.pageH, scale: 1 },
         groups: new Map(Object.keys(p.groups || {}).map((id) => [id, Object.assign({ bbox: fix(p.groups[id]) }, (p.gx || {})[id])])),
       };
@@ -2244,6 +2454,20 @@
     if (answers) toast(`Claude 回了 ${answers} 条`, 3000);
     flushSave();
     return answers;
+  }
+
+  // 蓝字是谁写的（2026-11-17 用户定，《产品定义》第 2 节「纸是跨对话、跨 AI 的共同记忆」）：服务在待处理条目里带的 author
+  // （对话的 sid、文件夹名 label、文件夹 cwd、哪个 AI）。每条各抄一份；平板上不显示，交给对话时服务据此说明哪几条不是它写的。
+  // 没带的（这次改动以前的服务、没说是哪个对话写回的）返回 null，什么都不记
+  function authorOf(p) {
+    const a = p && p.author;
+    if (!a || typeof a !== 'object' || typeof a.sid !== 'string' || !a.sid) return null;
+    const out = { sid: a.sid };
+    for (const k of ['label', 'cwd', 'ai']) if (typeof a[k] === 'string' && a[k]) out[k] = a[k];
+    return out;
+  }
+  function withAuthor(o, T) {
+    return T && T.author ? Object.assign(o, { author: Object.assign({}, T.author) }) : o;
   }
 
   // 连续阅读：这一页（第 i 页）有没有正显示在屏幕上（在画出来的相邻页里、和屏幕有重叠）；是的话返回它在 flowStrip 里的那一项
@@ -2312,14 +2536,39 @@
     }
   }
 
-  // 这本发往哪个对话：绑了的那个（不在了是 gone）；没绑过的用默认（/ink here 指定的或最近打字的），第一次发送时记下
+  // 这本发往哪个对话：绑了的那个（不在了是 gone）。没绑过的：只连着一个对话就是它（auto，第一次发送时记下）；
+  // 连着不止一个：不替用户定（pick），第一次点「AI」时先弹出选对话的单子（2026-11-17 用户定：同一个文件夹下可能开着几个对话，
+  // 最近活跃的那个不一定是该收的那个）
+  // 推送本子里记了是谁推的页（2026-11-17 用户定）：在哪一页上点「AI」就发回推这一页的对话，那个对话不在了先问。
+  // 不按整本的「这本发往」，按眼前这一页（S.idx）算：{ t（这一页发往的：改发过的是改发到的那个）, push（推它的）, moved（改发过） }。
+  // 插入的空白纸、以前那本「Claude 推送」里没记是谁推的页：null（照整本的算）
+  function pageTarget() {
+    if (!S.nb || S.nb.kind !== 'board') return null;
+    const pi = (S.nb.pageInfo || [])[S.idx];
+    if (!pi || !pi.push || !pi.push.sid) return null;
+    return { t: pi.to || pi.push, push: pi.push, moved: Boolean(pi.to) };
+  }
+  // 服务改了推送本子里各页发往谁（{页的键: 改发到的对话，没改发过是 null}）：手上的各页跟着改
+  function applyPageTo(map) {
+    for (const pi of (S.nb && S.nb.pageInfo) || []) {
+      if (!pi || !pi.push || !Object.prototype.hasOwnProperty.call(map, pi.key)) continue;
+      if (map[pi.key]) pi.to = map[pi.key];
+      else delete pi.to;
+    }
+  }
   function nbTarget() {
-    const t = S.nb && S.nb.target, ss = S.sessions || [];
+    const pt = pageTarget(), ss = S.sessions || [];
+    if (pt) { const s = ss.find((x) => x.sid === pt.t.sid); return s ? { s, page: pt } : { gone: pt.t, page: pt }; }
+    const t = S.nb && S.nb.target;
     if (t) { const s = ss.find((x) => x.sid === t.sid); return s ? { s } : { gone: t }; }
+    if (ss.length > 1) return { pick: true };
     const s = ss.find((x) => x.sid === S.defaultTarget);
     return s ? { s, auto: true } : {};
   }
   function effectiveTarget() { const t = nbTarget(); return t.s ? t.s.sid : null; }
+  // 发送时带给服务的「发往」：只有这本已经选过对话（推送本子里记了是谁推的页也算）才带（就是那个）；没选过的不带，由服务定——
+  // 只连着一个对话就发给它，连着不止一个（这台手上的对话列表可能旧了）服务不收、回话让这台先问
+  const sendTargetArg = () => (S.nb && (S.nb.target || pageTarget()) && effectiveTarget()) || '';
 
   // 对话的叫法（抽屉里「这本发往」那一行、选对话的列表、「已交给……」的提示、导入面板的下拉框都用这一套）：
   // 项目文件夹的名字；名字相同、完整路径不同的文件夹，带上上一级文件夹的名字；同一个文件夹开着几个对话时，
@@ -2339,18 +2588,25 @@
     const tag = s.hint ? `『${clip(s.hint, 10)}』` : s.started ? `（${startText(s.started)} 开的）` : `（${s.sid.slice(0, 4)}）`;
     return folderTitle(s) + tag;
   }
+  // 对话是哪个 AI（2026-11-17，接别的 AI 的第一步：经 inkthink\mcp_server.py 接进来的 Codex、Gemini 等报自己是哪家；插件的对话服务记 Claude）。
+  // 不是 Claude 的才标出来，返回它的名字；是 Claude（或没报）返回空：全是 Claude 时界面和以前一个字都不差
+  const aiOf = (s) => { const a = String((s && s.ai) || '').trim(); return a && !/^claude\b/i.test(a) ? a : ''; };
+  // 抽屉里「这本发往」那一行、「已交给……」、导入面板的下拉框里对话的叫法：不是 Claude 的，前面加上 AI 的名字（「Codex · paper」）
+  function sessName(s) { const ai = aiOf(s); return ai ? `${ai} · ${targetName(s)}` : targetName(s); }
   // 「已交给……」：交给的那个对话的叫法（服务回来的是对话的编号和文件夹名）
   function sentName(res) {
     const s = (S.sessions || []).find((x) => x.sid === res.target);
-    return s ? targetName(s) : res.label;
+    return s ? sessName(s) : res.label;
   }
   function clip(t, n) { return t.length > n ? t.slice(0, n) + '…' : t; }
   const LOCAL_TARGET = '只在本地（不发给 Claude）';
   function targetText() {
     if (S.nb && S.nb.local) return LOCAL_TARGET;
     const t = nbTarget();
-    return t.s ? targetName(t.s) : t.gone ? `「${t.gone.label}」（不在了）` : '还没有连着的对话';
+    return t.s ? sessName(t.s) : t.gone ? `「${t.gone.label}」（不在了）` : t.pick ? '还没选（点「AI」时选）' : '还没有连着的对话';
   }
+  // 推送本子里记了是谁推的页，那一行写「这一页发往」（眼前这一页发往谁，翻页跟着变）；只在本地是整本的设置，照旧写「这本发往」
+  function targetRowHead() { return S.nb && !S.nb.local && pageTarget() ? '这一页发往：' : '这本发往：'; }
   function ago(sec) {
     return sec < 90 ? '刚刚' : sec < 3600 ? `${Math.round(sec / 60)} 分钟前` : sec < 2 * 86400 ? `${Math.round(sec / 3600)} 小时前` : `${Math.round(sec / 86400)} 天前`;
   }
@@ -2363,14 +2619,16 @@
   }
 
   // 连着的对话按项目文件夹分组：最近有人打字的文件夹在前，组里最近打字的在前（服务给的列表本来就是最近打字的在前）
+  // 这本是从电脑上的文件导入的：那份文件所在的文件夹（或它的上级）开着对话的，排在最前、标出来（near；离文件最近的文件夹在前）
+  const normDir = (p) => String(p || '').replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
   function sessionGroups(ss) {
-    const groups = new Map();
+    const groups = new Map(), src = normDir(S.nb && S.nb.sourceDir);
     for (const s of ss) {
-      const k = pathKey(s);
-      if (!groups.has(k)) groups.set(k, { title: folderTitle(s), items: [] });
+      const k = pathKey(s), cwd = normDir(s.dir || s.cwd);
+      if (!groups.has(k)) groups.set(k, { title: folderTitle(s), items: [], near: src && cwd && (src + '/').startsWith(cwd + '/') ? cwd.length : 0 });
       groups.get(k).items.push(s);
     }
-    return Array.from(groups.values());
+    return Array.from(groups.values()).sort((a, b) => b.near - a.near); // 排序是稳定的：其余的照旧（最近有人打字的在前）
   }
 
   // 选这本发往哪个对话（以后都发到这里）。按文件夹分组，文件夹名做小标题；每个对话一行两行字：
@@ -2381,7 +2639,8 @@
     hideMenu();
     closeFolderPick();
     const ss = S.sessions || [], local = Boolean(S.nb && S.nb.local), cur = local ? null : effectiveTarget(), list = $('#targetPickList');
-    $('#targetPickHead').textContent = why || '这本发往哪个对话（以后都发到这里）';
+    // 推送本子里记了是谁推的页：选的是这一页和同一个对话推的那些页发往哪（2026-11-17）
+    $('#targetPickHead').textContent = why || (!local && pageTarget() ? '这一页和同一个对话推的页发往哪个对话' : '这本发往哪个对话（以后都发到这里）');
     list.innerHTML = '';
     if (!ss.length) {
       const d = document.createElement('div');
@@ -2390,10 +2649,17 @@
       list.appendChild(d);
     }
     for (const g of sessionGroups(ss)) {
-      const h = document.createElement('div');
-      h.className = 'tp-folder';
-      h.setAttribute('data-lang-keep', ''); // 文件夹名是电脑上的名字，不翻译
-      h.textContent = g.title;
+      const h = document.createElement('div'), name = document.createElement('span');
+      h.className = 'tp-folder' + (g.near ? ' near' : '');
+      name.setAttribute('data-lang-keep', ''); // 文件夹名是电脑上的名字，不翻译
+      name.textContent = g.title;
+      h.appendChild(name);
+      if (g.near) { // 这本的原文件在这个文件夹里
+        const tag = document.createElement('span');
+        tag.className = 'tp-near';
+        tag.textContent = '文件在这个文件夹里';
+        h.append(' · ', tag);
+      }
       list.appendChild(h);
       for (const s of g.items) list.appendChild(sessionRow(s, s.sid === cur, then));
     }
@@ -2426,18 +2692,28 @@
   }
 
   function sessionRow(s, on, then) {
-    const b = pickRow('tp-sess', on), l1 = b.querySelector('.tp-l1'), l2 = document.createElement('span');
+    const b = pickRow('tp-sess', on), l1 = b.querySelector('.tp-l1'), l2 = document.createElement('span'), ai = aiOf(s);
     b.dataset.sid = s.sid;
     if (s.hint) {
       l1.textContent = s.hint;
       l1.setAttribute('data-lang-keep', ''); // 你打的字，不翻译
     } else {
-      l1.textContent = '还没打过字';
+      // 别的 AI 的对话（经 MCP 接进来的）报不了在那里打过什么：不说「还没打过字」（2026-11-17）
+      l1.textContent = ai ? '看不到在那里打的话' : '还没打过字';
       l1.classList.add('none');
     }
     l2.className = 'tp-l2';
     // 什么时候开的：插件报来的（拿不到就不写这一段，不编）
-    l2.textContent = [s.started ? `${startText(s.started)} 开的` : '', `${ago(s.idle || 0)}活跃`, s.ink ? '执行过 /ink' : ''].filter(Boolean).join(' · ');
+    const facts = [s.started ? `${startText(s.started)} 开的` : '', `${ago(s.idle || 0)}活跃`, s.ink ? '执行过 /ink' : ''].filter(Boolean).join(' · ');
+    if (ai) { // 不是 Claude 的对话：小字最前面标出是哪个 AI（名字不翻译；后面那几段各是一个文字节点，英文界面照旧一段段换）
+      const tag = document.createElement('span');
+      tag.className = 'tp-ai';
+      tag.setAttribute('data-lang-keep', '');
+      tag.textContent = ai;
+      l2.append(tag, ' · ', facts);
+    } else {
+      l2.textContent = facts;
+    }
     b.querySelector('.tp-main').appendChild(l2);
     b.addEventListener('click', async () => {
       $('#targetPick').hidden = true;
@@ -2452,12 +2728,16 @@
     return S.nb.local ? setLocal(S.nb, false) : true;
   }
 
+  // 推送本子里记了是谁推的页：带上眼前这一页的键，服务改的是这一页所在的那一组（推它的对话还在：同一个对话推的那些页；
+  // 不在了：原本也该发给它的那些页），回来的 pageTo 是改完各页发往谁；整本的「这本发往」不动
   async function bindTarget(sid) {
     if (!S.nb || !sid) return false;
     try {
-      const r = await (await api('/api/notebook/target', { method: 'POST', body: JSON.stringify({ nb: S.nb.id, sid }),
+      const key = pageTarget() ? curKey() : '';
+      const r = await (await api('/api/notebook/target', { method: 'POST', body: JSON.stringify(key ? { nb: S.nb.id, sid, key } : { nb: S.nb.id, sid }),
         headers: { 'Content-Type': 'application/json' } })).json();
       S.nb.target = r.target;
+      if (r.pageTo) applyPageTo(r.pageTo);
     } catch (e) {
       toast('没换成：' + e.message, 4000);
       return false;
@@ -2468,23 +2748,42 @@
 
   // 这本绑定的对话不在了：先问发往哪个对话（列表最下面照样有「只在本地」），选好后接着做 then；
   // 没有连着的对话时不拦（发送时会提示）；只在本地的本子不问（发送前已经拦下）
+  // 这本还没选过对话、又连着不止一个对话（pick）：也先问（2026-11-17 用户定），选的那个记成这本的对话
+  // 推送本子里记了是谁推的页（2026-11-17）：话里说的是推这一页的那个对话（改发过的说改发到的那个），选了以后原本也该发给它的页都改发
   function targetGone(then) {
     const t = nbTarget();
-    if ((S.nb && S.nb.local) || !t.gone || !(S.sessions || []).length) return false;
-    openTargetPick(`这本原来发往「${t.gone.label}」，那个对话现在不在了。发往：`, then);
+    if ((S.nb && S.nb.local) || !(t.gone || t.pick) || !(S.sessions || []).length) return false;
+    const why = !t.gone ? '这本还没选发往哪个对话。发往：'
+      : !t.page ? `这本原来发往「${t.gone.label}」，那个对话现在不在了。发往：`
+        : t.page.moved ? `这一页改发到的「${t.gone.label}」对话现在不在了。原本发给它的页改发往：`
+          : `推这一页的「${t.gone.label}」对话现在不在了。它推的页改发往：`;
+    openTargetPick(why, then);
     return true;
+  }
+
+  // 服务说的「第 i 页」（key 是它的键）在不在这台手上：当前页、连续阅读取来的相邻页；在就返回那份页面数据，不在是 null。
+  // 带了键就按键认（2026-11-17）：页序在别处改过、这台还没刷新时，不记到别的页上；没带键的（旧服务）照旧按页码
+  function pageInHand(i, key) {
+    if (!key) return (i === S.idx ? S.page : (S.flowCache.get(i) || {}).page) || null;
+    if (S.page && curKey() === String(key)) return S.page;
+    for (const [j, e] of S.flowCache) if (e.page && keyOfIndex(j) === String(key)) return e.page;
+    return null;
   }
 
   function handleEvent(ev) {
     if (ev.type === 'sessions') {
       refreshSessions();
     } else if (ev.type === 'ai') {
+      // 回在眼前这一页上没有：带了页的键按键认（2026-11-17；页序在别处改过、这台还没刷新时页码对不上）
+      const here = Boolean(S.nb && ev.nb === S.nb.id && (ev.key ? String(ev.key) === curKey() : ev.page === S.idx));
       // 回在这一本别的页上（连续阅读时落在屏幕上相邻页上的也算）、纸上看得见的：页码旁出记号（只有读法的不出）
-      if (S.nb && ev.nb === S.nb.id && ev.page !== S.idx && ev.what !== 'relocate' && ev.shown !== false) noteNewAns(ev.page, ev.key);
-      if (S.nb && ev.nb === S.nb.id && ev.page === S.idx) processPending();
-      else if (S.nb && ev.nb === S.nb.id && neighborOnScreen(ev.page)) landNeighbor(ev.page); // 连续阅读：那一页正显示在屏幕上，直接落下
+      if (S.nb && ev.nb === S.nb.id && !here && ev.what !== 'relocate' && ev.shown !== false) noteNewAns(ev.page, ev.key);
+      // 那一页在这台手上是第几页（按键找；没带键、找不到的按服务说的页码）
+      const mine = S.nb && ev.nb === S.nb.id && ev.key && indexOfKey(String(ev.key)) >= 0 ? indexOfKey(String(ev.key)) : ev.page;
+      if (here) processPending();
+      else if (S.nb && ev.nb === S.nb.id && neighborOnScreen(mine)) landNeighbor(mine); // 连续阅读：那一页正显示在屏幕上，直接落下
       else if (ev.what !== 'relocate') { // 不在屏幕上：等翻到时落下（对旧批注的判断已删，不提示）
-        if (S.nb && ev.nb === S.nb.id) S.pendingPages.add(ev.nb + '#' + ev.page); // 连续阅读时滑到屏幕上也落下（landVisible）
+        if (S.nb && ev.nb === S.nb.id) S.pendingPages.add(ev.nb + '#' + mine); // 连续阅读时滑到屏幕上也落下（landVisible）
         toast(`Claude 在别的页写了批注：${ev.label}`, 5000, '去看看', () => {
           if (S.nb && S.nb.id === ev.nb) noteJumpBack(); // 同一本里跳过去：输入页码的小框里能「回到」现在这一页
           openNotebook(ev.nb, ev.page);
@@ -2496,7 +2795,9 @@
       loadOffers(Array.isArray(ev.names) && ev.names.length > 0);
     } else if (ev.type === 'show') {
       loadNotebooks(S.nb && S.nb.id);
-      const what = ev.nb && ev.nb.startsWith('book:') ? `Claude 导入了《${ev.title}》` : `Claude 推送了一页：${ev.title}`;
+      // 推来的页（2026-11-17 起进推它的对话所在项目文件夹自己的那本）：说是哪个文件夹的对话推的；新起的话不写 Claude
+      const what = ev.nb && ev.nb.startsWith('book:') ? `Claude 导入了《${ev.title}》`
+        : ev.folder ? `「${ev.folder}」里的对话推送了一页：${ev.title}` : `一个对话推送了一页：${ev.title}`;
       toast(what, 8000, '打开', () => openNotebook(ev.nb || 'board', ev.page));
     } else if (ev.type === 'snapshot') {
       doSnapshot(ev.rid);
@@ -2505,30 +2806,30 @@
     } else if (ev.type === 'vsent') { // 整本发送带上了这几页的 ✓/× 决定：画淡，不再发
       if (!S.nb || ev.nb !== S.nb.id) return;
       for (const [k, ids] of Object.entries(ev.pages || {})) {
-        const i = Number(k), pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
+        const pg = pageInHand(Number(k), (ev.keys || {})[k]);
         if (!pg) continue;
         for (const a of pg.ai) if (ids.includes(a.id)) a.sent = true;
-        if (i === S.idx) { renderAI(); markDirty(); }
+        if (pg === S.page) { renderAI(); markDirty(); }
       }
     } else if (ev.type === 'msent') { // 几页一起交带上了这几页卡片上的红字：红点没了（没开着的页，打开时由待处理队列合进去）
       if (!S.nb || ev.nb !== S.nb.id) return;
       for (const [k, cards] of Object.entries(ev.pages || {})) {
-        const i = Number(k), pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
-        if (markCardsSent(pg, cards, ev.req) && i === S.idx) { renderAI(); markDirty(); }
+        const pg = pageInHand(Number(k), (ev.keys || {})[k]);
+        if (markCardsSent(pg, cards, ev.req) && pg === S.page) { renderAI(); markDirty(); }
       }
       if (S.flow) drawNeighborBadges();
     } else if (ev.type === 'lsent') { // 几页一起交带上了这几页：手上有的页记下交到了哪一笔为止（没开着的页，打开时由待处理队列合进去）
       if (!S.nb || ev.nb !== S.nb.id) return;
       for (const [k, t] of Object.entries(ev.pages || {})) {
-        const i = Number(k), pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
-        if (markPageSent(pg, t) && i === S.idx) markDirty();
+        const pg = pageInHand(Number(k), (ev.keys || {})[k]);
+        if (markPageSent(pg, t) && pg === S.page) markDirty();
       }
     } else if (ev.type === 'progress') { // 这一轮到哪一步了（插件报来）
       onProgress(ev);
     } else if (ev.type === 'confirm' || ev.type === 'confirmed' || ev.type === 'ask' || ev.type === 'asked') {
       loadCards(); // 顶上的卡片：来了一张（问字迹、问话），或答过了一张（可能是在别的设备上答的）
-    } else if (ev.type === 'target') { // 这本改发到别的对话了（第一次发送、/ink here、推送或导入）
-      if (S.nb && S.nb.id === ev.nb) { S.nb.target = ev.target; updateTargetRow(); }
+    } else if (ev.type === 'target') { // 这本改发到别的对话了（第一次发送、/ink here、导入）；推送本子里改的是某一组页（pageTo）
+      if (S.nb && S.nb.id === ev.nb) { S.nb.target = ev.target; if (ev.pageTo) applyPageTo(ev.pageTo); updateTargetRow(); }
     } else if (ev.type === 'updated') {
       // 文档原地更新了（Claude 导入了新版，或接受了「替换旧版」）；平板上自己点的更新由 updateBook 处理
       if (S.selfUpdate && (S.selfUpdate === ev.nb || S.selfUpdate === ev.old)) { S.selfUpdate = null; return; }
@@ -2667,6 +2968,81 @@
     probe.remove();
   }
 
+  // ------------------------------------------------------------ 回答要多长（2026-11-17 用户定「事先一档」，样子是用户不在时暂定的）
+  // 「AI」旁边一个写着现在这一档的钮（右下角那一条上一个、顶栏上一个，同一个开关），点开出一张小单子选三档：点一下（只给记号和一两句
+  // 短批注）、讲清楚（短批注加必要的几步推导或一段话，默认）、展开讲（完整的长回答）。选了一直留着（记在这台设备上），点「AI」交上去时
+  // 带上（size），服务在消息里写一句这次要多长（讲清楚不写）。这一档只是告诉 AI，服务不按它拦回答；红字里写了怎么回的以红字为准
+  const SIZES = { brief: '点一下', clear: '讲清楚', full: '展开讲' };
+  const sizeOk = (v) => Object.prototype.hasOwnProperty.call(SIZES, v);
+  function updateSize() {
+    for (const b of [$('#sizeBtn'), $('#barSize')]) {
+      if (b.dataset.size !== S.size || !b.dataset.shown) { b.dataset.size = S.size; b.dataset.shown = '1'; b.querySelector('.sz-name').textContent = SIZES[S.size]; }
+    }
+    for (const r of $('#sizePick').querySelectorAll('.sz-row')) r.classList.toggle('on', r.dataset.size === S.size);
+  }
+  // 小单子挨着点的那个钮：右下角那一条上的在它上面（右沿对齐），顶栏上的在它下面；整个在屏幕里。再点同一个钮是收起
+  function openSizePick(btn) {
+    const p = $('#sizePick');
+    if (!p.hidden && S.sizeFrom === btn) { closeSizePick(); return; }
+    hideMenu();
+    S.sizeFrom = btn;
+    updateSize();
+    p.hidden = false;
+    placeSizePick();
+  }
+  function placeSizePick() {
+    const p = $('#sizePick'), btn = S.sizeFrom;
+    if (p.hidden || !btn) return;
+    const r = btn.getBoundingClientRect(), vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight, m = 8;
+    const w = p.offsetWidth, h = p.offsetHeight, top = btn.closest('#bar') ? r.bottom + 6 : r.top - 6 - h;
+    Object.assign(p.style, { left: `${clamp(r.right - w, m, Math.max(m, vw - m - w))}px`, top: `${clamp(top, m, Math.max(m, vh - m - h))}px` });
+  }
+  function closeSizePick() { $('#sizePick').hidden = true; S.sizeFrom = null; }
+  function pickSize(v) {
+    if (!sizeOk(v)) return;
+    S.size = v;
+    store.set('size', v);
+    updateSize();
+    closeSizePick();
+  }
+  // 顶栏（退出全屏时）挤不下（窄屏、英文、「别的页有新回答」的记号长、「AI」按钮上的字长）：顶栏上那个开关的名字收起来，
+  // 换成三格小格子（亮几格是第几档，见 style.css 的 .tight），别的按钮不挤小。先按不收量，放不下才收
+  function fitBarSize() {
+    const bar = $('#bar'), b = $('#barSize');
+    if (!bar.clientWidth) return; // 全屏时顶栏不显示：显示出来时（ResizeObserver）再量
+    b.classList.remove('tight');
+    bar.classList.remove('tight');
+    if (bar.scrollWidth > bar.clientWidth + 1) { b.classList.add('tight'); bar.classList.add('tight'); }
+  }
+  // 顶栏里的字、显示的按钮变了，顶栏显示出来、宽度变了：下一帧重新量（只看 hidden 这个属性，自己改的 class 不会再触发）
+  function watchBarFit() {
+    let queued = false;
+    const again = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; fitBarSize(); }); };
+    new MutationObserver(again).observe($('#bar'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden'] });
+    if (window.ResizeObserver) new ResizeObserver(again).observe($('#bar'));
+    window.addEventListener('resize', again);
+    again();
+  }
+  // 钮上写的档名（中文或英文）里最长的那个定钮的最小宽度：换档时钮不变宽变窄，右下角那一条不跳（和 fitCheckWidth 一个办法）
+  function fitSizeWidth() {
+    const tr = (s) => (window.InkLang ? window.InkLang.t(s) : s);
+    const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;left:-9999px;top:-9999px;visibility:hidden;white-space:nowrap';
+    document.body.appendChild(probe);
+    for (const b of [$('#sizeBtn'), $('#barSize')]) {
+      const cs = getComputedStyle(b), px = (v) => parseFloat(v) || 0, caret = b.querySelector('.sz-caret'), ccs = getComputedStyle(caret);
+      Object.assign(probe.style, { fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight });
+      let w = 0;
+      for (const s of Object.values(SIZES)) { probe.textContent = tr(s); w = Math.max(w, probe.getBoundingClientRect().width); }
+      Object.assign(probe.style, { fontSize: ccs.fontSize });
+      probe.textContent = '▾';
+      w += probe.getBoundingClientRect().width + px(ccs.marginLeft);
+      const extra = px(cs.paddingLeft) + px(cs.paddingRight) + px(cs.borderLeftWidth) + px(cs.borderRightWidth);
+      b.style.minWidth = Math.ceil(w + extra + 2) + 'px';
+    }
+    probe.remove();
+  }
+
   async function refreshSessions() {
     try {
       const d = await (await api('/api/sessions')).json();
@@ -2680,7 +3056,7 @@
     if (it.type === 'result') { // 回报：改成了标「已改」；没改成写原因，清掉决定，可以重新采纳
       const a = S.page.ai.find((o) => o.id === it.ref);
       if (!a) return;
-      a.result = { ok: Boolean(it.ok), text: it.text || '', t: Date.now() };
+      a.result = withAuthor({ ok: Boolean(it.ok), text: it.text || '', t: Date.now() }, T); // 谁回报的（2026-11-17）
       if (it.edit) a.result.edit = it.edit; // 是哪一次改文件改的：平板上撤回那一次，「已改」写成「已撤回」
       if (!it.ok) { delete a.verdict; a.sent = false; }
       renderAI();
@@ -2695,12 +3071,18 @@
     if (it.type === 'write' && it.card !== undefined && appendToCard(it, T)) return 'write'; // 回应卡片上的红字：接在那张卡片下面
     const item = buildItem(it, T);
     if (!item) return null;
+    const say = item.say; // 空白本子里批改符号旁边那句话放不进紧挨着的老位置：符号先落下，那句话另成一条短批注找空白（见 buildMark）
+    delete item.say;
+    const items = [item];
     S.page.ai.push(item);
+    if (say) { const n = buildMarkNote(item, say, T); S.page.ai.push(n); items.push(n); }
     markDirty();
-    if (item.type === 'write' || isDot(item)) S.fresh.set(item.id, performance.now()); // 圈号（直接收成的小蓝点）到了：跳两下（重画时接着跳，不从头来）
-    if (S.aiVisible) {
-      const gen = S.renderGen;
-      S.aiQueue = S.aiQueue.then(() => (gen === S.renderGen ? drawItem(item, true) : null));
+    for (const x of items) {
+      if (x.type === 'write' || isDot(x)) S.fresh.set(x.id, performance.now()); // 圈号（直接收成的小蓝点）到了：跳两下（重画时接着跳，不从头来）
+      if (S.aiVisible) {
+        const gen = S.renderGen;
+        S.aiQueue = S.aiQueue.then(() => (gen === S.renderGen ? drawItem(x, true) : null));
+      }
     }
     return item.type;
   }
@@ -2801,6 +3183,7 @@
     for (const st of inkStrokes(page)) if (!st.erasedAt && st.pts.length) out.push(strokeBox(st));
     for (const a of page.ai) {
       if (a === except || a.erasedAt || a.dismissed) continue;
+      if (isOpen(a)) out.push(openBox(a)); // 摊在纸上的一段长回答（它的圈号藏着，照样占着那个位置）
       if (isBadge(a)) out.push(badgeBox(a));
       else if (isDot(a)) out.push(dotBox(a, DOT_HALO));
       else if (a.type !== 'write' && a.hit) out.push(a.hit);
@@ -2862,13 +3245,20 @@
     return [n1(Math.min(x0, maxX)), n1(clamp(y0, top, bottom))];
   }
 
-  // 长回答到了：定下圈号的编号（这一页已有回答的最大圈号加一，擦掉的也占着号）和位置；回答文字一个字都不上纸
+  // 长回答到了：定下圈号的编号（这一页已有回答的最大圈号加一，擦掉的也占着号）和位置。
+  // 空白本子（2026-11-17，见「长回答摊在纸上」一节）：这段话不太长、所答内容旁边又有空，就摊在纸上（spread），圈号的位置照样定下
+  // （收回圈号时用）；AI 说了「这条收着」（fold）、书页和推送页、太长、旁边没空：只标圈号，和原来一样
   function buildAnswer(it, T, base) {
     const item = { id: base.id, req: base.req, type: 'write', t: base.t, text: String(it.text || ''), on: base.on || [] };
+    if (base.author) item.author = base.author; // 是谁写的（2026-11-17）
     if (it.q) item.q = it.q;
     item.n = nextBadgeNo(S.page);
     item.at = answerSpot(it, T);
     item.seen = false;
+    if (blankNb() && it.fold !== true) {
+      const how = spreadTry(item, item.text, { lines: OPEN_LINES, reach: OPEN_REACH, place: it.place, T, it, by: 'auto' });
+      if (how.ok) item.seen = true; // 摊在纸上的字看得见：之后收回圈号时是空心的（看过）
+    }
     return item;
   }
   const nextBadgeNo = (page) => 1 + page.ai.reduce((m, a) => (a.type === 'write' && typeof a.n === 'number' ? Math.max(m, a.n) : m), 0);
@@ -2901,7 +3291,7 @@
     const g = el('g', { class: 'nbr-badges' }, aiRoot);
     for (const n of strip) {
       const sub = el('g', { transform: `translate(0 ${f1(n.D)})`, 'data-page': n.i }, g);
-      for (const a of n.ent.page.ai) if (isBadge(a) && !a.erasedAt) drawBadge(a, sub, 'nbr-badge');
+      for (const a of n.ent.page.ai) if (isBadge(a) && !isOpen(a) && !a.erasedAt) drawBadge(a, sub, 'nbr-badge'); // 摊开的那一段画在底图上（paintNeighbor）
     }
   }
 
@@ -2911,7 +3301,7 @@
     const reach = Math.max(BADGE_R + 6, 22 / S.view.s);
     let best = null, bestD = Infinity;
     for (const a of page.ai) {
-      if (!isBadge(a) || a.erasedAt) continue;
+      if (!isBadge(a) || isOpen(a) || a.erasedAt) continue; // 摊开着的：圈号不画，点它那一段字（openAtWorld）
       const d = Math.hypot(x - a.at[0], y - a.at[1]);
       if (d <= reach && d < bestD) { best = a; bestD = d; }
     }
@@ -2966,8 +3356,8 @@
   // 卡片里的内容：主回答（问：……、全文）、接着的各段回应（前面写着它回应的那句红字）、最底下之前的版本
   function renderCard(a) {
     // 纸上的短批注收成的卡片：最上面一块照它在纸上的换行画（红字压着的字不错位），不写「问：」。
-    // 小蓝点浮出来的那张小卡片（阶段 D1）：同一个画法，只有原来那几行（下面留一点写红字的地方）
-    const dot = isDot(a), note = !dot && fromNote(a);
+    // 短批注浮出来的那张小卡片（小蓝点，阶段 D1；2026-11-18 起纸上的短批注点一下也浮出它，底下有「收成蓝点」）：同一个画法，只有原来那几行
+    const dot = Boolean(S.card && S.card.note && S.card.id === a.id), note = !dot && fromNote(a);
     $('#acQ').hidden = dot || note || !a.q;
     $('#acQt').textContent = dot ? '' : a.q || '';
     if (dot) fillNote($('#acBody'), a.lay, popMap(a), a.id);
@@ -2979,7 +3369,12 @@
       const d = document.createElement('div');
       d.className = 'ac-blk ac-seg';
       d.dataset.blk = String(m.id);
-      if (m.q) {
+      if (m.redo === 'brief' || m.redo === 'full') { // 点「再短点」「展开讲」请 AI 重写的那一段（2026-11-17）：不是回应红字，写明是按哪个钮重写的
+        const h = document.createElement('div');
+        h.className = 'ac-mq ac-redo';
+        h.textContent = m.redo === 'brief' ? '按「再短点」重写：' : '按「展开讲」重写：';
+        d.appendChild(h);
+      } else if (m.q) {
         const h = document.createElement('div'), lab = document.createElement('span'), t = document.createElement('span');
         h.className = 'ac-mq';
         lab.className = 'ac-mqh';
@@ -3184,8 +3579,10 @@
   function redrawBadge(a) {
     const old = aiRoot.querySelector(`:scope > g.ai-item[data-id="${CSS.escape(String(a.id))}"]`);
     if (old) old.remove();
+    for (const d of texLayer.querySelectorAll(`.tx[data-id="${CSS.escape(String(a.id))}"]`)) d.remove(); // 摊开的那一段里的公式
     if (!S.aiVisible || a.erasedAt) return;
-    if (isBadge(a)) drawBadge(a, aiRoot, 'ai-item ai-write');
+    if (isOpen(a)) drawOpen(a, false);
+    else if (isBadge(a)) drawBadge(a, aiRoot, 'ai-item ai-write');
     else if (isDot(a)) drawDot(a, aiRoot);
   }
 
@@ -3193,8 +3590,11 @@
   const markAt = (a) => (isDot(a) ? a.dot.at : a.at);
   const markR = (a) => (isDot(a) ? DOT_R + DOT_HALO : BADGE_R);
 
-  // 卡片的位置：紧挨圈号（小蓝点），默认在右下方；放不下就翻到左边、上边，始终整个在屏幕里
+  // 卡片的位置：紧挨圈号（小蓝点），默认在右下方；放不下就翻到左边、上边，始终整个在屏幕里。
+  // 摊在纸上的一段长回答、纸上的短批注浮出的小卡片：挨着那一块字放（placeCardBy）
   function placeCard(a) {
+    if (isOpen(a)) { placeCardBy(openBox(a)); return; }
+    if (S.card && S.card.note && !isDot(a) && isPop(a)) { placeCardBy(noteTextBox(a)); return; }
     const card = $('#answerCard'), at = markAt(a);
     measureStage();
     const v = S.view, s = v.s, cx = stageRect.left + v.tx + at[0] * s, cy = stageRect.top + v.ty + at[1] * s, r = markR(a) * s;
@@ -3207,6 +3607,75 @@
       if (top + h > vh - m) top = cy - r - 6 - h;
     } else if (top + h > vh - m) top = cy + r * 0.4 - h; // 下面放不下：翻到上边（还在圈号右边）
     Object.assign(card.style, { left: `${clamp(left, m, Math.max(m, vw - m - w))}px`, top: `${clamp(top, m, Math.max(m, vh - m - h))}px` });
+  }
+
+  // 摊在纸上的一段长回答的卡片：放在那一段的右边、和它顶上齐平；右边放不下放左边，左右都放不下放在它下面（右沿对齐），
+  // 下面也放不下放在上面；始终整个在屏幕里。卡片可以盖住那一段（卡片里就是同一段话），尽量不盖
+  function placeCardBy(b) {
+    const card = $('#answerCard');
+    measureStage();
+    const v = S.view, s = v.s, L = stageRect.left + v.tx + b[0] * s, R = stageRect.left + v.tx + b[2] * s;
+    const T = stageRect.top + v.ty + b[1] * s, B = stageRect.top + v.ty + b[3] * s;
+    const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight, m = 8, w = card.offsetWidth, h = card.offsetHeight;
+    let left = R + 8, top = T;
+    if (left + w > vw - m) {
+      if (L - 8 - w >= m) left = L - 8 - w;
+      else { left = R - w; top = B + 8; if (top + h > vh - m) top = T - 8 - h; }
+    }
+    Object.assign(card.style, { left: `${clamp(left, m, Math.max(m, vw - m - w))}px`, top: `${clamp(top, m, Math.max(m, vh - m - h))}px` });
+  }
+
+  // 卡片底下一排（2026-11-17，暂定）：摊开着的写「收起」，收着的写「摊在纸上」（只在空白本子里有）；
+  // 「再短点」「展开讲」：交了还没回的那个写「已交」，两个都先不能点（10 分钟没回恢复）。短批注浮出的小卡片上只有一个钮（见下面）
+  function askOf(a) {
+    const k = a && a.ask;
+    return k && typeof k === 'object' && typeof k.t === 'number' && Date.now() - k.t < S.roundWait ? k : null;
+  }
+  // 2026-11-18：短批注浮出的小卡片（空白本子）底下也有这一排，只有一个钮：纸上的写「收成蓝点」，小蓝点的写「放回纸上」。
+  // 纸上的短批注收成的旧卡片（fromNote）也能「摊在纸上」了（原来不许）
+  function updateCardActs() {
+    clearTimeout(S.askTimer);
+    const box = $('#acActs'), a = cardItem(), sp = $('#acSpread');
+    if (a && S.card && S.card.note && isPop(a) && blankNb()) {
+      box.hidden = false;
+      const dot = isDot(a);
+      sp.hidden = false;
+      sp.textContent = dot ? '放回纸上' : '收成蓝点';
+      sp.dataset.act = dot ? 'topaper' : 'todot';
+      $('#acShorter').hidden = true;
+      $('#acLonger').hidden = true;
+      return;
+    }
+    if (!a || !S.card || S.card.note || a.type !== 'write') { box.hidden = true; return; }
+    box.hidden = false;
+    $('#acShorter').hidden = false;
+    $('#acLonger').hidden = false;
+    const open = isOpen(a);
+    sp.hidden = !open && !blankNb();
+    sp.textContent = open ? '收起' : '摊在纸上';
+    sp.dataset.act = open ? 'fold' : 'open';
+    const ask = askOf(a);
+    // 卡片一直开着、到点还没回：到点把两个钮恢复（2026-11-18 外部审查：原来只刷新了「AI」按钮）
+    if (ask) S.askTimer = setTimeout(updateCardActs, Math.max(0, ask.t + S.roundWait - Date.now()) + 50);
+    for (const btn of [$('#acShorter'), $('#acLonger')]) {
+      const mine = Boolean(ask) && ask.want === btn.dataset.want;
+      btn.disabled = Boolean(ask);
+      btn.classList.toggle('sent', mine);
+      btn.textContent = mine ? '已交' : btn.dataset.want === 'brief' ? '再短点' : '展开讲';
+    }
+  }
+  // 点了「摊在纸上」「收起」：卡片照旧开着，挪到新的位置旁边
+  function cardSpreadAct() {
+    const a = cardItem();
+    if (!a) return;
+    const act = $('#acSpread').dataset.act;
+    if (act === 'todot' || act === 'topaper') { // 短批注：收成蓝点、放回纸上；小卡片照旧开着，换成新样子的那一张
+      if (act === 'todot' ? noteToDot(a) : noteToPaper(a)) openCard(a);
+      return;
+    }
+    if (act === 'fold') userFold(a); else userSpread(a);
+    updateCardActs();
+    placeCard(a);
   }
 
   // 把卡片里的某一块滑到卡片顶上（滑不到底的就停在最底下）
@@ -3222,21 +3691,23 @@
   function popWidth(a) { const m = popMap(a); return `${Math.ceil((m.w * m.u + 2 * CARD_PX) * popScale() + 2)}px`; }
 
   function openCard(a) {
-    const card = $('#answerCard'), dot = isDot(a);
+    // pop：短批注浮出来的小卡片——小蓝点的，和（2026-11-18 起）空白本子里纸上的短批注点一下浮出的（底下有「收成蓝点」）
+    const card = $('#answerCard'), pop = isDot(a) || (isPop(a) && blankNb());
     closeCard();
-    const segs = moreOf(a), jump = !dot && !a.seen && segs.length ? String(segs[segs.length - 1].id) : null;
-    S.card = { id: a.id, k: 1, note: dot };
-    card.classList.toggle('note-pop', dot); // 小蓝点浮出来的：样子和长回答的卡片分得开（见 style.css）
+    const segs = moreOf(a), jump = !pop && !a.seen && segs.length ? String(segs[segs.length - 1].id) : null;
+    S.card = { id: a.id, k: 1, note: pop };
+    card.classList.toggle('note-pop', pop); // 短批注浮出来的：样子和长回答的卡片分得开（见 style.css）
     renderCard(a);
-    card.style.width = dot ? popWidth(a) : '';
+    card.style.width = pop ? `max(${popWidth(a)}, 132px)` : ''; // 至少放得下底下那个钮（「收成蓝点」「放回纸上」）
     updateCardNav(); // 顶上的「上一条」「下一条」：先定出不出，卡片多高才量得对
+    updateCardActs(); // 底下一排（摊在纸上 / 收起、再短点、展开讲）：同样先定
     card.hidden = false;
     card.scrollTop = 0;
     layoutCard();
     placeCard(a);
     drawCardInk();
     if (jump) scrollCardTo(jump);
-    if (dot) redrawBadge(a); // 小蓝点：浮着的时候带一圈，看得出是哪一个
+    if (pop) { if (isDot(a)) redrawBadge(a); } // 小蓝点：浮着的时候带一圈，看得出是哪一个（纸上的短批注不重画）
     else if (!a.seen) { // 看过了：圈号变空心，存下来
       a.seen = true;
       markDirty();
@@ -3343,6 +3814,7 @@
     const top = card.scrollTop;
     renderCard(a);
     updateCardNav();
+    updateCardActs();
     layoutCard();
     placeCard(a);
     card.scrollTop = top;
@@ -3360,6 +3832,7 @@
     S.card = null;
     $('#answerCard').hidden = true;
     $('#acNav').hidden = true;
+    $('#acActs').hidden = true;
     $('#acInk').textContent = '';
     if (was && isDot(was)) redrawBadge(was); // 小蓝点收回：那一圈去掉
   }
@@ -3375,11 +3848,26 @@
     const open = marksOf(a).filter((m) => m.req && !m.erasedAt && !answered.has(m.id));
     let on = open.filter((m) => m.req === T.req);
     if (!on.length) on = open; // 不是按投递回的（比如没带 submission）：交了还没被回应的都算
-    const seg = { id: 'm' + uid(), t: Date.now(), req: T.req, text, on: on.map((m) => m.id) };
+    // 点「再短点」「展开讲」请的重写：不是回应卡片上的红字，一笔都不算它回应了（2026-11-18 外部审查：红字随一次「AI」交出去后
+    // 又点了「再短点」，重写的先回来时把那些红字都记成回应过了，以后交稿不再带它们）。那些红字等对应那次投递的回应来消
+    if (it.redo === 'brief' || it.redo === 'full') on = [];
+    const seg = withAuthor({ id: 'm' + uid(), t: Date.now(), req: T.req, text, on: on.map((m) => m.id) }, T); // 这一段是谁接的（可以和卡片不是同一个对话）
     if (it.q) seg.q = String(it.q);
+    if (it.redo === 'brief' || it.redo === 'full') seg.redo = it.redo; // 用户点「再短点」「展开讲」请它重写的（2026-11-17）
     a.more = (Array.isArray(a.more) ? a.more : []).concat([seg]);
     a.seen = false;
-    S.fresh.set(a.id, performance.now());
+    // 卡片上那个钮的「已交」恢复：只认这条回应是那一次请求的（2026-11-18 外部审查：十分钟后重试，旧请求的回应先到会清掉新请求的）
+    if (seg.redo && T.req) S.redoGot.add(String(T.req)); // 回应比交出去的回话先到：回话到了时按它恢复（askRedo）
+    if (seg.redo && a.ask && typeof a.ask === 'object' && a.ask.req && String(a.ask.req) === String(T.req)) delete a.ask;
+    // 摊在纸上的（2026-11-17，暂定）：重写的那一段到了——和一条新回答落下一样按空间定：不太长、旁边有空就把新的这一段摊在原处附近，
+    // 否则收回圈号（实心、跳两下）；回应卡片上红字的一段到了——收回圈号（实心、跳两下），新的一段在卡片里，不把纸上那段换成对话。
+    // 用户自己点过「收起」的（a.shut）、AI 回的时候说了收着（fold: true）的：收着，不自动摊开（2026-11-18 外部审查）
+    if (seg.redo && blankNb() && !fromNote(a)) {
+      const old = a.spread;
+      delete a.spread;
+      if (!a.shut && it.fold !== true && spreadTry(a, seg.text, { lines: OPEN_LINES, reach: OPEN_REACH, by: old ? old.by : 'auto', src: seg.id }).ok) a.seen = true;
+    } else if (isOpen(a)) delete a.spread;
+    if (!isOpen(a)) S.fresh.set(a.id, performance.now());
     markDirty();
     redrawBadge(a);
     if (S.card && S.card.id === a.id) {
@@ -3391,7 +3879,7 @@
 
   // 这一页交上去了，交到 t 为止（平板的时钟）：lastSent 只往后挪。单页交时记交稿的时刻（send）；几页一起交时电脑记下的是
   // 那一页当时最后一次落笔、擦除的时刻（pages.last_touch）——之后写的都比它晚，之前写的都不再算「上次交稿之后写的」。
-  // lastSent 只有 noteFollowups 用（服务端判断哪页有新字看的是它自己记的 seen，不看它）。返回改了没有
+  // lastSent 以前只有 noteFollowups 用（红笔批过的短批注收成卡片，2026-11-18 起不收了），现在只是记着；服务端判断哪页有新字看的是它自己记的 seen。返回改了没有
   function markPageSent(page, t) {
     if (!page || typeof t !== 'number' || !(t > (page.lastSent || 0))) return false;
     page.lastSent = t;
@@ -3411,19 +3899,15 @@
     return n;
   }
 
-  // -- 纸上的短批注上写了红字（2026-11-14 用户定；怎么算「写在上面」、什么时候变、圈号放哪、红字怎么换算是用户不在时暂定的，等用户过目）：
-  // 红笔写在一条短批注（note、question）上或紧挨着它，点「AI」交稿的那一刻，这条批注收成一个圈号、变成一张卡片：
-  // 卡片最上面一块是原来那句（照它在纸上的换行、字体、字号画），冲着它写的那几笔红字从纸上挪进卡片（按同一个比例换算，
-  // 相对它压着的字不动），成为卡片上还没交的红字；之后和长回答的卡片一样：随这次交稿交给 Claude，Claude 用带 card 的 write 回，
-  // 接在下面。交稿没成也不丢：卡片已经变好、存好，红字算没交（圈号带红点），下次点「AI」照样交。
-  // 新条目：{ id（还是原来那条的）, type: 'write', text（原话）, q?, on（原来所指的笔迹）, n, at, seen: true, adopted?, marks, sheet,
-  //   from（原来那条批注，原样）, fromMap（纸上那一块怎么换算进卡片：{x0, y0, w, h, u}，卡片里 x = 16 + (纸上 x − x0)·u，
-  //   y = (纸上 y − y0)·u，从卡片最上面那块的顶量）, fromAt（变的时刻） }
+  // -- 纸上的短批注上写了红字。2026-11-14 定的是：点「AI」交稿的那一刻，这条批注收成一个圈号、变成一张卡片（红字挪进卡片，
+  // 回应接在卡片下面）。2026-11-18 用户改了（《产品定义》第 2 节「红笔批过的短批注留在纸上」）：蓝字和红字都原样留在纸上，
+  // 不再收成圈号、变卡片；交上去时书写过程里写明那组红笔写在哪条蓝字批注上（服务 pages.red_on_notes，「写在上面」的判法和原来一样：
+  // 红笔那组有一笔压到批注的字四周放宽 NOTE_PAD 的一块），AI 照别的红笔问题回在红字旁边。收成小蓝点改成用户自己点（noteToDot、noteToPaper）。
+  // 以前已经变成的卡片（下面这些字段）留着：{ id（还是原来那条的）, type: 'write', text（原话）, q?, on（原来所指的笔迹）, n, at, seen: true,
+  //   adopted?, marks, sheet, from（原来那条批注，原样）, fromMap（纸上那一块怎么换算进卡片：{x0, y0, w, h, u}，卡片里 x = 16 + (纸上 x − x0)·u，
+  //   y = (纸上 y − y0)·u，从卡片最上面那块的顶量）, fromAt（变的时刻） }；卡片上照旧能点「摊在纸上」（2026-11-18 起）
   const FOLLOW_TYPES = new Set(['note', 'question']);
-  const NOTE_PAD = 10; // 短批注的字（21 号）四周放宽这么多页面单位（约半个字高）：红字压到这一圈里就算写在它上面
-  // 拉得很远的一组不收进卡片（2026-11-14 暂定，第二轮）：带上它以后卡片要缩到 NOTE_MIN_U 以下（这一块比 408 ÷ 0.8 = 510 宽），
-  // 或者这一块比批注自己的字高出 NOTE_GROW 以上，这一组就整组留在纸上、照旧是普通的红笔（不拆开带一半）。卡片里的字最小约 17 像素
-  const NOTE_MIN_U = 0.8, NOTE_GROW = 240;
+  const NOTE_PAD = 10; // 短批注的字（21 号）四周放宽这么多页面单位（约半个字高）：红字压到这一圈里就算写在它上面（服务 pages.NOTE_PAD 同一个数）
   const CARD_PX = 16, CARD_PT = 12, CARD_TW = CARD_W - 32; // 卡片内容的左边距、上边距、一行能排多宽（style.css 里 #acPage 的 padding）
 
   function fromNote(a) {
@@ -3452,51 +3936,6 @@
     return n;
   }
 
-  // 这一页上写在短批注上的红字：[{ note, strokes }]。只认红笔；只认这条批注到了之后、这一页上次交稿之后写的、没擦、没被回答过的
-  // （「上次交稿」：单页交时平板记下的时刻，几页一起交时由电脑记下的那一页最后落笔的时刻，见 handleEvent 的 lsent）。
-  // 一组笔迹（按交稿时的分组 computeGroups：同一口气写的，加上同一行接着写的、回头补的；一句话停顿过也是一组）里有一笔压到批注的字
-  // （四周放宽 NOTE_PAD），这一组都算冲着它，写出了框的也算；一组压到两条批注时归压得多的那条（那条容不下它就留在纸上，不改归另一条）。
-  // 一条批注上的几组按先后一组组加：加上这一组后卡片要缩到 NOTE_MIN_U 以下、或高出 NOTE_GROW 以上，这一组整组留在纸上（noteFits）。
-  // 蓝字藏起来时不认（看不见，就不是写在它上面）。蓝字旁画的星号是采纳，不留作笔迹（commitStroke 里先认手势），不会到这里
-  function noteFollowups(page) {
-    if (!S.aiVisible || !page) return [];
-    const live = liveIds(page);
-    // 收成小蓝点的不算：纸上看不见它，写在原来那块地方的红字不是写在它上面（浮出来时写的红字在它的小卡片上，见 dotToCard）
-    const notes = page.ai.filter((a) => FOLLOW_TYPES.has(a.type) && a.lay && Array.isArray(a.lay.lines) && a.lay.lines.length && a.text
-      && !a.erasedAt && !a.dismissed && !gone(a, live) && !isDot(a));
-    if (!notes.length) return [];
-    const boxes = notes.map((a) => { const b = noteTextBox(a); return [b[0] - NOTE_PAD, b[1] - NOTE_PAD, b[2] + NOTE_PAD, b[3] + NOTE_PAD]; });
-    const ans = answeredIds(page), since = page.lastSent || 0, byNote = new Map();
-    for (const g of computeGroups(inkStrokes(page))) { // 按先后
-      if (g.c !== 'r') continue;
-      let best = null;
-      notes.forEach((a, k) => {
-        const ss = g.strokes.filter((s) => !s.erasedAt && s.t0 > since && s.t0 > (a.t || 0) && !ans.has(s.id));
-        const hit = ss.reduce((n, s) => n + inkInBox(s, boxes[k]), 0);
-        if (hit && (!best || hit > best.hit)) best = { a, ss, hit };
-      });
-      if (best) byNote.set(best.a, (byNote.get(best.a) || []).concat([best.ss]));
-    }
-    const out = [];
-    for (const [note, list] of byNote) {
-      const tb = noteTextBox(note);
-      let E = tb, keep = [];
-      for (const ss of list) {
-        const E2 = ss.reduce((b, s) => unionBox(b, strokeBox(s)), E);
-        if (noteFits(tb, E2)) { E = E2; keep = keep.concat(ss); }
-      }
-      if (keep.length) out.push({ note, strokes: keep });
-    }
-    return out;
-  }
-
-  // 批注的字（tb）连同红字一共占 E 这一块时，收成的卡片还看得清吗：缩放 u（和 noteToCard 同一个算法）不小于 NOTE_MIN_U，
-  // 高不比批注自己的字高出 NOTE_GROW 以上
-  function noteFits(tb, E) {
-    const w = E[2] - E[0] + 8, h = E[3] - E[1] + 8;
-    return Math.floor(Math.min(1, CARD_TW / w) * 1000) / 1000 >= NOTE_MIN_U && h <= tb[3] - tb[1] + 8 + NOTE_GROW;
-  }
-
   // 卡片最上面那块里原来那几行字的排版（相对那一块的顶，卡片的固定宽度下的单位），给服务端画卡片的图用：
   // 和纸上同一个字体量每行的宽；基线和卡片上画的一样（服务端把基线画在 y + h/2 + 0.35·字号）
   function noteRows(a) {
@@ -3522,7 +3961,7 @@
     });
   }
 
-  // 小蓝点浮出来的小卡片：纸上那几行字（noteTextBox）四周留一点，下面再留一行写红字的地方，按卡片的固定宽度换算（和 noteToCard 同一个算法）。
+  // 小蓝点浮出来的小卡片：纸上那几行字（noteTextBox）四周留一点，下面再留一行写红字的地方，按卡片的固定宽度换算（和以前的 noteToCard 同一个算法）。
   // 第一次在上面写红字时记进 popMap（finishCardInk），之后都照它，变成卡片时也照它
   const POP_PAD = 6, POP_ROOM = 34;
   function popMap(a) {
@@ -3542,39 +3981,15 @@
     return badgeSpot(a.lay.x + BADGE_R, a.lay.y + BADGE_R, page, G);
   }
 
-  // 一条短批注连同冲着它的红字收成卡片（就地换掉 page.ai 里那一条，红字从 page.strokes 里拿掉）。返回新条目
-  function noteToCard(page, G, a, strokes) {
-    let E = noteTextBox(a);
-    for (const s of strokes) E = unionBox(E, strokeBox(s));
-    E = [E[0] - 4, E[1] - 4, E[2] + 4, E[3] + 4]; // 笔画的粗细、字的歪斜：再留一点
-    const w = E[2] - E[0], h = E[3] - E[1];
-    const map = { x0: n1(E[0]), y0: n1(E[1]), w: n1(w), h: n1(h), u: Math.floor(Math.min(1, CARD_TW / w) * 1000) / 1000 };
-    const cx = (x) => r1(CARD_PX + (x - map.x0) * map.u), cy = (y) => r1((y - map.y0) * map.u);
-    const item = { id: a.id, req: a.req, type: 'write', t: a.t, text: String(a.text || ''), on: Array.isArray(a.on) ? a.on.slice() : [] };
-    if (a.q) item.q = String(a.q);
-    if (a.adopted) item.adopted = true;
-    item.n = nextBadgeNo(page);
-    item.seen = true; // 原来那句用户看过了
-    item.marks = strokes.map((s) => ({ id: s.id, blk: 'a', pts: s.pts.map((p) => [cx(p[0]), cy(p[1])].concat(p.slice(2))), t0: s.t0, w: r1(s.w * map.u) || s.w, c: 'r' }));
-    item.from = JSON.parse(JSON.stringify(a));
-    item.fromMap = map;
-    item.fromAt = Date.now();
-    item.sheet = noteSheet(item);
-    const moved = new Set(strokes.map((s) => s.id));
-    page.strokes = page.strokes.filter((s) => !moved.has(s.id));
-    page.ai[page.ai.indexOf(a)] = item;
-    item.at = noteBadgeAt(page, G, a); // 红字、原来那条批注都拿掉了之后再找地方
-    return item;
-  }
-
   // 收成小蓝点的短批注，浮出来时上面写了红字（阶段 D1）：点「AI」交稿时同样收成圈号、变成卡片。红字本来就在它那张小卡片上
   // （坐标是小卡片里的），换算（popMap）照搬成卡片最上面那块的换算（fromMap），卡片最上面那块和小卡片排得一样，红字不错位。
-  // 圈号放在所指的笔迹旁（和 noteToCard 一样）。返回新条目
+  // 圈号放在所指的笔迹旁（和以前的 noteToCard 一样）。2026-11-18 起小卡片上不能再写红字，这里只剩以前写下、还没交的。返回新条目
   function dotToCard(page, G, a) {
     const map = popMap(a), from = JSON.parse(JSON.stringify(a));
     delete from.marks;
     delete from.popMap;
     const item = { id: a.id, req: a.req, type: 'write', t: a.t, text: String(a.text || ''), on: Array.isArray(a.on) ? a.on.slice() : [] };
+    if (a.author) item.author = a.author; // 收成卡片还是那个对话写的（2026-11-17）
     if (a.q) item.q = String(a.q);
     if (a.adopted) item.adopted = true;
     item.n = nextBadgeNo(page);
@@ -3592,12 +4007,11 @@
   // 点「AI」交稿前：把这一页写在短批注上的红字都收成卡片。page、G、undo：哪一页、那一页的纸、那一页的撤销记录（默认当前页）。
   // 撤销记录里「写了这一笔」改成「卡片上写了这一笔」：撤销照样撤得掉它（从卡片上撤），和别的笔迹在同一个次序里。
   // 收成小蓝点、浮出来时写了红字的，也在这时变成卡片（dotToCard；红字本来就记作卡片上的，撤销记录不用改）。返回变了几条
+  // 2026-11-18 用户改了 2026-11-14 的决定：纸上的短批注被红笔批过也留在纸上，不再收成圈号、变成卡片——红字照旧是纸上的红笔，
+  // 交上去时书写过程里写明那组红笔写在哪条蓝字批注上（服务 pages.red_on_notes），AI 照别的红笔问题回在红字旁边。
+  // 这里只剩以前在小蓝点浮出的小卡片上写过、还没交的红字（现在小卡片上不能再写红字）：照旧变成卡片交，红字不丢
   function followupsToCards(page = S.page, G = S, undo = S.undo) {
-    const list = page ? noteFollowups(page) : [];
-    for (const { note, strokes } of list) {
-      const item = noteToCard(page, G, note, strokes), ids = new Set(strokes.map((s) => s.id));
-      if (undo) for (let k = 0; k < undo.length; k++) if (undo[k].t === 'add' && ids.has(undo[k].id)) undo[k] = { t: 'cmark', a: item.id, id: undo[k].id };
-    }
+    const list = [];
     const live = page ? liveIds(page) : new Set();
     const dots = page ? page.ai.filter((a) => isDot(a) && hasUnsentMarks(a) && !a.erasedAt && !a.dismissed && !gone(a, live)) : [];
     if (S.card && dots.some((a) => a.id === S.card.id)) closeCard();
@@ -3608,21 +4022,25 @@
     return n;
   }
 
-  // 几页一起交：别的页上写在短批注上的红字也先收成卡片，排进存盘队列。用手上最新的那份：相邻页的缓存、还没存上的那份；
+  // 几页一起交：别的页上（旧数据里）小蓝点浮出时写下、还没交的红字也先收成卡片，排进存盘队列。用手上最新的那份：相邻页的缓存、还没存上的那份；
   // 都没有才从电脑上取（取的时候那一页被翻到了、或又有了没存上的改动，这次就不动它，那一页的红字照旧当普通的红笔交）
   async function followupsElsewhere(list) {
     const nb = S.nb;
     let changed = 0;
     for (const i of list || []) {
       if (S.nb !== nb || i === S.idx) continue;
-      const key = nb.id + '#' + i, cached = S.flow ? S.flowCache.get(i) : null, job = pendingSaves.get(key);
+      const pk = keyAt(nb, i), jk = jobKey(nb.id, pk, i, nbGen(nb)), cached = S.flow ? S.flowCache.get(i) : null, job = pendingSaves.get(jk);
       let page = (cached && cached.page) || (job && job.page) || null;
       if (!page) {
-        try { page = normalizePage(await (await api(`/api/page?nb=${encodeURIComponent(nb.id)}&i=${i}`)).json()); } catch (e) { continue; }
-        if (S.nb !== nb || i === S.idx || (S.flow && S.flowCache.has(i)) || pendingSaves.has(key)) continue;
+        try { page = await fetchPage(nb, i); } catch (e) { continue; }
+        if (S.nb !== nb || i === S.idx || (S.flow && S.flowCache.has(i)) || pendingSaves.has(jk)) continue;
+        if (pk && pageKeys.get(page) && pageKeys.get(page) !== pk) continue; // 页序在别处改过了，取来的是别的页：这次不动它
+        if (pageGens.has(page) && pageGens.get(page) !== nbGen(nb)) continue; // 书在别处更新过：键一样也可能是别的页，这次不动它
       }
-      if (!followupsToCards(page, geomOf(page, i), S.undos.get(key) || (cached && cached.undo) || null)) continue;
-      pendingSaves.set(key, { nb: nb.id, i, body: JSON.stringify(serializePage(page)), page });
+      if (!followupsToCards(page, geomOf(page, i), S.undos.get(nb.id + '#' + i) || (cached && cached.undo) || null)) continue;
+      const key = pageKeys.get(page) || (job && job.key) || pk; // 按这一页自己的键存（gen 也按它自己记着的）
+      const gen = pageKeys.get(page) ? pageGens.get(page) : job && job.key ? job.gen : nbGen(nb);
+      pendingSaves.set(jobKey(nb.id, key, i, gen), { nb: nb.id, i, key, gen, body: JSON.stringify(serializePage(page)), page });
       changed++;
     }
     if (changed && S.flow) redrawAll(); // 画在屏幕上的相邻页：那条批注换成了圈号
@@ -3632,7 +4050,13 @@
   // -- 卡片上的笔、橡皮、手指：红笔写在卡片上，黑笔收起卡片，橡皮擦卡片上的红字，手指上下滑（笔刚用过一秒内落下的不算）
   function cardDown(e) {
     if (!S.card) return;
-    if (e.target.closest && e.target.closest('#acNav')) return; // 顶上的「上一条」「下一条」：照常是按钮（不写字、不滑卡片，见 bindUI）
+    const tg = e.target && e.target.closest ? e.target : null;
+    if (tg && tg.closest('#acNav')) return; // 顶上的「上一条」「下一条」：照常是按钮（不写字、不滑卡片，见 bindUI）
+    // 底下一排（2026-11-17）：钮照常是按钮；手指按在钮之间的空处照常滑卡片（卡片底部常是手指要滑的地方），笔落在那里不写字
+    if (tg && tg.closest('#acActs') && (tg.closest('button') || e.pointerType !== 'touch')) {
+      if (e.pointerType === 'pen') S.penAt = performance.now(); // 笔刚用过：紧接着落下的手指照旧当手掌
+      return;
+    }
     e.preventDefault();
     const card = $('#answerCard');
     if (e.pointerType === 'touch') {
@@ -3650,6 +4074,8 @@
     if (S.cardErase) finishCardErase();
     const tool = isEraserButton(e) ? 'eraser' : S.tool;
     if (tool === 'pen' || tool === 'lasso') { closeCard(); return; } // 黑笔落在卡片里：卡片收起，这一笔不留（用户：蓝字上肯定是红笔而不是黑笔）。卡片上没有套索，一样收起
+    // 短批注浮出的小卡片（2026-11-18 起）：不在上面写红字——要批它，放回纸上（或就在纸上）用红笔写在它旁边。红笔落下也是收起
+    if (tool === 'red' && S.card.note) { closeCard(); return; }
     if (!cardItem()) return;
     try { card.setPointerCapture(e.pointerId); } catch (err) { /* 有些浏览器不支持 */ }
     const [x, y] = cardPoint(e);
@@ -3686,7 +4112,7 @@
 
   function buildItem(it, T) {
     const id = uid(), rnd = rng(id);
-    const base = { id, req: T.req, type: it.type, t: Date.now(), level: T.level };
+    const base = withAuthor({ id, req: T.req, type: it.type, t: Date.now(), level: T.level }, T); // 带上是谁写的（下面各种都在 base 上加）
     const on = refIds(it, 'anchor', T);
     if (on) base.on = on;
     if (it.type === 'note' || it.type === 'question' || it.type === 'suggest') {
@@ -3762,7 +4188,7 @@
     let b = 0;
     if (blankNb()) { for (const o of roomObstacles()) b = Math.max(b, o[3]); return b || 20; }
     for (const st of inkStrokes()) if (!st.erasedAt) { const bb = strokeBox(st); if (bb[0] < S.W) b = Math.max(b, bb[3]); }
-    for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt) b = Math.max(b, badgeBox(a)[3]);
+    for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt) b = Math.max(b, (isOpen(a) ? openBox(a) : badgeBox(a))[3]);
     for (const a of S.page.ai) if (BLOCK_TYPES.has(a.type) && a.hit && !a.dismissed) b = Math.max(b, a.hit[3]);
     return b || 20;
   }
@@ -3784,17 +4210,17 @@
 
   // 书页、推送页的页边批注排在哪一高度：从 y 起找一段高 h 的空，不压别的批注（擦掉的、以前横划掉的、指着的字擦光了的不算：
   // 2026-11-15 修的，原来擦掉的蓝字仍占着位置，把新批注挤到栏底），也不压写在这一栏里（x0–x1）的笔迹和圈号（2026-11-14 修的：
-  // 用户的字写进了页边，批注锚在它上面时原来正好压在它上面）
-  function findFreeY(y, h, x0 = -Infinity, x1 = Infinity) {
-    const live = liveIds();
-    const occ = S.page.ai.filter((a) => a.lay && a.type !== 'arrow' && a.type !== 'write' && !a.erasedAt && !a.dismissed && !gone(a, live))
+  // 用户的字写进了页边，批注锚在它上面时原来正好压在它上面）。
+  // opt（套索挪动时排页边的短批注用，见 colY）：ai 代替 S.page.ai、boxes 代替笔迹的外框（挪过以后的样子），skip 不算的那几条的 id，
+  // colOnly 别的批注也只算横向和这一栏（x0–x1）重叠的（到的时候是整页上带排版的批注都算，不管左右）
+  function findFreeY(y, h, x0 = -Infinity, x1 = Infinity, opt = {}) {
+    const live = liveIds(), ai = (opt.ai || S.page.ai).filter((a) => !opt.skip || !opt.skip.has(a.id));
+    const across = (L) => !opt.colOnly || (L.x < x1 && L.x + (L.w || 0) > x0);
+    const occ = ai.filter((a) => a.lay && a.type !== 'arrow' && a.type !== 'write' && !a.erasedAt && !a.dismissed && !gone(a, live) && across(a.lay))
       .map((a) => [a.lay.y, a.lay.y + a.lay.h]);
-    for (const st of inkStrokes()) {
-      if (st.erasedAt || !st.pts.length) continue;
-      const b = strokeBox(st);
-      if (b[2] > x0 && b[0] < x1) occ.push([b[1], b[3]]);
-    }
-    for (const a of S.page.ai) if (isBadge(a) && !a.erasedAt && a.at[0] + BADGE_R > x0 && a.at[0] - BADGE_R < x1) occ.push([a.at[1] - BADGE_R, a.at[1] + BADGE_R]);
+    const boxes = opt.boxes || inkStrokes().filter((st) => !st.erasedAt && st.pts.length).map(strokeBox);
+    for (const b of boxes) if (b[2] > x0 && b[0] < x1) occ.push([b[1], b[3]]);
+    for (const a of ai) if (isBadge(a) && !a.erasedAt && a.at[0] + BADGE_R > x0 && a.at[0] - BADGE_R < x1) occ.push([a.at[1] - BADGE_R, a.at[1] + BADGE_R]);
     const free = (yy) => yy >= S.Y0 + 4 && yy + h <= S.pageH - 4 && occ.every((o) => yy + h + 6 <= o[0] || yy >= o[1] + 6);
     if (free(y)) return y;
     const cands = [];
@@ -3860,10 +4286,80 @@
     return badgeSpot(a.lay.x + R, a.lay.y + R, page, G, R, a);
   }
 
-  // 收起一条短批注：成为小蓝点（why、by 见上）
+  // 收起一条短批注：成为小蓝点（why、by 见上；why 还可以是 'user'：用户自己点「收成蓝点」）
   function foldNote(a, why, by) {
     a.dot = { at: dotSpot(S.page, S, a), t: Date.now(), why };
     if (by) a.dot.by = by;
+  }
+
+  // -- 用户自己收起、放回短批注（2026-11-18 用户改的：「对于缩回蓝点可以改为主动的按钮的方式」；《产品定义》第 2 节「红笔批过的短批注留在纸上」）。
+  // 空白本子里纸上的短批注：手指点一下它的字（或黑笔点一下）浮出它的小卡片，底下「收成蓝点」；小蓝点点开浮出的小卡片底下「放回纸上」。
+  // 红笔落在它的字上照旧是写字（批它）；黑笔写过它的字（不是点一下）照旧自动收成小蓝点（防遮挡）。两样都能撤销、恢复（nfold）
+  function isPop(a) { return Boolean(a) && FOLLOW_TYPES.has(a.type) && Boolean(a.lay) && Array.isArray(a.lay.lines) && a.lay.lines.length > 0; }
+  // 纸上 (x, y) 处的一条展开着的短批注（在它的字上，或这一块外 pad 以内）
+  function noteAtWorld(x, y, page = S.page, pad = 4) {
+    if (!page || !S.aiVisible) return null;
+    const live = liveIds(page);
+    for (let i = page.ai.length - 1; i >= 0; i--) {
+      const a = page.ai[i];
+      if (!isPop(a) || isDot(a) || a.erasedAt || a.dismissed || gone(a, live)) continue;
+      if (ptBoxDist(noteTextBox(a), x, y) <= pad) return a;
+    }
+    return null;
+  }
+  // 撤销、恢复要放回去的样子：小蓝点、那几行字的位置、细线、点得到的范围
+  const noteSnap = (a) => JSON.parse(JSON.stringify({ dot: a.dot || null, lay: a.lay || null, paths: a.paths || [], hit: a.hit || null }));
+  function putNoteSnap(a, s) {
+    if (!a || !s) return;
+    if (s.dot) a.dot = JSON.parse(JSON.stringify(s.dot)); else delete a.dot;
+    if (s.lay) a.lay = JSON.parse(JSON.stringify(s.lay));
+    a.paths = JSON.parse(JSON.stringify(s.paths || []));
+    if (s.hit) a.hit = JSON.parse(JSON.stringify(s.hit));
+  }
+  // 这条短批注找空白时以哪一块为准：批改符号另成的那句话（of）是符号连同它批的那块（细线连回符号）；指着的笔迹还在按它现在的样子；
+  // 都没有用到的时候记下的所指那块（box）
+  function noteAnchor(a) {
+    const m = a.of ? S.page.ai.find((o) => o.id === a.of && !o.erasedAt) : null;
+    if (m && m.sym && m.box) return { A: unionBox(m.box.slice(), m.sym), to: m.sym, mark: true, up: m.type === 'strike' || m.type === 'insert' };
+    const ids = new Set(Array.isArray(a.on) ? a.on : []), ss = inkStrokes().filter((s) => ids.has(s.id) && !s.erasedAt);
+    if (ss.length) { const A = boxOf(ss), r0 = boxOf(strokeRows(ss)[0]); return { A, to: A, mid: (r0[1] + r0[3]) / 2 }; }
+    if (Array.isArray(a.box) && a.box.length === 4) return { A: a.box.slice(), to: a.box.slice() };
+    return null;
+  }
+  // 「收成蓝点」：和被字压到时一样收成所指笔迹旁的小蓝点；那几行字的排版留着（放回纸上时先试原处）
+  function noteToDot(a) {
+    if (!isPop(a) || isDot(a) || a.erasedAt) return false;
+    const pre = noteSnap(a);
+    foldNote(a, 'user');
+    pushUndo({ t: 'nfold', id: a.id, pre, post: noteSnap(a) });
+    markDirty();
+    renderAI();
+    return true;
+  }
+  // 「放回纸上」：原来那几行字的地方空着（不压字、不压别的蓝字，隔 NOTE_CLEAR）就放回原处；不空照短批注到的时候的办法在所指那块旁边
+  // 重新找（findRoom），细线跟着重画；找不到说一句，不动
+  function noteToPaper(a) {
+    if (!isPop(a) || !isDot(a) || a.erasedAt) return false;
+    const pre = noteSnap(a), L = a.lay, tb = noteTextBox(a), obs = roomObstacles(S.page, a), c = NOTE_CLEAR;
+    if (!obs.every((o) => tb[2] + c <= o[0] || tb[0] - c >= o[2] || tb[3] + c <= o[1] || tb[1] - c >= o[3])) {
+      const an = noteAnchor(a);
+      const spot = an && findRoom(an.A, L.w, L.h, { sides: an.up ? ['above', 'right', 'below', 'left'] : ['right', 'below', 'left', 'above'],
+        sideCost: an.up ? UP_COST : SIDE_COST, gap: NOTE_GAP, reach: NOTE_REACH, obs, zones: writeOnZones(),
+        yPref: an.mid !== undefined ? an.mid - NOTE_LH * 0.7 : an.A[1], xPref: an.A[0] + 12 });
+      if (!spot) { toast('旁边没有空地方放回纸上：先用套索把字挪开一点再试', 3200); return false; }
+      L.x = spot.x;
+      L.y = spot.y;
+      a.paths = !an.mark || boxDist([L.x, L.y, L.x + L.w, L.y + L.h], an.A) > MARK_LEAD ? leaderTo(L, an.to, rng(a.id)) : [];
+      a.hit = [L.x - 6, L.y - 4, L.x + L.w + 6, L.y + L.h + 4].map(n1);
+      maybeExtend(L.y + L.h);
+      keepHeight(L.y + L.h + 20);
+    }
+    delete a.dot;
+    if (!marksOf(a).length) delete a.popMap; // 小卡片的换算按新的位置重算（上面写过红字的旧数据照旧留着它，红字不错位）
+    pushUndo({ t: 'nfold', id: a.id, pre, post: noteSnap(a) });
+    markDirty();
+    renderAI();
+    return true;
   }
 
   // 这一笔黑笔压到了哪些展开着的短批注（压到它的字：每行按实际字宽量的那一块，见 noteTextBox）：收成小蓝点。返回收起的那几条的 id。
@@ -3900,12 +4396,17 @@
   // 空白本子上已经占着的地方（找空白时要让开）：没擦掉的笔迹，Claude 画在纸上的东西——短批注的字（按实际字宽）、圈号、小蓝点、
   // 图、公式、示意图、批改符号和它旁边那句话、概念图上的建议和它们的 ✓ × 钮；箭头、连线按线上的几小块算。
   // 擦掉的、以前横划掉的、指着的字擦光了的（纸上不画）不算（2026-11-15 用户的页面上擦掉的蓝字仍占着位置，把新批注挤走了）
-  function roomObstacles(page = S.page) {
+  // except：不算这一条（摊开一条长回答时，它自己原来摊在哪、圈号在哪都不挡它）
+  function roomObstacles(page = S.page, except = null) {
     const out = [], live = liveIds(page);
     for (const st of inkStrokes(page)) if (!st.erasedAt && st.pts.length) out.push(strokeBox(st));
     for (const a of page.ai) {
-      if (a.erasedAt || a.dismissed || gone(a, live)) continue;
-      if (a.type === 'write') { if (isBadge(a)) out.push(badgeBox(a, 2)); continue; }
+      if (a === except || a.erasedAt || a.dismissed || gone(a, live)) continue;
+      if (a.type === 'write') { // 圈号（摊开着的，圈号藏着也占着那个位置：收回时它回到那里）；摊在纸上的那一段占整块
+        if (isOpen(a)) out.push(openBox(a));
+        if (isBadge(a)) out.push(badgeBox(a, 2));
+        continue;
+      }
       if (isDot(a)) { out.push(dotBox(a, DOT_HALO)); continue; }
       if (FOLLOW_TYPES.has(a.type) && a.lay && Array.isArray(a.lay.lines)) { out.push(noteTextBox(a)); continue; }
       if (MARK_TYPES.has(a.type) && (a.sym || a.lay)) { // 批改符号：占的是画出来的符号和那句话，不是它批的那一块（大括号括住的几行之间是空白）
@@ -3946,7 +4447,8 @@
       out.push(zone(boxOf(strokeRows(last.strokes.filter((s) => !s.erasedAt)).pop())));
     }
     const low = Math.max(...live.map((s) => strokeBox(s)[3]));
-    out.push(zone(live.map(strokeBox).filter((b) => (b[1] + b[3]) / 2 > low - 50).reduce(unionBox)));
+    // 最低的那一笔自己总算（一笔很高时它的中线比最底下高出 50 以上，原来一笔都选不出来，reduce 报错、整条回答落不下：2026-11-17 测出来的）
+    out.push(zone(live.map(strokeBox).filter((b) => (b[1] + b[3]) / 2 > low - 50 || b[3] >= low).reduce(unionBox)));
     return out;
   }
 
@@ -3955,8 +4457,10 @@
   // yPref 放在左右两边时首选的上沿、xPref 放在上下两边时首选的左沿。
   // 每个落点的代价 = 离 A 的距离 + 那个方向的加价（SIDE_COST）+ 压到 zones 的加价（ZONE_COST）+ 离首选位置的一点点，
   // 取代价最小、不压任何东西、在纸上的那个（纸往下长不算出纸）；都不行返回 null
+  // sideCost：各方向的加价换一套（批改符号里写在上方的删除线、插入符：先上、再右、下、左；见 buildMarkNote），不给用 SIDE_COST
   function findRoom(A, w, h, o) {
     const gap = o.gap, reach = o.reach, clear = o.clear === undefined ? NOTE_CLEAR : o.clear, step = 8, zones = o.zones || [];
+    const sideCost = o.sideCost || SIDE_COST;
     const minX = S.X0 + 6, maxX = S.TW - 6 - w, minY = S.Y0 + 6;
     if (maxX < minX) return null;
     const R = [A[0] - gap - reach - w - clear, A[1] - gap - reach - h - clear, A[2] + gap + reach + w + clear, A[3] + gap + reach + h + clear];
@@ -3965,8 +4469,8 @@
     const inZone = (x, y) => zones.some((z) => x < z[2] && x + w > z[0] && y < z[3] && y + h > z[1]);
     let best = null;
     const tryAt = (x, y, side, extra) => {
-      if (x < minX || x > maxX || y < minY) return;
-      const score = boxDist([x, y, x + w, y + h], A) + SIDE_COST[side] + extra + (inZone(x, y) ? ZONE_COST : 0);
+      if (x < minX || x > maxX || y < minY || (o.maxY !== undefined && y + h > o.maxY)) return; // maxY：不让纸为它加长（摊开的长回答）
+      const score = boxDist([x, y, x + w, y + h], A) + sideCost[side] + extra + (inZone(x, y) ? ZONE_COST : 0);
       if (best && score >= best.score) return;
       if (free(x, y)) best = { x: n1(x), y: n1(y), side, score };
     };
@@ -4049,6 +4553,288 @@
     return item;
   }
 
+  // ------------------------------------------------------------ 长回答摊在纸上（2026-11-17 用户定方向，细节是用户不在时暂定的）
+  // 《产品定义》第 2 节「蓝字摊在纸上、回答长短怎么控制」：长回答还是同一条 write，有两种样子——收着（圈号加卡片，原来的样子）和
+  // 摊开（这段话用蓝色手写体直接排在纸上所答内容的旁边，细线连过去）。谁定：草稿纸按空间定——到的时候这段话不太长（OPEN_LINES）、
+  // 旁边找得到不压字、不压别的蓝字的空（findRoom，和短批注同一个找法，纸不为它加长加宽），就摊开；否则收着。AI 可以说想放哪
+  // （place：right / below / left / above，或消息图里的一个像素框），先试那里，放不下再照常找；AI 说「这条收着」（fold）就不摊。
+  // 只在空白本子里摊（书页、推送页上照旧是圈号：书页的字密，页边一栏另有规矩）。
+  // 摊开的被用户后来写的黑笔压到（和短批注收成小蓝点同一个判法），收回圈号，不自动再摊开；用户随时能在卡片上点「摊在纸上」「收起」。
+  // 数据：write 上多一个 spread = { x, y, w, h（这一段在纸上的位置和大小）, rows: [{ y（相对 y）, h, w, t（一行字）| tex（公式）}],
+  //   lead?（连到所答笔迹的细线，SVG 路径）, side（right / below / left / above / box）, by（auto 到的时候 / ai 照 AI 说的 / user 用户点的）,
+  //   src?（摊的是卡片里哪一段：没有是原来的回答，有是接在下面重写的那一段的 id） }；没有 spread 就是收着（圈号）。
+  //   圈号的位置 at 照旧记着（摊开时不画；收回时它在那里）。卡片、红字、上一条下一条、采纳的 ★ 照旧都在这一条上
+  function isOpen(a) {
+    const p = a && a.type === 'write' ? a.spread : null;
+    return Boolean(p) && typeof p === 'object' && ['x', 'y', 'w', 'h'].every((k) => typeof p[k] === 'number') && Array.isArray(p.rows) && p.rows.length > 0;
+  }
+  function openBox(a, pad = 0) { const p = a.spread; return [p.x - pad, p.y - pad, p.x + p.w + pad, p.y + p.h + pad]; }
+  // 摊开的那一段每一行占的地方（页面坐标）：字按实际的宽（和短批注的 noteTextBox 一样从字顶到字底），公式按排出来的大小
+  function openRowBoxes(a) {
+    const p = a.spread;
+    return p.rows.map((r) => (r.tex !== undefined ? [p.x, p.y + r.y, p.x + r.w, p.y + r.y + r.h] : [p.x, p.y + r.y + 2, p.x + Math.max(r.w, NOTE_FS), p.y + r.y + NOTE_FS * 1.2]));
+  }
+  // 这段话摊在纸上排成什么样：按 OPEN_W 折行，单独一行的 $$…$$ 排成公式（OPEN_TEX_FS），空行留半行。lines 是折合成几行高
+  function openLayout(text) {
+    const rows = [];
+    let y = 0, w = 0;
+    for (const para of String(text || '').split(/\r?\n/)) {
+      const m = /^\s*\$\$(.+)\$\$\s*$/.exec(para);
+      if (m) {
+        const tex = m[1].trim(), sz = measureTex(tex, OPEN_TEX_FS), h = Math.max(sz.h, NOTE_LH);
+        rows.push({ y: n1(y), h: n1(h), w: n1(sz.w), tex });
+        y += h + 4;
+        w = Math.max(w, sz.w);
+        continue;
+      }
+      if (!para.trim()) { if (rows.length) y += NOTE_LH * 0.5; continue; }
+      for (const ln of wrapLine(para, OPEN_W, NOTE_FS)) {
+        measure.font = `${NOTE_FS}px ${FONT}`;
+        const tw = measure.measureText(ln).width;
+        rows.push({ y: n1(y), h: NOTE_LH, w: n1(tw), t: ln });
+        y += NOTE_LH;
+        w = Math.max(w, tw);
+      }
+    }
+    if (!rows.length) return null;
+    const last = rows[rows.length - 1];
+    return { rows, w: Math.ceil(w) + 4, h: n1(last.y + last.h + 8), lines: (last.y + last.h) / NOTE_LH };
+  }
+  // 这条回答答的是哪一块（摊开的那一段放在它旁边、细线连到它）：所指的笔迹（还在的）；指着的笔迹分在几处时（没指明答哪句，
+  // 这一轮的红笔问题都记在 on 里）只取离圈号最近的那一笔所在的那一组。known 为 false：没有笔迹可指，就用圈号那一点（不连线）
+  function spreadAnchor(a) {
+    const ids = new Set(Array.isArray(a.on) ? a.on : []), at = isBadge(a) ? a.at : null;
+    let ss = inkStrokes().filter((s) => ids.has(s.id) && !s.erasedAt && s.pts.length);
+    if (ss.length > 1 && at) {
+      const d = (s) => ptBoxDist(strokeBox(s), at[0], at[1]), near = ss.reduce((p, q) => (d(q) < d(p) ? q : p));
+      const g = computeGroups(inkStrokes()).find((x) => x.strokes.includes(near));
+      if (g) { const set = new Set(g.strokes.map((s) => s.id)), sub = ss.filter((s) => set.has(s.id)); if (sub.length) ss = sub; }
+    }
+    if (ss.length) { const r0 = boxOf(strokeRows(ss)[0]); return { A: boxOf(ss), mid: (r0[1] + r0[3]) / 2, known: true }; }
+    if (at) return { A: [at[0] - BADGE_R, at[1] - BADGE_R, at[0] + BADGE_R, at[1] + BADGE_R], mid: at[1], known: false };
+    return null;
+  }
+  // AI 给的框（页面坐标 b）里找一块放得下这段字（L）、不压东西（obs）的地方，从左上角起一行行找。先和纸面（四周留 6）求交：
+  // 交出来的那块放不下整段字（框比字小、框在纸外）就不找，返回 null（照常另找）；框再大也最多试约 61 × 61 个位置
+  // （2026-11-18 外部审查：原来从框的起点每 8 个单位同步枚举、进了循环才判断出不出纸，离谱的大框、纸外很远的框会让页面卡死；
+  // 框比字小时又硬试一次左上角，伸出框外的也当放进去了）
+  function openBoxSpot(b, L, obs) {
+    const q = [Math.max(b[0], S.X0 + 6), Math.max(b[1], S.Y0 + 6), Math.min(b[2], S.TW - 6), Math.min(b[3], S.pageH - 6)];
+    const rx = q[2] - q[0] - L.w, ry = q[3] - q[1] - L.h;
+    if (!(rx >= 0 && ry >= 0)) return null;
+    const sx = Math.max(8, rx / 60), sy = Math.max(8, ry / 60);
+    const free = (x, y) => obs.every((o) => x + L.w + NOTE_CLEAR <= o[0] || x - NOTE_CLEAR >= o[2] || y + L.h + NOTE_CLEAR <= o[1] || y - NOTE_CLEAR >= o[3]);
+    for (let j = 0; j <= 61; j++) {
+      const y = Math.min(q[1] + j * sy, q[1] + ry);
+      for (let i = 0; i <= 61; i++) {
+        const x = Math.min(q[0] + i * sx, q[0] + rx);
+        if (free(x, y)) return { x: n1(x), y: n1(y), side: 'box' };
+        if (x >= q[0] + rx) break;
+      }
+      if (y >= q[1] + ry) break;
+    }
+    return null;
+  }
+  // 摊在哪：AI 说了位置的先试那里（一个方向：只在那一边找；一个像素框：框里从左上角起找一块放得下、不压东西的，见 openBoxSpot），
+  // 放不下再照常按 OPEN_SIDES 的先后找。都不压字、不压别的蓝字，不出纸，纸不为它加长加宽（maxY）。找不到返回 null
+  function spreadSpot(a, L, an, o) {
+    const obs = roomObstacles(S.page, a), base = { gap: NOTE_GAP, reach: o.reach, obs, zones: writeOnZones(),
+      yPref: an.mid - NOTE_LH * 0.7, xPref: an.A[0] + 12, maxY: S.pageH - 6 };
+    const p = o.place, c = o.T && o.T.crop;
+    if (Array.isArray(p) && p.length === 4 && p.every(Number.isFinite) && c && [c.x0, c.y0, c.scale].every(Number.isFinite) && c.scale > 0) { // 消息图里的一个像素框：换成页面坐标
+      let b = [c.x0 + Math.min(p[0], p[2]) / c.scale, c.y0 + Math.min(p[1], p[3]) / c.scale, c.x0 + Math.max(p[0], p[2]) / c.scale, c.y0 + Math.max(p[1], p[3]) / c.scale];
+      if (o.T.conv) b = Turn.box(o.T.conv, b);
+      const hit = openBoxSpot(b, L, obs);
+      if (hit) return hit;
+    } else if (OPEN_SIDES.includes(p)) {
+      const s = findRoom(an.A, L.w, L.h, Object.assign({}, base, { sides: [p] }));
+      if (s) return s;
+    }
+    return findRoom(an.A, L.w, L.h, Object.assign({}, base, { sides: OPEN_SIDES }));
+  }
+  // 试着把这条回答（a）的 text 摊在纸上。o：{ lines 最多几行高, reach 每个方向最多找出多远, place AI 说的位置, T 这一轮的投递（换算像素框）,
+  // by 谁让摊的, src 摊的是卡片里哪一段 }。摊开了：记进 a.spread，返回 { ok: true, side }；没摊开：a 不动，返回 { ok: false, why: 'long' | 'room' }
+  function spreadTry(a, text, o) {
+    const L = openLayout(text);
+    if (!L || L.lines > o.lines + 1e-6 || L.w > OPEN_W_MAX) return { ok: false, why: 'long' };
+    const an = spreadAnchor(a);
+    const spot = an && spreadSpot(a, L, an, o);
+    if (!spot) return { ok: false, why: 'room' };
+    const sp = { x: spot.x, y: spot.y, w: L.w, h: L.h, rows: L.rows, side: spot.side, by: o.by || 'auto' };
+    if (o.src) sp.src = o.src;
+    if (an.known) { const ld = leaderTo(sp, an.A, rng(a.id)); if (ld.length) sp.lead = ld[0].d; }
+    a.spread = sp;
+    return { ok: true, side: spot.side };
+  }
+  // 摊开时用哪一段字：卡片下面有「再短点」「展开讲」重写的（redo），用最新重写的那一段；否则原来的回答
+  function openText(a) {
+    const segs = moreOf(a).filter((m) => m.redo);
+    const s = segs[segs.length - 1];
+    return s ? { text: s.text, src: String(s.id) } : { text: a.text, src: null };
+  }
+  // 纸上 (x, y) 处摊开的那一段（在它的字上，或这一块里离字很近）；page 默认当前页
+  function openAtWorld(x, y, page = S.page, pad = 4) {
+    if (!page || !S.aiVisible) return null;
+    for (let i = page.ai.length - 1; i >= 0; i--) {
+      const a = page.ai[i];
+      if (!isOpen(a) || a.erasedAt || a.dismissed) continue;
+      if (openRowBoxes(a).some((b) => ptBoxDist(b, x, y) <= pad)) return a;
+    }
+    return null;
+  }
+  // 手指点一下屏幕上的 (cx, cy)：点在摊开的一段上就打开它的卡片（连续阅读时相邻页上的也算，那一页先换成当前页）
+  function tapOpenAt(cx, cy) {
+    const [x, y] = toWorld(cx, cy);
+    let a = openAtWorld(x, y);
+    if (!a && S.flow && !S.replay && !S.compare) {
+      for (const n of flowStrip()) {
+        const b = openAtWorld(x, y - n.D, n.ent.page);
+        if (b && activate(n.i, n.ent, n.D)) { a = b; break; }
+      }
+    }
+    if (!a) return false;
+    tapBadge(a);
+    return true;
+  }
+  // 画摊开的一段：蓝色手写体（和短批注同一种字、同一个颜色，字的歪斜按这条的 id 定），公式排在公式那一层，细线连到所答的笔迹；
+  // 采纳的深蓝带 ★；卡片上有还没交的红字：右上角一个红点（和圈号上的一样）。animate：刚到的，先画线，再一个字一个字写出来
+  function drawOpen(it, animate, parent = aiRoot) {
+    const sp = it.spread;
+    const g = el('g', { class: 'ai-item ai-write ai-open' + (it.dismissed ? ' dismissed' : '') + (it.adopted ? ' adopted' : ''), 'data-id': it.id }, parent);
+    const lead = sp.lead ? el('path', { d: sp.lead, class: 'leader', 'stroke-width': 1.3 }, g) : null;
+    const texts = [];
+    sp.rows.forEach((r, k) => {
+      if (r.tex !== undefined) { texAt(sp.x, sp.y + r.y, r.h, r.tex, OPEN_TEX_FS, it.dismissed, it.id); return; }
+      const t = el('text', { x: f1(sp.x), y: f1(sp.y + r.y + NOTE_FS), 'font-size': NOTE_FS, rotate: jitter(r.t, it.id + k) }, g);
+      t.textContent = animate ? '' : r.t;
+      texts.push([t, r.t]);
+    });
+    if (it.adopted) el('text', { x: f1(sp.x + sp.w + 4), y: f1(sp.y + 16), 'font-size': 18, class: 'adopt-star' }, g).textContent = '★';
+    if (hasUnsentMarks(it)) el('ellipse', { class: 'bdot', cx: f1(sp.x + sp.w + 6), cy: f1(sp.y + 4), rx: 4.6, ry: 4.6 }, g);
+    if (!animate) return Promise.resolve();
+    return (async () => {
+      if (lead) await animPath(lead, 260);
+      for (const tl of texts) await typeText(tl[0], tl[1], 24);
+    })();
+  }
+  // 发给 AI 的图（和连续阅读时相邻页的底图）里画摊开的一段：字照纸上的位置写；公式画不出排好的样子，写它的 LaTeX 源码（小一号，
+  // 和公式块在图里的画法一样），细线照画
+  function paintOpen(ctx, it) {
+    const sp = it.spread;
+    if (sp.lead) { // 和短批注的细线在图里一样画成实线
+      ctx.lineWidth = 1.3;
+      try { ctx.stroke(new Path2D(sp.lead)); } catch (e) { /* 旧浏览器 */ }
+    }
+    for (const r of sp.rows) {
+      if (r.tex !== undefined) {
+        ctx.font = `18px ${FONT}`;
+        ctx.fillText(r.tex, sp.x, sp.y + r.y + r.h / 2 + 6);
+      } else {
+        ctx.font = `${NOTE_FS}px ${FONT}`;
+        ctx.fillText(r.t, sp.x, sp.y + r.y + NOTE_FS);
+      }
+    }
+  }
+
+  // 黑笔压到了摊开的一段（压到它的字：每一行按实际的宽量，和短批注收成小蓝点同一个判法）：收回圈号。返回 { id: 原来摊在哪 }
+  // （撤销这一笔时照原样摊回去）。红笔写在上面不收：那是用户在它上面批注，照常交给 AI（它在图里看得到红字压着哪句）
+  function foldOpenUnder(st) {
+    const out = {};
+    for (const a of S.page.ai) {
+      if (!isOpen(a) || a.erasedAt || a.dismissed) continue;
+      if (!openRowBoxes(a).some((b) => inkInBox(st, b))) continue;
+      out[a.id] = a.spread;
+      delete a.spread;
+    }
+    const n = Object.keys(out).length;
+    if (n) {
+      if (S.card && out[S.card.id]) closeCard();
+      renderAI();
+      markDirty();
+      toast(n > 1 ? `被字压到的 ${n} 条回答收成了圈号，点圈号能看` : '被字压到的回答收成了圈号，点圈号能看', 2200);
+    }
+    return n ? out : null;
+  }
+
+  // 卡片上的「摊在纸上」「收起」（用户自己换，撤销能退回）。摊不开时说一句为什么，不动
+  // 纸上的短批注收成的旧卡片（fromNote，2026-11-18 起也能摊）：摊的是 openText 那一段——没有重写过就是原来那条批注的原话；
+  // 卡片上的红字、接在下面回应红字的各段留在卡片里（点开摊开的字照样看得到）
+  function userSpread(a) {
+    if (!a || isOpen(a) || !blankNb()) return false;
+    const { text, src } = openText(a);
+    const r = spreadTry(a, text, { lines: OPEN_USER_LINES, reach: OPEN_USER_REACH, by: 'user', src });
+    if (!r.ok) {
+      toast(r.why === 'long' ? `这条太长（超过 ${OPEN_USER_LINES} 行），摊开会占太多纸，留在卡片里看` : '旁边没有空地方摊开它：先用套索把字挪开一点再试', 3200);
+      return false;
+    }
+    pushUndo({ t: 'spread', id: a.id, from: null, to: JSON.parse(JSON.stringify(a.spread)), shut0: Boolean(a.shut), shut1: false });
+    delete a.shut;
+    a.seen = true;
+    markDirty();
+    renderAI();
+    return true;
+  }
+  // 用户点「收起」：记下 shut（2026-11-18 外部审查）——之后到的重写的一段不再自动摊开（appendToCard），用户点「摊在纸上」才去掉
+  function userFold(a) {
+    if (!a || !isOpen(a)) return false;
+    pushUndo({ t: 'spread', id: a.id, from: JSON.parse(JSON.stringify(a.spread)), to: null, shut0: Boolean(a.shut), shut1: true });
+    delete a.spread;
+    a.shut = true;
+    markDirty();
+    renderAI();
+    return true;
+  }
+  // 撤销、恢复时要放回去的那份摊开的样子（sp）摊的还是这条现在该摊的那一段（openText：最新重写的一段，没有就是原来的回答）：
+  // 不是的不放回去，免得纸上是旧的几行、卡片里已经是新的一段（2026-11-18 外部审查）
+  function sameOpenSrc(a, sp) { return Boolean(sp) && String(sp.src || '') === String(openText(a).src || ''); }
+
+  // ------------------------------------------------------------ 事后一键：卡片上的「再短点」「展开讲」（2026-11-17 用户定方向，细节暂定）
+  // 点了：请写这条回答的那个对话（这条记着的作者 author.sid；它不在了、没记作者，按这本现在发往的对话；还没选过、原来的不在了，
+  // 先弹出选对话的单子，选了再发）按新的长短重写这一条，回应接在这张卡片下面（和回应卡片上的红字同一条路：write 带 card）。
+  // 服务另起一次投递（只有文字：是哪个钮、圈号几、原来的回答），不另画图。交了以后那个钮写「已交」（a.ask，存在页面数据里，
+  // 刷新后还在；重写的那一段到了去掉，10 分钟没回也恢复），「AI」按钮上照常走进度。只在本地的本子不发，照旧提示
+  // 2026-11-18 外部审查后：点下去就记「已交」（原来等保存和交出去都结束才记，慢的时候连点能交两份）；交出去的回话到了，
+  // 编号记到原来那一页、那一条上（交的时候翻了页也是：按那一页存，不记到眼前这一页上，见 settleAsk）；没发出去的去掉「已交」
+  async function askRedo(a, want) {
+    if (!a || !S.nb || !S.page || a.type !== 'write' || askOf(a) || localBlocked()) return;
+    const nb = S.nb, page = S.page, idx = S.idx, key = curKey(), gen = curGen(), who = a.author && a.author.sid;
+    const alive = Boolean(who) && (S.sessions || []).some((s) => s.sid === who);
+    if (!alive && targetGone(() => askRedo(a, want))) return;
+    const body = { nb: nb.id, page: idx, key: key || undefined, id: a.id, want, to: alive ? who : undefined, target: alive ? undefined : sendTargetArg() };
+    const t = Date.now();
+    a.ask = { want, t };
+    markDirty();
+    if (S.card && S.card.id === a.id) updateCardActs();
+    await flushSave(); // 服务按存好的这一页找这一条
+    let res;
+    try {
+      res = await (await api('/api/redo', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
+    } catch (e) {
+      settleAsk({ nb, page, idx, key, gen, id: a.id, t }, null);
+      if (e.status === 410 && (await refreshSessions(), targetGone(() => askRedo(a, want)))) return;
+      toast('没发出去：' + e.message, 6000);
+      return;
+    }
+    settleAsk({ nb, page, idx, key, gen, id: a.id, t }, res.id);
+    startRound(res.id, nb.id);
+    toast(`已请「${sentName(res)}」${want === 'brief' ? '把圈号 ' + a.n + ' 写短一点' : '把圈号 ' + a.n + ' 展开讲'}`, 2600);
+  }
+  // 交出去有了结果：那一页现在在手上的那份（眼前这一页、连续阅读留着的相邻页；都不是了就是交的时候那一份）里的这一条，
+  // 「已交」还是这一次点的（t 对得上）：记下投递编号（rid），回应已经先到了、没发出去（rid 为空）的去掉。按那一页自己存
+  function settleAsk(o, rid) {
+    const live = S.nb === o.nb ? pageInHand(o.idx, o.key) : null, pg = live || o.page;
+    const it = pg && pg.ai.find((x) => x.id === o.id);
+    if (!it || !it.ask || typeof it.ask !== 'object' || it.ask.t !== o.t) return; // 已经不是这一次的了
+    if (rid && !S.redoGot.has(String(rid))) it.ask.req = rid; else delete it.ask;
+    if (pg === S.page) markDirty();
+    else {
+      const key = pageKeys.get(pg) || o.key, gen = pageKeys.get(pg) ? pageGens.get(pg) : o.gen;
+      pendingSaves.set(jobKey(o.nb.id, key, o.idx, gen), { nb: o.nb.id, i: o.idx, key, gen, body: JSON.stringify(serializePage(pg)), page: pg });
+      flushSave();
+    }
+    if (S.card && S.card.id === o.id) updateCardActs();
+  }
+
   // ------------------------------------------------------------ AI 层（SVG）
 
   function el(tag, attrs, parent) {
@@ -4079,7 +4865,8 @@
   }
 
   function drawItem(it, animate) {
-    if (it.type === 'write') { // 长回答：纸上只有圈号（没有圈号位置的旧样子不画）
+    if (it.type === 'write') { // 长回答：摊开的画那一段字；收着的纸上只有圈号（没有圈号位置的旧样子不画）
+      if (isOpen(it)) return drawOpen(it, animate);
       if (isBadge(it)) drawBadge(it, aiRoot, 'ai-item ai-write');
       return Promise.resolve();
     }
@@ -4190,8 +4977,11 @@
     const [x, y] = toWorld(cx, cy), live = liveIds();
     if (tapVote(x, y)) return true; // 建议旁的 ✓ × 钮
     if (tapBadgeAt(cx, cy)) return true; // 圈号（连续阅读时相邻页上的也算）
+    if (tapOpenAt(cx, cy)) return true; // 摊在纸上的一段长回答：打开它的卡片（卡片上有「收起」「再短点」「展开讲」）
     const d = dotAtWorld(x, y); // 小蓝点：那条短批注在旁边浮出来（再点一下收回）
     if (d) { tapBadge(d); return true; }
+    const nt = blankNb() ? noteAtWorld(x, y) : null; // 空白本子里纸上的短批注（2026-11-18）：浮出它的小卡片，底下「收成蓝点」
+    if (nt) { tapBadge(nt); return true; }
     for (let i = S.page.ai.length - 1; i >= 0; i--) {
       const it = S.page.ai[i];
       if (it.erasedAt || VOTE_TYPES.has(it.type) || it.type === 'write' || isDot(it)) continue; // 擦掉的点不着；建议用 ✓ × 钮（或笔打勾、横划）回应，点框本身不动它
@@ -4320,7 +5110,13 @@
       sym = [cx - 16, cy - 15, cx + 16, cy + 15];
       lay = { x: cx - w / 2 + 2, y: cy - 13, w, h: 24, lines: [text], fs: 18, lh: 24 };
     }
-    if (lay && it.type !== 'number') freeSpot(lay, sym, it.type === 'strike' || it.type === 'insert');
+    if (lay && it.type !== 'number') {
+      const up = it.type === 'strike' || it.type === 'insert';
+      if (!blankNb()) freeSpot(lay, sym, up); // 书页、推送页照旧
+      else if (!markSpot(lay, sym, up)) { // 空白本子：紧挨着的老位置都压着东西——符号照画，那句话另成一条短批注（onItem 里接着建，见 buildMarkNote）
+        return Object.assign(base, { box: b, paths, lay: null, hit: sym ? unionBox(b.slice(), sym) : b.slice(), sym: sym && sym.map(n1), say: { text, x: lay.x, y: lay.y, up } });
+      }
+    }
     let hit = b.slice();
     if (sym) hit = unionBox(hit, sym);
     if (lay) hit = unionBox(hit, [lay.x, lay.y, lay.x + lay.w, lay.y + lay.h]);
@@ -4483,9 +5279,10 @@
     ]);
     clearTimeout(timer);
   }
-  function texAt(x, y, h, tex, fs, faded) { // 从 (x, y) 起、高 h 的一块里排一个公式，竖直居中
+  function texAt(x, y, h, tex, fs, faded, id) { // 从 (x, y) 起、高 h 的一块里排一个公式，竖直居中；id：摊开的长回答里的公式记下是哪一条（套索拖动时跟着挪）
     const d = document.createElement('div');
     d.className = 'tx' + (faded ? ' faded' : '');
+    if (id) d.dataset.id = id;
     d.style.cssText = `left:${x}px;top:${y}px;height:${h}px;font-size:${fs}px`;
     d.innerHTML = texHTML(tex);
     texLayer.appendChild(d);
@@ -4620,6 +5417,7 @@
     for (const a of S.page.ai) {
       if (a.dismissed) continue;
       if (isBadge(a)) obs.push(badgeBox(a, 2)); // 长回答的圈号
+      if (isOpen(a)) obs.push(openBox(a)); // 摊在纸上的一段长回答
       if (isDot(a)) { obs.push(dotBox(a, DOT_HALO)); continue; } // 收成小蓝点的短批注：只占那个点
       if (a.lay) obs.push([a.lay.x, a.lay.y, a.lay.x + a.lay.w, a.lay.y + a.lay.h]);
       if (a.sym) obs.push(a.sym);
@@ -4636,6 +5434,71 @@
       x = o[2] + 6;
     }
     return x;
+  }
+
+  // 空白本子里批改符号旁边那句话（2026-11-18 用户在平板上试过后提的「蓝字不压已有的字」；《产品定义》第 2 节，细节暂定）：
+  // 紧挨着符号的老位置（和书页上 freeSpot 同一个起点、同样只往下或往上挪至多一行：0、半行、一行，和它的先后一样）不压任何东西
+  // （用户的字、别的蓝字、自己的符号；roomObstacles 加上这个符号）就还放那里，样子和以前一样，返回 true；都压着返回 false
+  function markSpot(L, mine, up) {
+    const obs = roomObstacles();
+    if (mine) obs.push(mine);
+    const clear = (y) => obs.every((o) => L.x + L.w <= o[0] || L.x >= o[2] || y + L.h <= o[1] || y >= o[3]);
+    for (const dy of up ? [0, -13, -26] : [0, 13, 26]) {
+      if (clear(L.y + dy)) { L.y += dy; return true; }
+    }
+    return false;
+  }
+  // 老位置压着东西：那句话另成一条短批注（type note，of 记着是哪个符号的；指着同一处笔迹），照短批注的办法在附近找空白
+  // （findRoom：符号连同它批的那块是 A；方向先后：写在上方的删除线、插入符是上、右、下、左，别的是右、下、左、上；找多远、隔多远
+  // 和短批注一样），首选老位置；放下后离 A 超过 MARK_LEAD 就用细线连回符号。附近都没有空白：收成小蓝点（和短批注放不下时一样，
+  // 那几行字排在小蓝点右下方，浮出来时照它排）。之后小蓝点、点开、被后来的字压到就收、套索跟着走、交给 AI 时的列表都走短批注现成的；
+  // 橡皮擦到符号或这句话，两条一起擦（eraseBlue），撤销一起回来
+  const MARK_LEAD = 28;
+  const UP_COST = { above: 0, right: 40, below: 320, left: 360 };
+  function buildMarkNote(mark, say, T) {
+    const rnd = rng(mark.id + 'say'), sym = mark.sym || mark.box, A = unionBox(mark.box.slice(), sym);
+    const lines = wrapText(say.text, 320, MARK_FS);
+    measure.font = `${MARK_FS}px ${FONT}`;
+    const w = Math.ceil(Math.min(320, Math.max(MARK_FS, ...lines.map((l) => measure.measureText(l).width)) + 4)), h = lines.length * MARK_LH + 4;
+    const note = withAuthor({ id: uid(), req: T.req, type: 'note', t: Date.now(), level: T.level, of: mark.id }, T);
+    if (Array.isArray(mark.on)) note.on = mark.on.slice();
+    const spot = findRoom(A, w, h, { sides: say.up ? ['above', 'right', 'below', 'left'] : ['right', 'below', 'left', 'above'], sideCost: say.up ? UP_COST : SIDE_COST,
+      gap: NOTE_GAP, reach: NOTE_REACH, obs: roomObstacles(), zones: writeOnZones(), yPref: say.y, xPref: say.x });
+    const lay = { x: n1(spot ? spot.x : A[2] + NOTE_GAP), y: n1(spot ? spot.y : A[1]), w, h, lines, fs: MARK_FS, lh: MARK_LH };
+    Object.assign(note, { text: say.text, box: mark.box.map(n1), lay, paths: [] });
+    if (spot) {
+      maybeExtend(lay.y + h);
+      keepHeight(lay.y + h + 20);
+      if (boxDist([lay.x, lay.y, lay.x + w, lay.y + h], A) > MARK_LEAD) note.paths = leaderTo(lay, sym, rnd);
+    } else {
+      note.dot = { at: markDotSpot(mark, note) || dotSpot(S.page, S, note), t: Date.now(), why: 'room' };
+      lay.x = n1(clamp(note.dot.at[0] + DOT_R + 10, S.X0 + 6, Math.max(S.X0 + 6, S.TW - 6 - w)));
+      lay.y = n1(Math.max(S.Y0 + 6, note.dot.at[1] + DOT_R + 4));
+    }
+    note.hit = [lay.x - 6, lay.y - 4, lay.x + w + 6, lay.y + h + 4].map(n1);
+    return note;
+  }
+
+  // 那句话收成的小蓝点放哪：符号右端外侧、符号竖直的中间最好，往四周找离那里最近的一个不压东西（笔迹、别的蓝字，连同这个符号
+  // 和它批的那块）的地方，最远横向 160、竖直 120（字写得密时只往右、往下找会跑到一大片字的外面去，离符号太远）。先按连光晕的
+  // 大小找；字密得连这个都放不下，再按只算点本身（光晕可以挨着字）找一次；都没有返回 null（照短批注的办法往右、往下找，dotSpot）
+  function markDotSpot(mark, except) {
+    const s = mark.sym || mark.box, all = occupied(except);
+    for (const [R, pad] of [[DOT_R + DOT_HALO, 2], [DOT_R, 0]]) {
+      const cx = s[2] + DOT_GAP + R, cy = (s[1] + s[3]) / 2, W = [cx - 160 - R - pad, cy - 120 - R - pad, cx + 160 + R + pad, cy + 120 + R + pad];
+      const obs = all.filter((o) => o[0] < W[2] && o[2] > W[0] && o[1] < W[3] && o[3] > W[1]);
+      const free = (x, y) => x - R >= S.X0 + 2 && x + R <= S.TW - 2 && y - R >= S.Y0 + 2
+        && obs.every((o) => x + R + pad <= o[0] || x - R - pad >= o[2] || y + R + pad <= o[1] || y - R - pad >= o[3]);
+      let best = null, bd = Infinity;
+      for (let dy = -120; dy <= 120; dy += 2) {
+        for (let dx = -160; dx <= 160; dx += 2) {
+          const d = Math.hypot(dx, dy);
+          if (d < bd && free(cx + dx, cy + dy)) { best = [n1(cx + dx), n1(cy + dy)]; bd = d; }
+        }
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   // 符号旁边那句话别压着别的东西（已有的批注、别的符号、我的字）：先试原处，再往下、往上挪半行；都挪不开就放原处
@@ -4754,6 +5617,44 @@
 
   const pageKey = () => (S.nb ? S.nb.id + '#' + S.idx : '');
 
+  // 页的键（2026-11-17 用户定「存页按页的键，不按页码」）：每份页面数据记着它是哪一页（从电脑上取来时服务在回话头 X-Page-Key 里说的），
+  // 存的时候按这个键存——两台设备同时开着同一本，另一台插了页、删了页、挪了页而这台还没刷新，这台的字照样存到它原来那一页上
+  const pageKeys = new WeakMap(); // 页面数据 → 页的键
+  const keyAt = (nb, i) => { const p = nb && nb.pageInfo && nb.pageInfo[i]; return p && p.key ? String(p.key) : ''; };
+  const curKey = () => (S.page && pageKeys.get(S.page)) || keyAt(S.nb, S.idx); // 眼前这一页的键
+  // 第 i 页手上那一份的键：当前页、连续阅读取来的相邻页按它们自己记着的；都不在手上就按本子信息
+  function keyOfIndex(i) {
+    const pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
+    return (pg && pageKeys.get(pg)) || keyAt(S.nb, i);
+  }
+  // 书原地更新过几次（gen；2026-11-17 用户定「书更新时页的键重新编号」）：书一更新，原文件那些页的键按新页码重排（p0001 → p0002）。
+  // 每份书页的数据还记着取它时这本书更新过几次（服务在回话头 X-Page-Gen 里说的），存页、取回答时和键一起带回去：书在那之后更新过，
+  // 服务按新旧页对照把键换成新版里的再存，不存到别的页上；换不过来的（那一页在新版里没了）不写进本子、另存在电脑上
+  const pageGens = new WeakMap(); // 页面数据 → 取它时这本书更新过几次（书页才有）
+  const nbGen = (nb) => (nb && typeof nb.gen === 'number' ? nb.gen : undefined);
+  // 和 curKey、keyOfIndex 配对：键是那份页面数据自己记着的，gen 也按它记着的；键是按本子信息找的，gen 也按本子信息
+  const curGen = () => (S.page && pageKeys.get(S.page) ? pageGens.get(S.page) : nbGen(S.nb));
+  function genOfIndex(i) {
+    const pg = i === S.idx ? S.page : (S.flowCache.get(i) || {}).page;
+    return pg && pageKeys.get(pg) ? pageGens.get(pg) : nbGen(S.nb);
+  }
+  // 存盘队列里的一项按「本子#页的键」排（页码会因别处插页、删页、挪页而变，键不变）；没有键的按页码。
+  // 书页的键后面再带 gen：书更新以前的 p0001 和更新以后的 p0001 不是同一页，不排成同一项
+  const jobKey = (nbId, key, i, gen) => nbId + '#' + (key ? key + (typeof gen === 'number' ? '~' + gen : '') : '@' + i);
+
+  // 从电脑上取第 i 页：页面数据，记下它的键（书页还有 gen）。取来的那一页和本子信息里第 i 页不是同一页、或书在这本信息以后更新过：
+  // 这台手上的页序过时了，换成新的（syncOrder）
+  async function fetchPage(nb, i) {
+    const r = await api(`/api/page?nb=${encodeURIComponent(nb.id)}&i=${i}`);
+    const page = normalizePage(await r.json()), key = r.headers.get('X-Page-Key') || '', g = r.headers.get('X-Page-Gen');
+    if (key) {
+      pageKeys.set(page, key);
+      if (g !== null && /^\d+$/.test(g)) pageGens.set(page, Number(g));
+      if ((keyAt(nb, i) && key !== keyAt(nb, i)) || (pageGens.has(page) && nbGen(nb) !== undefined && pageGens.get(page) !== nbGen(nb))) staleOrder(nb.id);
+    }
+    return page;
+  }
+
   function normalizePage(p) {
     p = p && typeof p === 'object' ? p : {};
     return {
@@ -4804,13 +5705,15 @@
     S.saveTimer = setTimeout(flushSave, 1200);
   }
 
-  // 待保存的页面按「本子#页码」排队；保存失败的留在队里，翻页后也会继续重试
+  // 待保存的页面按「本子#页的键」排队（jobKey）；保存失败的留在队里，翻页后也会继续重试。
+  // 每一项：{nb, i（排队时的页码，只给旧服务看）, key（页的键，按它存）, gen（书页：取这一页时这本书更新过几次）, body, page}
   const pendingSaves = new Map();
 
   // 这一页有改动：排进保存队列（同步，换页前调用）
   function queueSave() {
     if (S.dirty && S.page && S.nb) {
-      pendingSaves.set(pageKey(), { nb: S.nb.id, i: S.idx, body: JSON.stringify(serializePage()), page: S.page });
+      const key = curKey(), gen = curGen();
+      pendingSaves.set(jobKey(S.nb.id, key, S.idx, gen), { nb: S.nb.id, i: S.idx, key, gen, body: JSON.stringify(serializePage()), page: S.page });
       S.dirty = false;
     }
   }
@@ -4818,22 +5721,36 @@
   async function flushSave() {
     clearTimeout(S.saveTimer);
     queueSave();
-    let failed = false;
+    let failed = false, stale = '';
     if (pendingSaves.size && !S.saveTryAt) S.saveTryAt = Date.now(); // 从这时起一直没存上（电脑睡了、网断了时请求会挂很久）：见 troubleText
     for (const [key, job] of Array.from(pendingSaves)) {
       try {
-        const r = await api(`/api/page?nb=${encodeURIComponent(job.nb)}&i=${job.i}`, {
+        const q = job.key ? '&key=' + encodeURIComponent(job.key) + (typeof job.gen === 'number' ? '&gen=' + job.gen : '') : '';
+        const r = await api(`/api/page?nb=${encodeURIComponent(job.nb)}&i=${job.i}${q}`, {
           method: 'PUT', body: job.body, headers: { 'Content-Type': 'application/json' }, keepalive: job.body.length < 60000,
         });
-        try { const d = await r.json(); if (job.page && typeof d.rev === 'number') job.page.rev = d.rev; } catch (e) { /* 旧服务 */ }
+        let d = {};
+        try { d = await r.json(); if (job.page && typeof d.rev === 'number') job.page.rev = d.rev; } catch (e) { /* 旧服务 */ }
         if (pendingSaves.get(key) === job) pendingSaves.delete(key);
+        // 书页：服务说了实际存到的键和这本现在更新过几次（书在这一页取来以后更新过，键换成了新版里的）。这份页面数据记下新的，之后按新的存
+        const k = typeof d.key === 'string' && d.key ? d.key : job.key;
+        if (job.page && k && typeof d.gen === 'number') { pageKeys.set(job.page, k); pageGens.set(job.page, d.gen); }
+        // 服务按键存的：那一页在别处删掉了（字存进了删掉的那一页），或它现在的页码和这台手上的不一样——页序在别处改过了，
+        // 或这本书在这台手上的本子信息以后原地更新过
+        const newer = typeof d.gen === 'number' && nbGen(S.nb) !== undefined && d.gen !== nbGen(S.nb);
+        if (d.deleted) { onPageGone(job, ''); stale = job.nb; } else if (typeof d.at === 'number' && S.nb && S.nb.id === job.nb && (d.at !== indexOfKey(k) || newer)) stale = job.nb;
       } catch (e) {
         if (e.status === 409) { // 这一页在别的设备上改过了：服务端已把这份另存，这边换成那边的版本
           if (pendingSaves.get(key) === job) pendingSaves.delete(key);
           onConflict(job, e.message);
+        } else if (e.status === 410 && e.data && e.data.pageGone) { // 这一页已经不在这本里了（删掉的页里也没有）：服务没写进本子，另存在电脑上
+          if (pendingSaves.get(key) === job) pendingSaves.delete(key);
+          onPageGone(job, e.message);
+          stale = job.nb;
         } else failed = true;
       }
     }
+    if (stale) staleOrder(stale);
     if (failed) {
       updateStatus('保存失败，稍后重试');
       S.saveTimer = setTimeout(flushSave, 5000);
@@ -4852,21 +5769,107 @@
     return S.saveState === '保存失败，稍后重试' || stuck ? '新写的字还没存上，正在重试；先别刷新这一页' : '';
   }
 
-  // 存的时候发现这一页在别的设备上改过了：相邻页的缓存丢掉，当前页重新载入那边的版本
+  // 存的时候发现这一页在别的设备上改过了：相邻页的缓存丢掉，当前页重新载入那边的版本。
+  // 哪一页按页面数据本身认（或它的键），不按排队时的页码：排队之后页序可能在别处改过、这台已经换成了新的页序
   function onConflict(job, msg) {
-    const i = job.i;
     if (S.nb && S.nb.id === job.nb) {
-      const e = S.flowCache.get(i);
-      if (e && e.url) URL.revokeObjectURL(e.url);
-      S.flowCache.delete(i);
-      if (S.undos) S.undos.delete(job.nb + '#' + i);
-      if (S.idx === i && job.page === S.page) {
+      for (const [i, e] of Array.from(S.flowCache)) {
+        if (e.page !== job.page && !(job.key && pageKeys.get(e.page) === job.key)) continue;
+        if (e.url) URL.revokeObjectURL(e.url);
+        S.flowCache.delete(i);
+        if (S.undos) S.undos.delete(job.nb + '#' + i);
+      }
+      if (job.page === S.page) {
+        if (S.undos) S.undos.delete(pageKey());
         S.dirty = false;
         S.undo = [];
-        setTimeout(() => openPage(i), 0);
+        setTimeout(() => reopenPage(job.key), 0);
       }
     }
     toast(msg + '（已换成那边的版本）', 9000);
+  }
+
+  // 重新载入眼前这一页（存的时候发现它在别的设备上改过了）：按它的键找——先取一次这本现在的样子，页序在别处改过就换上，
+  // 再翻到这一页现在的页码（不按旧页码取，免得取来的是别的页）；它已经不在了就翻到原来位置上的那一页
+  async function reopenPage(key) {
+    const nb = S.nb;
+    if (!nb) return;
+    let info = null;
+    try { info = await (await api('/api/notebook?nb=' + encodeURIComponent(nb.id))).json(); } catch (e) { /* 取不到：照旧按页码 */ }
+    if (S.nb !== nb) return;
+    if (info && (info.pageInfo || []).map((p) => p.key).join() !== (nb.pageInfo || []).map((p) => p.key).join()) {
+      remapOrder(info); // S.idx 跟着这一页的键走
+      S.thumbVer = Date.now();
+    }
+    const j = key ? indexOfKey(key) : -1;
+    S.page = null; // 手上这份是没存上的旧版本：不留作相邻页
+    await openPage(j >= 0 ? j : clamp(S.idx, 0, S.nb.pages - 1));
+  }
+
+  // 第几页是这个键（这台手上的页序；没有是 -1）
+  function indexOfKey(key) {
+    return key && S.nb && S.nb.pageInfo ? S.nb.pageInfo.findIndex((p) => p && String(p.key) === key) : -1;
+  }
+
+  // 存的时候发现那一页已经不在页序里了。msg 空：在别处删掉了，服务把字存进了删掉的那一页（还原后都在）；
+  // msg 不空：哪里都没有了，服务一个字没写进本子、另存在电脑上，msg 是服务说的那句。这台自己刚删的那一页（ownDeleted）不再提示
+  const ownDeleted = new Set(), goneTold = new Set();
+  function onPageGone(job, msg) {
+    if (job.key) goneTold.add(job.key);
+    if (msg) { toast(msg, 12000); return; }
+    if (job.key && ownDeleted.has(job.key)) return;
+    toast(`第 ${job.i + 1} 页在别的设备上删掉了：刚写的字存在了那一页里，在抽屉的「显示已删的页」里还原就能看到`, 12000);
+  }
+
+  // 这台手上的页序过时了（别的设备插了页、删了页、挪了页）：取一次这本现在的样子换上（syncOrder）。
+  // 存页的回话、取来的页和本子信息对不上时调；同一时刻只换一次
+  function staleOrder(nbId) {
+    clearTimeout(staleOrder.timer);
+    staleOrder.timer = setTimeout(() => syncOrder(nbId), 0);
+  }
+  let orderBusy = false;
+  async function syncOrder(nbId) {
+    if (!S.nb || S.nb.id !== nbId) return;
+    // 这一页还在载入，正在写字、擦、画套索、挪纸，或回放、对比旧版、正在换页序：等一会儿再换
+    if (!S.page || orderBusy || S.cur || S.erasing || lassoBusy() || touches.size || gesture || S.replay || S.compare) {
+      staleOrder.timer = setTimeout(() => syncOrder(nbId), 600);
+      return;
+    }
+    orderBusy = true;
+    try {
+      const nb = S.nb;
+      let info;
+      try { info = await (await api('/api/notebook?nb=' + encodeURIComponent(nb.id))).json(); } catch (e) { return; }
+      if (S.nb !== nb || !S.page) return;
+      if (nbGen(info) !== nbGen(nb)) {
+        // 这本书在别处原地更新成了新版（「已更新」的通知没收到，或还没到）：新旧两版的键对不上，不能只换页序，整本重新打开。
+        // 还没存上的先存（还按旧键和旧 gen，服务换成新版里的键）。眼前这一页存过、服务说了它在新版里的键：翻到它；
+        // 不知道的（没存过，或它在新版里没了）翻到原来的页码上，和收到「已更新」时一样
+        await flushSave();
+        if (S.nb !== nb) return;
+        const ck = curKey(), j = curGen() === nbGen(info) ? (info.pageInfo || []).findIndex((p) => String(p.key) === ck) : -1;
+        await openNotebook(nb.id, j >= 0 ? j : S.idx);
+        toast('这本在别处更新成了新版：已重新打开', 5000);
+        return;
+      }
+      const now = (info.pageInfo || []).map((p) => String(p.key)), had = (nb.pageInfo || []).map((p) => String(p.key)), ck = curKey();
+      if (now.join() === had.join() && ck === keyAt(nb, S.idx)) return; // 已经是新的了
+      if (now.includes(ck)) { // 眼前这一页还在：人留在这一页，页码跟着变
+        relabelPages(info);
+        toast('这本的页在别的设备上加过、删过或挪过：已换成新的页序，眼前还是这一页', 4000);
+        return;
+      }
+      // 眼前这一页在别处删掉了：还没存上的字照样按它的键存（存进删掉的那一页），翻到原来位置上的那一页
+      const told = goneTold.has(ck) || ownDeleted.has(ck);
+      queueSave();
+      remapOrder(info); // 眼前这一页不在了：S.idx 停在原来的位置上
+      S.page = null;
+      S.thumbVer = Date.now();
+      await openPage(S.idx);
+      if (!told && !goneTold.has(ck)) toast(`眼前这一页在别的设备上删掉了，翻到了第 ${S.idx + 1} 页（在抽屉的「显示已删的页」里可以还原）`, 8000);
+    } finally {
+      orderBusy = false;
+    }
   }
 
   // 名字开头一长串相同的本子（如 …进展_202610_v47_…、…进展_202610_v48_…），列表里只显示不同的那段
@@ -4921,9 +5924,10 @@
   // 本子列表和抽屉里的文件夹一起取（文件夹取不到就当没有，本子照样列出来）
   async function loadNotebooks() {
     const [list, fl] = await Promise.all([api('/api/notebooks').then((r) => r.json()),
-      api('/api/folders').then((r) => r.json()).catch(() => ({ folders: S.folders }))]);
+      api('/api/folders').then((r) => r.json()).catch(() => ({ folders: S.folders, top: S.top }))]);
     S.nbList = list;
     S.folders = Array.isArray(fl.folders) ? fl.folders : [];
+    S.top = Array.isArray(fl.top) ? fl.top : null;
     renderNbList();
     setNbTitle();
     return S.nbList;
@@ -5156,40 +6160,73 @@
     jumpTo(n - 1);
   }
 
-  // 抽屉里的本子列表：最上面是草稿本和「Claude 推送」（不进文件夹）；接着是文件夹（一行，点一下折叠或展开，
-  // 写着里面几本；展开时里面的本子缩进列在下面）；最后是不在文件夹里的本子。文件夹只有一层。
+  // 抽屉里的本子列表：最上面是草稿本（不进文件夹、不能挪）；下面照服务排好的顺序（S.top），文件夹和不在文件夹里的本子混排
+  // （2026-11-18 起能拖动、「⋯」里上移下移改上下顺序；没排过时服务给的就是原来的顺序：文件夹在前，接着是不在文件夹里的本子）。
+  // 文件夹一行，点一下折叠或展开，写着里面几本；展开时里面的本子按文件夹里的先后缩进列在下面。文件夹只有一层。
+  // 推送本子（各文件夹的「推送 · 文件夹名」、以前那本「Claude 推送」）2026-11-17 起和普通本子一样排在里面，不钉在最上面。
   // 已经设了只在本地的本子，名字后面用小字写「只在本地」（2026-11-14：原来那把小锁图标去掉，设置并进「这本发往」）
-  const FIXED_NB = new Set(['scratch', 'board']);
+  const FIXED_NB = new Set(['scratch']);
+  // 能改名、删除、放进文件夹、拖的本子：除了草稿本都行（导入的书、自己建的、推送本子）
+  const ownNb = (nb) => nb.id !== 'scratch';
+  const pushNb = (nb) => nb.id === 'board' || nb.id.startsWith('board:'); // 推送本子（以前那本「board」和各文件夹的「board:<编号>」）
+  // 抽屉里现在的先后：top 最外层（文件夹的 id、不在文件夹里的本子的 id），inF 每个文件夹里的本子（按先后），holder 本子 → 它在的文件夹。
+  // 服务没给 top（取不到）时照原来的：文件夹在前，接着是不在文件夹里的本子；服务给的里面缺了的（别处刚建的）接在后面
+  function drawerOrder() {
+    const list = S.nbList || [], ids = new Set(list.map((n) => n.id)), holder = new Map(), inF = new Map();
+    for (const f of S.folders || []) {
+      const mine = [];
+      for (const id of f.items || []) if (ids.has(id) && !FIXED_NB.has(id) && !holder.has(id)) { holder.set(id, f.id); mine.push(id); }
+      inF.set(f.id, mine);
+    }
+    const ok = (id) => inF.has(id) || (ids.has(id) && !FIXED_NB.has(id) && !holder.has(id));
+    const top = [...new Set((S.top || []).filter(ok))], seen = new Set(top);
+    for (const f of S.folders || []) if (!seen.has(f.id)) { top.push(f.id); seen.add(f.id); }
+    for (const nb of list) if (ok(nb.id) && !seen.has(nb.id)) { top.push(nb.id); seen.add(nb.id); }
+    return { top, inF, holder };
+  }
   function renderNbList() {
     const box = $('#nbList');
     box.innerHTML = '';
-    const books = bookTitles(), list = S.nbList || [], ids = new Set(list.map((n) => n.id)), holder = new Map();
-    for (const f of S.folders || []) for (const id of f.items || []) if (ids.has(id) && !holder.has(id)) holder.set(id, f);
-    for (const nb of list) if (FIXED_NB.has(nb.id)) nbRow(box, nb, false, books);
-    for (const f of S.folders || []) {
-      const inside = list.filter((nb) => holder.get(nb.id) === f);
+    const books = bookTitles(), list = S.nbList || [], byId = new Map(list.map((n) => [n.id, n]));
+    const fById = new Map((S.folders || []).map((f) => [f.id, f])), O = drawerOrder();
+    for (const nb of list) if (FIXED_NB.has(nb.id)) nbRow(box, nb, '', books);
+    for (const id of O.top) {
+      const f = fById.get(id);
+      if (!f) { nbRow(box, byId.get(id), '', books); continue; }
+      const inside = O.inF.get(id) || [];
       folderRow(box, f, inside.length);
-      if (!isFolded(f)) for (const nb of inside) nbRow(box, nb, true, books);
+      if (!isFolded(f)) for (const nid of inside) nbRow(box, byId.get(nid), id, books);
     }
-    for (const nb of list) if (!FIXED_NB.has(nb.id) && !holder.has(nb.id)) nbRow(box, nb, false, books);
-    // 正拖着一本时重画（停在收着的文件夹上展开了、别处改了文件夹）：换回原来那个元素——手指、笔后面的事件还落在它上面，
-    // iPad 上被拿掉的元素收不到后面的触摸
+    // 正拖着一本（或一个文件夹）时重画（停在收着的文件夹上展开了、别处改了文件夹）：换回原来那个元素——手指、笔后面的事件
+    // 还落在它上面，iPad 上被拿掉的元素收不到后面的触摸
     const d = dragging('nb');
     if (d) {
-      const fresh = [...box.children].find((r) => r.dataset.nb === d.o.nb.id);
+      const fresh = [...box.children].find((r) => d.o.isRow(r));
       if (fresh) fresh.replaceWith(d.el);
       else { d.el.hidden = true; box.appendChild(d.el); }
+      if (d.o.folder) for (const r of box.querySelectorAll('.nb-item.nested')) if (r.dataset.in === d.o.folder.id) r.classList.add('carried');
+    }
+    // 一本的「⋯」菜单开着时重画了（上移下移之后、别的设备改了顺序或文件夹，服务通知抽屉刷新）：挨着那一本新的「⋯」重新打开，
+    // 灰掉的项跟着变；那一本不在列表里了（删了、所在的文件夹折起来了）就收起
+    const mb = $('#nbMenu');
+    if (!mb.hidden) {
+      const nb = byId.get(mb.dataset.nb), row = nb && [...box.children].find((r) => r.classList.contains('nb-item') && r.dataset.nb === nb.id);
+      const more = row && row.querySelector('.nb-more');
+      closeNbMenu();
+      if (more) toggleNbMenu(nb, more);
     }
   }
 
   // 一本的那一行：名字（放不下左右滑），只在本地的写个小字；右边一个「⋯」，点开这本的小菜单（nbMenuItems）。
   // 原来那里排着存回 PDF、文件夹、改名、删除四个图标，名字常要左右滑才看全（2026-11-16 用户定收成「⋯」）。
-  // 自己的本子和书按住约半秒能拖进文件夹（dragNb）；草稿本、「Claude 推送」不能拖，菜单里也没有东西，不出「⋯」
-  function nbRow(box, nb, nested, books) {
-    const cur = Boolean(S.nb && nb.id === S.nb.id), own = nb.id.startsWith('book:') || nb.id.startsWith('pad:');
+  // 自己的本子、书、推送本子按住约半秒能拖（dragNb：拖进文件夹、改上下顺序）；草稿本不能拖，「⋯」里只有「复制这本…」（2026-11-18）。
+  // inFid：在哪个文件夹里（缩进列在它下面），'' 是最外层
+  function nbRow(box, nb, inFid, books) {
+    const cur = Boolean(S.nb && nb.id === S.nb.id), own = ownNb(nb);
     const row = document.createElement('div'), name = document.createElement('span'), acts = document.createElement('span');
-    row.className = 'nb-item' + (cur ? ' cur' : '') + (nested ? ' nested' : '');
+    row.className = 'nb-item' + (cur ? ' cur' : '') + (inFid ? ' nested' : '');
     row.dataset.nb = nb.id;
+    if (inFid) row.dataset.in = inFid;
     name.className = 'nb-name';
     name.setAttribute('role', 'button');
     acts.className = 'nb-acts';
@@ -5227,7 +6264,8 @@
     nameLine(name, nb.title, nb.id.startsWith('book:') ? books : []);
   }
 
-  // 文件夹那一行：▸ / ▾、文件夹名、里面几本；右边改名、删除两个图标
+  // 文件夹那一行：▸ / ▾、文件夹名、里面几本；右边「＋」（在这个文件夹里新建本子，2026-11-18）、改名、删除三个图标。
+  // 按住约半秒能抓起来拖，换上下顺序（dragFolder）
   function folderRow(box, f, n) {
     const folded = isFolded(f);
     const row = document.createElement('div'), mark = document.createElement('span'), name = document.createElement('span');
@@ -5244,13 +6282,16 @@
     cnt.className = 'nf-count';
     cnt.textContent = `${n} 本`;
     acts.className = 'nb-acts';
-    for (const [icon, label, fn] of [['edit', '改这个文件夹的名字', renameFolder], ['trash', '删除这个文件夹（里面的本子回到外面，本子本身不动）', deleteFolder]]) {
+    for (const [icon, label, fn] of [['plus', '在这个文件夹里新建本子', (x) => openNewNotebook(x)], ['edit', '改这个文件夹的名字', renameFolder],
+      ['trash', '删除这个文件夹（里面的本子回到外面，本子本身不动）', deleteFolder]]) {
       const b = iconButton(icon, label);
+      if (icon === 'plus') b.className = 'nf-add';
       b.addEventListener('click', (e) => { e.stopPropagation(); fn(f); });
       acts.appendChild(b);
     }
     row.append(mark, name, cnt, acts);
     row.addEventListener('click', () => toggleFolder(f.id));
+    dragFolder(row, f);
     box.appendChild(row);
   }
 
@@ -5318,12 +6359,21 @@
   function closeFolderPick() { $('#folderPick').hidden = true; }
 
   // 一本右边「⋯」点开的小菜单（2026-11-16 用户定）：写着字的几项——放进文件夹…（现有的选文件夹小列表）、改名…、删除这本…，
-  // 当前这本有原 PDF 时多一项「存回 PDF」。各项做的事和确认框都照旧，只是入口从图标换成了这里。草稿本、「Claude 推送」不改名、不删、
-  // 不进文件夹，只有存回 PDF 这一项可能有（实际上它们没有原 PDF）。当前这本的各项沿用原来图标的 id
+  // 当前这本有原 PDF 时多一项「存回 PDF」。各项做的事和确认框都照旧，只是入口从图标换成了这里。草稿本不改名、不删、
+  // 不进文件夹，只有存回 PDF 这一项可能有（实际上它没有原 PDF）；推送本子 2026-11-17 起和普通本子一样。当前这本的各项沿用原来图标的 id
+  // 「上移」「下移」（2026-11-18）：在它所在的那一层里（最外层，或它在的文件夹里）和上一个、下一个换位置，文件夹算一个；
+  // 到头了的那一项灰掉。点了菜单不收，在这本挪到的新位置旁边重新打开，可以接着点（拖不动时的另一种做法）
+  // 「复制这本…」（2026-11-18 用户提的）：紧跟在「改名…」后面；草稿本也有（它的「⋯」里只有这一项），推送本子没有（openCopy）
   function nbMenuItems(nb) {
-    const cur = Boolean(S.nb && nb.id === S.nb.id), own = nb.id.startsWith('book:') || nb.id.startsWith('pad:'), out = [];
+    const cur = Boolean(S.nb && nb.id === S.nb.id), own = ownNb(nb), out = [];
     if (own) out.push(['folder', '放进文件夹…', 'actFolder', (anchor) => openFolderPick(nb, anchor)]);
+    if (own) {
+      const O = drawerOrder(), into = O.holder.get(nb.id) || '', lst = into ? O.inF.get(into) || [] : O.top, k = lst.indexOf(nb.id);
+      out.push(['up', '上移', 'actUp', () => nbStep(nb, -1), k <= 0]);
+      out.push(['down', '下移', 'actDown', () => nbStep(nb, 1), k < 0 || k >= lst.length - 1]);
+    }
     if (own) out.push(['rename', '改名…', 'actRename', () => renameNotebook(nb)]);
+    if (!pushNb(nb)) out.push(['copy', '复制这本…', 'actCopyNb', () => openCopy('nb', nb)]);
     if (cur && S.nb.savePdf) out.push(['save', '存回 PDF', 'actSavePdf', () => savePdf()]);
     if (own) out.push(['delete', '删除这本…', 'actDelete', () => deleteNotebook(nb)]);
     return out;
@@ -5338,12 +6388,13 @@
     closeNbMenu();
     box.innerHTML = '';
     const cur = Boolean(S.nb && nb.id === S.nb.id);
-    for (const [act, label, id, fn] of nbMenuItems(nb)) {
+    for (const [act, label, id, fn, off] of nbMenuItems(nb)) {
       const b = document.createElement('button');
       b.className = 'row';
       b.dataset.act = act;
       if (cur) b.id = id;
       b.textContent = label;
+      if (off) b.disabled = true;
       b.addEventListener('click', (e) => { e.stopPropagation(); closeNbMenu(); fn(anchor); });
       box.appendChild(b);
     }
@@ -5367,8 +6418,8 @@
   // （-webkit-touch-callout、user-select、-webkit-user-drag）和缩略图的 draggable=false；contextmenu 本来就整页拦着。
   // 拖到抽屉上下边缘时抽屉自己滚。松手：o.drop 放得下就放（返回 true），放不下或没挪地方就回到原处、什么都不改；
   // 抓起以后的松手不算一次点击（紧跟着的 click 吞掉），不会去打开那本、翻到那页。
-  // o：kind（'nb' 本子、'th' 缩略图）、can()（这会儿能不能抓）、ghost(rect)（影子）、above（影子浮在手指上方，不盖住手指底下那一行）、
-  // move(L, x, y)（指着哪、标出来）、drop(L)、end(L)（收尾）
+  // o：kind（'nb' 抽屉列表里的本子和文件夹、'th' 缩略图）、can()（这会儿能不能抓）、ghost(rect)（影子）、above（影子浮在手指上方，
+  // 不盖住手指底下那一行）、lift(L)（刚抓起时）、move(L, x, y)（指着哪、标出来）、drop(L)、end(L)（收尾）
   const HOLD_MS = 500, HOLD_SLOP = 8, EDGE_PX = 56;
   let lift = null; // 正按着（还没到半秒）或已经抓起的那一项：{ el, o, id, x0, y0, x, y, on, ghost, dx, dy, timer }
   let liftClickUntil = 0;
@@ -5417,6 +6468,7 @@
     Object.assign(L.ghost.style, { position: 'fixed', margin: '0', pointerEvents: 'none' }); // 缩略图的影子带着 .th 的 position: relative：这里压过它
     document.body.appendChild(L.ghost);
     L.el.classList.add('lifted');
+    if (L.o.lift) L.o.lift(L);
     try { L.el.setPointerCapture(L.id); } catch (err) { /* 有些浏览器不支持 */ }
     placeGhost(L);
     L.o.move(L, L.x, L.y);
@@ -5467,49 +6519,127 @@
   }
   const dragging = (kind) => (lift && lift.on && lift.o.kind === kind ? lift : null);
 
-  // 把本子拖进文件夹（2026-11-16 用户定）：按住一本约半秒抓起，拖到文件夹那一行上（它白底加粗边框）松手放进去；收着的文件夹上停约 0.7 秒
-  // 自己展开；展开着的文件夹里那几本也算这个文件夹。文件夹里的本子拖到文件夹外面（文件夹外的本子那几行、列表里的空处，整个列表画一圈虚线）
-  // 松手是移出文件夹。拖到列表外面、或放下去不会变的地方松手：回到原处，什么都不改。放下后屏幕上方一句，带「撤销」。
-  // 「⋯」菜单里的「放进文件夹…」照旧留着：拖动是多一种做法，不是替换。草稿本、「Claude 推送」不能拖（nbRow 不给它们挂上）
-  const SPRING_MS = 700;
+  // 抽屉列表里的拖动：本子（dragNb）和文件夹（dragFolder）用同一套。
+  // 把本子拖进文件夹（2026-11-16 用户定）：按住一本约半秒抓起，拖到文件夹那一行中间（它白底加粗边框）松手放进去；收着的文件夹上停约 0.7 秒
+  // 自己展开。拖动改上下顺序（2026-11-18 用户定，同一个动作）：拖到两行之间出现一条插入线，松手就排到那里——排在文件夹里两本之间的
+  // 插入线缩进（和里面的本子对齐），排在外面的整行宽；文件夹也能这样抓起来和别的文件夹、本子换上下顺序。本子排到了别的文件夹里就顺带
+  // 放进去，从文件夹里排到外面就顺带移出（整个列表再画一圈虚线）。一行怎么分见 listDropAt。拖到列表外面、或放下去不会变的地方松手：
+  // 回到原处，什么都不改。放下后屏幕上方一句，带「撤销」（回到抓起时的那一层、那个位置）。
+  // 不拖也能办：「⋯」菜单里的「放进文件夹…」「上移」「下移」（文件夹那一行没有菜单，只能拖）。草稿本不能拖（nbRow 不给它挂上），
+  // 也没有东西能排到它上面
+  const SPRING_MS = 700, LINE_END = 20, NEST_PX = 22; // NEST_PX：文件夹里的本子缩进多少（style.css 的 .nb-item.nested）
   function dragNb(row, nb) {
-    holdDrag(row, {
-      kind: 'nb', nb, above: true,
+    holdDrag(row, listDrag({ nb, id: nb.id, title: nb.title, isRow: (r) => r.classList.contains('nb-item') && r.dataset.nb === nb.id }));
+  }
+  function dragFolder(row, f) {
+    holdDrag(row, listDrag({ folder: f, id: f.id, title: f.name, isRow: (r) => r.classList.contains('nf-item') && r.dataset.fid === f.id }));
+  }
+  function listDrag(o) {
+    return Object.assign(o, {
+      kind: 'nb', above: true,
       ghost: (r) => {
         const g = document.createElement('div');
         g.className = 'nb-ghost';
-        g.setAttribute('data-lang-keep', ''); // 本子名是你起的，不翻译
-        g.textContent = nb.title;
+        g.setAttribute('data-lang-keep', ''); // 本子名、文件夹名是你起的，不翻译
+        g.textContent = o.title;
         g.style.width = r.width + 'px';
         return g;
       },
-      move: (L, x, y) => nbDropMark(L, nbDropAt(x, y)),
-      drop: (L) => {
-        const at = L.at, to = at && at.fid ? (S.folders || []).find((f) => f.id === at.fid) : null;
-        if (!at || (at.fid && !to)) return false;
-        const from = folderOfNb(nb.id);
-        nbToFolder(nb, to, from ? from.id : '');
-        return true;
+      lift: (L) => {
+        L.home = listHome(o.id, Boolean(o.folder));
+        if (o.folder) for (const r of document.querySelectorAll('#nbList .nb-item.nested')) if (r.dataset.in === o.id) r.classList.add('carried');
       },
-      end: (L) => { clearTimeout(L.spring); nbDropMark(L, null); },
+      move: (L, x, y) => listDropMark(L, listDropAt(L, x, y)),
+      drop: (L) => listDrop(L),
+      end: (L) => {
+        clearTimeout(L.spring);
+        listDropMark(L, null);
+        for (const r of document.querySelectorAll('#nbList .carried')) r.classList.remove('carried');
+      },
     });
   }
-  // 手指（笔）底下是哪：{ fid（文件夹的 id，'' 是文件夹外面）, onRow（正指着文件夹那一行）}；不在本子列表上是 null
-  function nbDropAt(x, y) {
-    const list = $('#nbList'), t = document.elementFromPoint(x, y);
-    if (!t || !list.contains(t)) return null;
-    const fr = t.closest('.nf-item');
-    if (fr) return { fid: fr.dataset.fid, onRow: true };
-    const r = t.closest('.nb-item'), f = r && r.classList.contains('nested') ? folderOfNb(r.dataset.nb) : null;
-    return { fid: f ? f.id : '', onRow: false };
+  // 这一项现在在哪：into（它在的文件夹的 id，'' 是最外层）、after / before（同一层里它上面、下面那一个，没有是 ''）
+  function listHome(id, isFolder) {
+    const O = drawerOrder(), into = (!isFolder && O.holder.get(id)) || '', lst = into ? O.inF.get(into) || [] : O.top, k = lst.indexOf(id);
+    return { into, after: k > 0 ? lst[k - 1] : '', before: (k >= 0 && lst[k + 1]) || '' };
   }
-  // 标出松手会放到哪（放下去会变的才标），记在 L.at；停在收着的文件夹那一行上约 0.7 秒：展开它
-  function nbDropMark(L, at) {
-    const from = (folderOfNb(L.o.nb.id) || {}).id || '', act = at && at.fid !== from ? at : null;
+  // 和服务一样的排法（folders.py 的 _insert）：after 为空排在最前；after 在里面排在它后面；不在就排在 before 前面；都不在排在最后
+  function insertAt(lst, x, after, before) {
+    let k = lst.length;
+    if (!after) k = 0;
+    else if (lst.includes(after)) k = lst.indexOf(after) + 1;
+    else if (before && lst.includes(before)) k = lst.indexOf(before);
+    return [...lst.slice(0, k), x, ...lst.slice(k)];
+  }
+  // 手指（笔）底下会放到哪：{ kind: 'into', fid }（放进那个文件夹，和以前一样）或 { kind: 'line', into, after, before, y, indent }
+  // （排到 into 这一层 after 的后面；y、indent 是插入线画在哪）；不在本子列表上是 null。按行的位置算，不看手指底下是哪个元素。
+  // 一行怎么分（暂定）：本子那一行上半截是排到它上面、下半截是排到它下面（文件夹里的本子就是排在文件夹里）；
+  // 文件夹那一行上面四分之一是排到文件夹上面，中间一半是放进去，下面四分之一是排到文件夹里第一本的上面（展开着、里面有本子时）、
+  // 不然是排到文件夹下面。拖的是文件夹时：文件夹那一行上下各一半；展开着的文件夹里的本子那几行算那个文件夹整块的上半、下半。
+  // 草稿本那一行上都算排到最前（草稿本下面）；最后一行下面再往下 20 像素以内算排到最外层的最后。行与行之间的空归上下两行各一半
+  function listDropAt(L, x, y) {
+    const list = $('#nbList'), lr = list.getBoundingClientRect();
+    if (x < lr.left || x > lr.right) return null;
+    const rows = [...list.children].filter((r) => !r.hidden && (r.classList.contains('nb-item') || r.classList.contains('nf-item')));
+    if (!rows.length) return null;
+    const box = (r) => r.getBoundingClientRect(), id = L.o.id, isF = Boolean(L.o.folder), O = drawerOrder();
+    if (y < box(rows[0]).top - 2) return null;
+    const line = (into, ab, yy) => ({ kind: 'line', into, after: ab[0], before: ab[1], y: yy, indent: into ? NEST_PX : 0 });
+    // 同一层里排到 ref 的上面（below 为假）或下面：after / before。ref 就是拖着的这一项时，就是它现在的位置
+    const near = (into, ref, below) => {
+      if (ref === id) return L.home && L.home.into === into ? [L.home.after, L.home.before] : ['', ''];
+      const lst = (into ? O.inF.get(into) || [] : O.top).filter((i) => i !== id), k = lst.indexOf(ref);
+      return below ? [ref, lst[k + 1] || ''] : [k > 0 ? lst[k - 1] : '', ref];
+    };
+    // 最外层一个文件夹整块（那一行连同展开着的里面几本）的最后一行
+    const blockEnd = (fid) => { let last = rows.find((r) => r.classList.contains('nf-item') && r.dataset.fid === fid); for (const r of rows) if (r.dataset.in === fid) last = r; return last; };
+    const r = rows.find((e) => y < box(e).bottom + 2);
+    if (!r) {
+      const lb = box(rows[rows.length - 1]).bottom;
+      if (y > lb + LINE_END) return null;
+      const lastTop = O.top.filter((i) => i !== id).pop();
+      return line('', lastTop ? [lastTop, ''] : ['', ''], lb + 2);
+    }
+    const b = box(r), frac = (y - b.top) / Math.max(1, b.height);
+    if (r.dataset.nb && FIXED_NB.has(r.dataset.nb)) return line('', ['', O.top.filter((i) => i !== id)[0] || ''], b.bottom + 2);
+    if (r.classList.contains('nf-item')) {
+      const fid = r.dataset.fid, f = (S.folders || []).find((x) => x.id === fid), inside = O.inF.get(fid) || [];
+      if (isF) return frac < 0.5 ? line('', near('', fid, false), b.top - 2) : line('', near('', fid, true), box(blockEnd(fid)).bottom + 2);
+      if (frac < 0.25) return line('', near('', fid, false), b.top - 2);
+      if (frac <= 0.75) return { kind: 'into', fid };
+      if (f && !isFolded(f) && inside.length) return line(fid, near(fid, inside[0], false), b.bottom + 2);
+      return line('', near('', fid, true), b.bottom + 2);
+    }
+    const inFid = r.dataset.in || '';
+    if (inFid && isF) { // 拖的是文件夹，指着另一个文件夹里的本子：算那个文件夹整块
+      const head = rows.find((e) => e.classList.contains('nf-item') && e.dataset.fid === inFid), top0 = box(head).top, bot = box(blockEnd(inFid)).bottom;
+      return y < (top0 + bot) / 2 ? line('', near('', inFid, false), top0 - 2) : line('', near('', inFid, true), bot + 2);
+    }
+    return frac < 0.5 ? line(inFid, near(inFid, r.dataset.nb, false), b.top - 2) : line(inFid, near(inFid, r.dataset.nb, true), b.bottom + 2);
+  }
+  // 放下去会不会变：换了一层，或同一层里排出来的先后和现在不一样
+  function listChanges(L, at) {
+    const O = drawerOrder(), id = L.o.id, now = (!L.o.folder && O.holder.get(id)) || '';
+    if (at.kind === 'into') return Boolean(L.o.nb) && now !== at.fid;
+    if (at.into !== now) return true;
+    const lst = at.into ? O.inF.get(at.into) || [] : O.top;
+    return insertAt(lst.filter((i) => i !== id), id, at.after, at.before).join('\n') !== lst.join('\n');
+  }
+  // 标出松手会放到哪（放下去会变的才标），记在 L.at：放进文件夹的那个文件夹白底加粗边框；排到哪的画一条插入线；本子从文件夹里
+  // 排到外面的，整个列表再画一圈虚线（和以前「移出文件夹」一样）。停在收着的文件夹那一行中间约 0.7 秒：展开它
+  function listDropMark(L, at) {
+    const act = at && listChanges(L, at) ? at : null, now = L.o.nb ? drawerOrder().holder.get(L.o.id) || '' : '';
     L.at = act;
-    for (const e of document.querySelectorAll('#nbList .nf-item')) e.classList.toggle('drop', Boolean(act && act.fid && e.dataset.fid === act.fid));
-    $('#nbList').classList.toggle('drop-out', Boolean(act && !act.fid));
-    const fid = at && at.onRow ? at.fid : '';
+    for (const e of document.querySelectorAll('#nbList .nf-item')) e.classList.toggle('drop', Boolean(act && act.kind === 'into' && e.dataset.fid === act.fid));
+    $('#nbList').classList.toggle('drop-out', Boolean(act && act.kind === 'line' && !act.into && now));
+    let bar = $('#nbDropLine');
+    if (act && act.kind === 'line') {
+      if (!bar) { bar = document.createElement('div'); bar.id = 'nbDropLine'; bar.className = 'drag-line'; document.body.appendChild(bar); }
+      const lr = $('#nbList').getBoundingClientRect();
+      Object.assign(bar.style, { left: `${Math.round(lr.left + act.indent)}px`, width: `${Math.round(lr.width - act.indent)}px`, top: `${Math.round(act.y - 1.5)}px` });
+      bar.hidden = false;
+    } else if (bar) bar.hidden = true;
+    const fid = at && at.kind === 'into' ? at.fid : '';
     if (fid === L.springFid) return;
     clearTimeout(L.spring);
     L.springFid = fid;
@@ -5519,27 +6649,54 @@
         if (lift !== L || L.springFid !== fid) return;
         setFolded(fid, false);
         renderNbList();
-        nbDropMark(L, nbDropAt(L.x, L.y));
+        listDropMark(L, listDropAt(L, L.x, L.y));
       }, SPRING_MS);
     }
   }
-  // 拖动放下：放进 to（null 是移出文件夹）；提示带「撤销」，点了回到 back（原来那个文件夹的 id，'' 是文件夹外面）
-  async function nbToFolder(nb, to, back, undone) {
-    try {
-      await folderOp('/api/folders/move', { nb: nb.id, folder: to ? to.id : '' });
-    } catch (e) { toast('没放成：' + e.message, 4000); renderNbList(); return; }
+  // 松手：放进文件夹（和以前一样走 /api/folders/move），或排到插入线那里（/api/folders/place）。提示带「撤销」，点了回到抓起时的地方
+  function listDrop(L) {
+    const at = L.at, o = L.o, home = L.home;
+    if (!at || !home) return false;
+    const fname = (fid) => ((S.folders || []).find((f) => f.id === fid) || {}).name || '';
+    if (at.kind === 'into' && !fname(at.fid)) return false;
+    const was = (o.nb && drawerOrder().holder.get(o.id)) || '', moved = at.kind === 'into' || at.into !== was;
+    const req = at.kind === 'into' ? ['/api/folders/move', { nb: o.id, folder: at.fid }]
+      : ['/api/folders/place', { id: o.id, into: at.into, after: at.after, before: at.before }];
+    const said = at.kind === 'into' ? `已放进「${fname(at.fid)}」` : !moved ? '已调整顺序' : at.into ? `已放进「${fname(at.into)}」` : '已移出文件夹';
+    listMove(req, said, async () => {
+      try { await folderOp('/api/folders/place', { id: o.id, into: home.into, after: home.after, before: home.before }); } catch (e) { toast('没放成：' + e.message, 4000); return; }
+      revealCurrent();
+      renderNbList();
+      toast(!moved ? '已挪回原处' : home.into ? `已放回「${fname(home.into)}」` : '已放回文件夹外面', 2200);
+    });
+    return true;
+  }
+  async function listMove(req, said, undo) {
+    try { await folderOp(req[0], req[1]); } catch (e) { toast('没放成：' + e.message, 4000); renderNbList(); return; }
     revealCurrent();
     renderNbList();
-    if (undone) { toast(to ? `已放回「${to.name}」` : '已放回文件夹外面', 2200); return; }
-    toast(to ? `已放进「${to.name}」` : '已移出文件夹', 5000, '撤销', () => {
-      const f = back ? (S.folders || []).find((x) => x.id === back) || { id: back, name: '' } : null;
-      nbToFolder(nb, f, '', true);
-    });
+    toast(said, 5000, '撤销', undo);
+  }
+  // 「⋯」里的「上移」「下移」：和同一层里上一个（dir 为 -1）、下一个换位置；挪完在它的新位置旁边重新打开菜单，可以接着点
+  async function nbStep(nb, dir) {
+    const O = drawerOrder(), into = O.holder.get(nb.id) || '', lst = into ? O.inF.get(into) || [] : O.top, k = lst.indexOf(nb.id), j = k + dir;
+    if (k < 0 || j < 0 || j >= lst.length) return;
+    const rest = lst.filter((i) => i !== nb.id), after = dir < 0 ? (rest[j - 1] || '') : lst[j];
+    try {
+      await folderOp('/api/folders/place', { id: nb.id, into, after, before: dir < 0 ? lst[j] : (rest[j] || '') });
+    } catch (e) { toast('没放成：' + e.message, 4000); return; }
+    renderNbList();
+    const more = [...document.querySelectorAll('#nbList .nb-item')].find((r) => r.dataset.nb === nb.id);
+    const btn = more && more.querySelector('.nb-more');
+    if (!btn) return;
+    more.scrollIntoView({ block: 'nearest' });
+    toggleNbMenu((S.nbList || []).find((x) => x.id === nb.id) || nb, btn);
   }
 
   async function folderOp(path, body) {
     const res = await (await api(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
     if (Array.isArray(res.folders)) S.folders = res.folders;
+    if (Array.isArray(res.top)) S.top = res.top;
     return res;
   }
 
@@ -5702,12 +6859,8 @@
       S.bgUrl = cached.url;
     } else {
       const key = pageKey();
-      [page, img] = await Promise.all([
-        api(`/api/page?nb=${encodeURIComponent(S.nb.id)}&i=${i}`).then((r) => r.json()),
-        loadBgImage(S.nb, i),
-      ]);
+      [page, img] = await Promise.all([fetchPage(S.nb, i), loadBgImage(S.nb, i)]); // fetchPage 记下这一页的键
       if (key !== pageKey()) return; // 用户已经翻走了
-      page = normalizePage(page);
     }
     S.page = page;
     S.bgImg = img;
@@ -5727,13 +6880,15 @@
     $('#next').disabled = i >= S.nb.pages - 1;
     updateRedo(); // 换了一页：「恢复」按这一页的重做记录亮不亮
     if (!S.landing) {
-      api('/api/where', { method: 'POST', body: JSON.stringify({ nb: S.nb.id, page: i }), headers: { 'Content-Type': 'application/json' } })
+      // key：这一页的键（2026-11-17），Claude 写到「平板当前那一页」时服务按它找
+      api('/api/where', { method: 'POST', body: JSON.stringify({ nb: S.nb.id, page: i, key: curKey() || undefined }), headers: { 'Content-Type': 'application/json' } })
         .catch(() => {});
       store.set('pos', { nb: S.nb.id, i });
     }
     renderAI();
     updateStatus(S.dirty ? '未保存' : '已保存');
     updateVerChip();
+    updateTargetRow(); // 推送本子里各页可能发往不同的对话：抽屉里那一行写眼前这一页的，翻页跟着变（2026-11-17）
     if (!$('#drawer').hidden) renderThumbs();
     if (!S.landing) processPending();
     ensureNeighbors();
@@ -5862,10 +7017,10 @@
     return `《${shortTitle(title, [])}》已更新：${text}`;
   }
 
-  // 改名：自己建的本子改标题；导入的书连 PDF 文件一起改名，笔迹跟着走
+  // 改名：自己建的本子、推送本子改标题；导入的书连 PDF 文件一起改名，笔迹跟着走
   async function renameNotebook(target) {
     const nb = target || S.nb;
-    if (!nb || !(nb.id.startsWith('book:') || nb.id.startsWith('pad:'))) return;
+    if (!nb || !ownNb(nb)) return;
     const title = prompt('改成什么名字？', nb.title);
     if (title === null || !title.trim() || title.trim() === nb.title) return;
     try {
@@ -5882,8 +7037,9 @@
 
   async function deleteNotebook(target) {
     hideMenu();
-    const nb = target || S.nb, pad = nb && nb.id.startsWith('pad:');
-    if (!nb || !(pad || nb.id.startsWith('book:'))) return;
+    // pad：没有电脑上原文件的本子（自己建的、推送本子），确认的话里不说文件
+    const nb = target || S.nb, pad = nb && !nb.id.startsWith('book:');
+    if (!nb || !ownNb(nb)) return;
     // 平板上没有找回的入口：电脑上是挪开留着（PDF 进 books/_已删除，笔迹文件夹改成 _deleted 开头），要找回得让 Claude 挪回来
     if (!confirm(pad ? `从列表里删除「${nb.title}」？\n上面的手写还留在电脑上，要找回就让 Claude 帮你挪回来。`
       : `从列表里删除《${nb.title}》？\n文件和上面的手写都还留在电脑上，要找回就让 Claude 帮你挪回来。`)) return;
@@ -6064,7 +7220,8 @@
     const pi = nb.pageInfo && nb.pageInfo[i];
     if (!path || (pi && pi.blank)) return null; // 插入的空白纸没有底图
     // v：书的版本（文件修改时间），书更新后地址变了，不会拿到缓存里的旧图
-    const extra = nb.kind === 'book' ? `&v=${nb.v || 0}${old ? '&old=1' : ''}` : '';
+    // 推送页：b 是这一页是推送本子里推的第几张（图片地址按它分开，挪过页序后不会拿到缓存里别的页的图）
+    const extra = nb.kind === 'book' ? `&v=${nb.v || 0}${old ? '&old=1' : ''}` : pi && pi.board != null ? `&b=${pi.board}` : '';
     const blob = await (await api(`${path}?nb=${encodeURIComponent(nb.id)}&i=${i}${extra}`)).blob();
     const url = URL.createObjectURL(blob);
     const img = new Image();
@@ -6095,7 +7252,7 @@
 
   // 抽屉里「这本发往」那一行：点开选对话（某个项目的专用对话在这里绑一次），或选「不发给 Claude（只在本地）」
   function updateTargetRow() {
-    $('#actTarget').textContent = '这本发往：' + targetText() + ' ▾';
+    $('#actTarget').textContent = targetRowHead() + targetText() + ' ▾';
   }
 
   function renderThumbs() {
@@ -6103,6 +7260,7 @@
     if (dragging('th')) { thumbsLate = true; return; } // 正拖着一张：松手后再重画
     box.innerHTML = '';
     if (!S.nb) return;
+    updateCopyPageBtn();
     $('#thumbCount').textContent = `（${S.nb.pages} 页${S.nb.hidden ? `，已删 ${S.nb.hidden} 页` : ''}）`;
     for (let i = 0; i < S.nb.pages; i++) {
       const pi = (S.nb.pageInfo || [])[i] || {};
@@ -6214,11 +7372,24 @@
     });
   }
 
-  // 页序变了（挪页）：眼前这一页不换——页面数据、底图、撤销记录、缩放和位置都留着，只是页码跟着它的键变。
+  // 页序变了（挪页；2026-11-17 起也包括别的设备插了页、删了页、挪了页，这台存页时才知道——syncOrder）：眼前这一页不换——页面数据、
+  // 底图、撤销记录、缩放和位置都留着，只是页码跟着它的键变（眼前这一页的键按页面数据自己记着的，curKey）。
   // 按「本子#页码」记着的（连续阅读时各页另存的撤销记录、Claude 回了还没落下的、等滑到屏幕上再落的页）按页的键改到新页码；
-  // 相邻页的缓存丢掉重取。字迹确认卡片上的页号由服务按那一页的键现找：重新取一次
+  // 相邻页的缓存丢掉重取；存盘队列按页的键排，不用改。字迹确认卡片上的页号由服务按那一页的键现找：重新取一次
   function relabelPages(info) {
-    const old = S.nb, oldKeys = (old.pageInfo || []).map((p) => p.key), now = new Map((info.pageInfo || []).map((p, k) => [p.key, k]));
+    remapOrder(info);
+    S.baseH0 = info.sizes && info.sizes[S.idx] ? info.sizes[S.idx].h : SCRATCH_H;
+    layoutPage();
+    S.thumbVer = Date.now(); // 缩略图的地址按页码：换个版本号，不拿缓存里别的页的图
+    showPage();
+    redrawAll();
+    loadCards();
+  }
+
+  // relabelPages 里换本子信息的那一半（不重画）：按「本子#页码」记着的改到新页码，相邻页的缓存丢掉，S.idx 跟着眼前这一页的键走；
+  // 眼前这一页不在新的页序里了（在别处删掉了），S.idx 停在原来的位置上（超出就是最后一页）。手上各页的键按它们自己记着的（keyOfIndex）
+  function remapOrder(info) {
+    const old = S.nb, oldKeys = (old.pageInfo || []).map((p, k) => keyOfIndex(k)), now = new Map((info.pageInfo || []).map((p, k) => [String(p.key), k]));
     const re = (pk) => {
       const at = pk.lastIndexOf('#');
       if (pk.slice(0, at) !== old.id) return pk;
@@ -6237,12 +7408,6 @@
     S.pendingPages.clear();
     for (const k of pp) S.pendingPages.add(k);
     S.idx = cur === undefined ? Math.min(S.idx, info.pages - 1) : cur;
-    S.baseH0 = info.sizes && info.sizes[S.idx] ? info.sizes[S.idx].h : SCRATCH_H;
-    layoutPage();
-    S.thumbVer = Date.now(); // 缩略图的地址按页码：换个版本号，不拿缓存里别的页的图
-    showPage();
-    redrawAll();
-    loadCards();
   }
 
   function pageHasContent() {
@@ -6257,7 +7422,8 @@
   async function addPageAfter(orient) {
     if (!S.nb) return;
     try {
-      const res = await pageOp('/api/page/insert', { nb: S.nb.id, after: S.idx, orient });
+      // afterKey：眼前这一页的键（2026-11-17），页序在别处改过时服务照样插在它后面
+      const res = await pageOp('/api/page/insert', { nb: S.nb.id, after: S.idx, orient, afterKey: curKey() || undefined });
       S.nb = res.notebook;
       flowReset(); // 页号变了
       queueSave();
@@ -6295,8 +7461,11 @@
     if (!S.nb) return;
     if (S.nb.pages <= 1) { toast('最后一页不能删'); return; }
     if (pageHasContent() && !confirm('这一页写过字，确定从本子里删掉？\n可以在抽屉的「显示已删的页」里还原。')) return;
+    // key：眼前这一页的键（2026-11-17），页序在别处改过时服务照样删的是这一页；删的时候刚写的几笔会存进删掉的这一页，不再提示（ownDeleted）
+    const key = curKey();
+    if (key) ownDeleted.add(key);
     try {
-      const res = await pageOp('/api/page/delete', { nb: S.nb.id, i: S.idx });
+      const res = await pageOp('/api/page/delete', { nb: S.nb.id, i: S.idx, key: key || undefined });
       S.nb = res.notebook;
       flowReset(); // 页号变了
       queueSave();
@@ -6304,7 +7473,7 @@
       S.thumbVer = Date.now();
       await openPage(Math.min(S.idx, S.nb.pages - 1));
       toast('已删除这一页（可以还原）', 2500);
-    } catch (e) { toast('没删成：' + e.message, 4000); }
+    } catch (e) { if (key) ownDeleted.delete(key); toast('没删成：' + e.message, 4000); }
   }
 
   async function showHidden() {
@@ -6324,6 +7493,8 @@
       b.addEventListener('click', async () => {
         try {
           const res = await pageOp('/api/page/restore', { nb: S.nb.id, key: h.key });
+          ownDeleted.delete(h.key); // 还原了：以后在别处再删掉它时照常提示
+          goneTold.delete(h.key);
           S.nb = res.notebook;
           flowReset(); // 页号变了
           queueSave();
@@ -6341,22 +7512,133 @@
 
   // ------------------------------------------------------------ 新建本子
 
-  function openNewNotebook() {
+  // f 给了（文件夹那一行上的「＋」，2026-11-18）：建在那个文件夹里。问的照旧（名字、纸张方向），卡片上多一行写着放进哪个文件夹
+  function openNewNotebook(f) {
     toggleDrawer(false);
+    S.newNbIn = f && f.id ? f.id : '';
+    $('#newNbIn').textContent = S.newNbIn ? `建好放进文件夹「${f.name}」` : '';
+    $('#newNbIn').hidden = !S.newNbIn;
     $('#newNbTitle').value = '';
     $('#newNbPaper').value = 'portrait';
     $('#newNb').hidden = false;
   }
 
   async function createNotebook() {
-    const title = $('#newNbTitle').value.trim() || '新本子';
+    const title = $('#newNbTitle').value.trim() || '新本子', fid = S.newNbIn || '';
     try {
-      const info = await pageOp('/api/notebook/new', { title, paper: $('#newNbPaper').value });
+      const body = { title, paper: $('#newNbPaper').value };
+      if (fid) body.folder = fid;
+      const info = await pageOp('/api/notebook/new', body);
       $('#newNb').hidden = true;
+      S.newNbIn = '';
+      if (info.folder) setFolded(info.folder, false); // 收着的文件夹展开：抽屉里看得到新建的那本
       await loadNotebooks();
       await openNotebook(info.id, 0);
-      toast(`已建立「${info.title}」`, 2000);
+      const fname = ((S.folders || []).find((x) => x.id === info.folder) || {}).name;
+      if (!fid) toast(`已建立「${info.title}」`, 2000);
+      else if (fname) toast(`已在「${fname}」里建立「${info.title}」`, 2400);
+      else toast(`已建立「${info.title}」（那个文件夹已经不在了，放在了外面）`, 4000);
     } catch (e) { toast('没建成：' + e.message, 4000); }
+  }
+
+  // ------------------------------------------------------------ 复制这本、复制这一页（2026-11-18 用户提的：「还希望保留复制草稿纸的功能，
+  // 这样可以更改批注或者留一份有标注一份没标注」；弹窗里定的「整本和单页都能复制，复制时选带什么」）
+  // 一张卡片三选一：全部照样（默认）/ 不带 AI 的蓝字 / 只留黑笔（不带红字和蓝字）；复制在电脑上做（server.py 的 copy_notebook、copy_page）。
+  // 整本：副本排在原来那本后面、同一个文件夹里，顶上说一句带「打开」，不翻过去。一页：接在这一页后面、翻过去，顶上说一句带「撤销」
+  // （撤销走删页那条路：删掉新的那一页，在「显示已删的页」里还找得回来）。推送本子不能复制；书页、推送的页不能单独复制（底图对不上），
+  // 抽屉里那个图标在这些页上灰着，点了说一句为什么
+
+  // kind：'nb' 整本（nb 是抽屉列表里那一本）、'page' 眼前这一页
+  function openCopy(kind, nb) {
+    if (kind === 'nb' && (!nb || pushNb(nb))) return;
+    if (kind === 'page') {
+      if (!S.nb || !S.page) return;
+      const why = pageCopyBlocked();
+      if (why) { toast(why, 4000); return; }
+    }
+    S.copyAsk = kind === 'nb' ? { kind, nb } : { kind, nbId: S.nb.id, key: curKey(), idx: S.idx };
+    $('#copyAskTitle').textContent = kind === 'nb' ? `复制《${nb.title}》` : `复制第 ${S.idx + 1} 页`;
+    $('#copyAskWhere').textContent = kind === 'nb' ? '副本排在原来那本后面，原来那本不动。' : '复制出的页接在这一页后面，复制完翻过去。';
+    pickCopyMode('all');
+    $('#copyAsk').hidden = false;
+  }
+  function pickCopyMode(mode) {
+    for (const b of document.querySelectorAll('#copyAsk .cp-opt')) {
+      const on = b.dataset.mode === mode;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', String(on));
+    }
+  }
+  function answerCopy(ok) {
+    const a = S.copyAsk, sel = document.querySelector('#copyAsk .cp-opt.on');
+    S.copyAsk = null;
+    $('#copyAsk').hidden = true;
+    if (!ok || !a) return;
+    const mode = (sel && sel.dataset.mode) || 'all';
+    if (a.kind === 'nb') copyNotebook(a.nb, mode);
+    else copyPage(a, mode);
+  }
+  // 书页、推送的页不能单独复制：返回说给用户的一句；能复制返回 ''
+  function pageCopyBlocked() {
+    const pi = (S.nb && S.nb.pageInfo || [])[S.idx];
+    if (!pi || pi.blank) return '';
+    return S.nb.kind === 'book' ? '书页不能单独复制（可以在这本的「⋯」里复制整本）' : '推送的页不能复制';
+  }
+
+  async function copyNotebook(nb, mode) {
+    const en = window.InkLang && window.InkLang.lang === 'en';
+    // 副本的名字：「原名 副本」（英文界面「Name copy」），重名的服务再加 2、3……；草稿本按界面上的叫法
+    const base = nb.id === 'scratch' ? (window.InkLang ? window.InkLang.t('草稿本') : '草稿本') : nb.title;
+    try {
+      const res = await pageOp('/api/notebook/copy', { nb: nb.id, mode, base, suffix: en ? 'copy' : '副本' });
+      await loadNotebooks();
+      toast(`已复制成《${res.title}》`, 6000, '打开', () => openNotebook(res.id, 0));
+    } catch (e) { toast('没复制成：' + e.message, 5000); }
+  }
+
+  async function copyPage(a, mode) {
+    if (!S.nb || S.nb.id !== a.nbId) { toast('已经换了本子', 2500); return; }
+    try {
+      // key：打开卡片时眼前那一页的键，页序在别处改过时服务照样复制的是它
+      const res = await pageOp('/api/page/copy', { nb: a.nbId, page: a.idx, key: a.key || undefined, mode });
+      if (!S.nb || S.nb.id !== a.nbId) return;
+      S.nb = res.notebook;
+      flowReset(); // 页号变了
+      queueSave();
+      S.page = null;
+      S.thumbVer = Date.now();
+      await openPage(res.page);
+      const made = ((S.nb.pageInfo || [])[res.page] || {}).key;
+      toast('已复制这一页', 6000, '撤销', () => undoCopyPage(a.nbId, made, a.key));
+    } catch (e) { toast('没复制成：' + e.message, 5000); }
+  }
+
+  // 复制一页后的「撤销」：删掉复制出的那一页（和删页一样能在「显示已删的页」里还原），翻回原来那一页
+  async function undoCopyPage(nbId, made, from) {
+    if (!S.nb || S.nb.id !== nbId) { toast('已经换了本子', 2500); return; }
+    if (!made) return;
+    ownDeleted.add(made); // 删的时候刚写的几笔存进删掉的这一页，不再提示
+    try {
+      const res = await pageOp('/api/page/delete', { nb: nbId, i: S.idx, key: made });
+      if (!S.nb || S.nb.id !== nbId) return;
+      S.nb = res.notebook;
+      flowReset(); // 页号变了
+      queueSave();
+      S.page = null;
+      S.thumbVer = Date.now();
+      const back = (S.nb.pageInfo || []).findIndex((p) => p.key === from);
+      await openPage(back >= 0 ? back : Math.min(S.idx, S.nb.pages - 1));
+      toast('已撤销复制', 2000);
+    } catch (e) { ownDeleted.delete(made); toast('没撤销成：' + e.message, 4000); }
+  }
+
+  // 抽屉里「复制这一页」那个图标：书页、推送的页上灰着（点了说一句为什么，长按照样看说明）
+  function updateCopyPageBtn() {
+    const b = $('#actCopyPage');
+    if (!b) return;
+    const off = Boolean(S.nb) && Boolean(pageCopyBlocked());
+    b.classList.toggle('off', off);
+    b.setAttribute('aria-disabled', String(off));
   }
 
   // ------------------------------------------------------------ 导入：浏览电脑上对话所在的文件夹
@@ -6378,10 +7660,10 @@
     await refreshSessions();
     const sel = $('#isSession');
     sel.innerHTML = '';
-    for (const s of S.sessions) { // 和「这本发往」同一套叫法：文件夹名，同一个文件夹开着几个对话时加上最近打的那句话的开头
+    for (const s of S.sessions) { // 和「这本发往」同一套叫法：文件夹名，同一个文件夹开着几个对话时加上最近打的那句话的开头；不是 Claude 的带上 AI 的名字
       const o = document.createElement('option');
       o.value = s.sid;
-      o.textContent = targetName(s);
+      o.textContent = sessName(s);
       sel.appendChild(o);
     }
     const t = effectiveTarget();
@@ -6612,11 +7894,13 @@
     S.sending = true;
     updateCheck();
     try {
-      // 写在短批注上的红字：这一页和别的有新写的页上的，都先收成卡片、存好，再交（服务端按存好的页画图、挑要交的卡片）
+      // 以前在小蓝点浮出的小卡片上写下、还没交的红字（旧数据）：这一页和别的有新写的页上的，都先收成卡片、存好，再交
+      // （服务端按存好的页画图、挑要交的卡片）。纸上的短批注被红笔批过不再收成卡片（2026-11-18，见 followupsToCards）
       followupsToCards();
       await followupsElsewhere(others || (await newPages()).others);
       await flushSave();
-      const body = { nb: nbId, target: effectiveTarget() || '', only_new: onlyNew };
+      // key：眼前这一页的键——推送本子里几页一起交，按眼前这一页发往的对话算（2026-11-17）
+      const body = { nb: nbId, target: sendTargetArg(), only_new: onlyNew, key: curKey() || undefined, size: S.size }; // size：回答要多长（2026-11-17）
       const res = await (await api('/api/send-all', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
       startRound(res.id, nbId); // 「AI」按钮变成「已交」
       toast(`已把 ${res.pages} 页交给「${sentName(res)}」`, 3000);
@@ -6638,7 +7922,7 @@
     S.checking = true;
     try {
       const d = await newPages();
-      if (d.others.length) return await sendAll(true, d.others);
+      if (d.more) return await sendAll(true, d.others);
       // 擦掉的（连同「清除本页 Claude 批注」清掉的）蓝字不算这一页上有东西
       if (!S.page.strokes.some((s) => !s.erasedAt) && !(S.page.ai || []).some((a) => !a.erasedAt)) { toast('这一页还没写字'); return; }
       return await send();
@@ -7115,7 +8399,7 @@
   const READ_FAMILY = '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
 
   function readEntry(it, T) {
-    const r = { req: T.req, t: Date.now(), text: String(it.text || '') };
+    const r = withAuthor({ req: T.req, t: Date.now(), text: String(it.text || '') }, T); // 读法也记是谁读的（不算进「别的对话写的蓝字」）
     if (T.level) r.level = T.level;
     if (it.anchor) r.anchor = String(it.anchor);
     const ids = refIds(it, 'anchor', T); // 组编号（g3、g3:1）→ 那组的笔迹 id，只留这一页上有的
@@ -7599,6 +8883,12 @@
     $('#toolsRedo').addEventListener('click', redo);
     $('#check').addEventListener('click', () => check());
     $('#barCheck').addEventListener('click', () => check());
+    // 「AI」旁边的回答长短开关（右下角那一条、顶栏上各一个）：点开小单子，点一行换成那一档。单子里的行：手掌、手环碰到不算
+    for (const id of ['#sizeBtn', '#barSize']) $(id).addEventListener('click', (e) => { e.stopPropagation(); openSizePick(e.currentTarget); });
+    for (const r of document.querySelectorAll('#sizePick .sz-row')) {
+      r.addEventListener('pointerdown', (e) => { r._palm = e.pointerType === 'touch' && (bigTouch(e) || penJustUsed()); });
+      r.addEventListener('click', (e) => { e.stopPropagation(); const palm = r._palm; r._palm = false; if (!palm) pickSize(r.dataset.size); });
+    }
     $('#chipPrev').addEventListener('click', (e) => { e.stopPropagation(); if (S.idx > 0) openPage(S.idx - 1); });
     $('#chipNext').addEventListener('click', (e) => { e.stopPropagation(); if (S.nb && S.idx < S.nb.pages - 1) openPage(S.idx + 1); });
     // 别的页有新回答的记号（左上角、顶栏上各一个）：只有一页时翻过去，几页时出那张小单子
@@ -7652,8 +8942,12 @@
     $('#actTurnL').addEventListener('click', () => rotatePage(-1));
     $('#actTurnR').addEventListener('click', () => rotatePage(1));
     $('#actDelPage').addEventListener('click', deletePage);
+    $('#actCopyPage').addEventListener('click', () => openCopy('page'));
+    for (const b of document.querySelectorAll('#copyAsk .cp-opt')) b.addEventListener('click', () => pickCopyMode(b.dataset.mode));
+    $('#copyAskCancel').addEventListener('click', () => answerCopy(false));
+    $('#copyAskOk').addEventListener('click', () => answerCopy(true));
     $('#actHidden').addEventListener('click', showHidden);
-    $('#actNewNb').addEventListener('click', openNewNotebook);
+    $('#actNewNb').addEventListener('click', () => openNewNotebook(null));
     $('#actNewFolder').addEventListener('click', () => newFolder(null));
     $('#nameAskCancel').addEventListener('click', () => answerName(false));
     $('#nameAskOk').addEventListener('click', () => answerName(true));
@@ -7661,7 +8955,7 @@
       if (e.key === 'Enter') { e.preventDefault(); answerName(true); } else if (e.key === 'Escape') answerName(false);
     });
     $('#folderPickCancel').addEventListener('click', closeFolderPick);
-    $('#newNbCancel').addEventListener('click', () => { $('#newNb').hidden = true; });
+    $('#newNbCancel').addEventListener('click', () => { $('#newNb').hidden = true; S.newNbIn = ''; });
     $('#newNbOk').addEventListener('click', createNotebook);
     $('#menuBtn').addEventListener('click', (e) => { e.stopPropagation(); $('#menu').hidden = !$('#menu').hidden; });
     const opt = (id, key, prop, after) => {
@@ -7777,6 +9071,18 @@
         if (!palm) stepCard(d);
       });
     }
+    // 卡片底下一排（2026-11-17）：「摊在纸上」/「收起」、「再短点」「展开讲」。手掌、手环碰到不算（和上面两个同几条）
+    for (const [id, fn] of [['#acSpread', cardSpreadAct], ['#acShorter', () => askRedo(cardItem(), 'brief')], ['#acLonger', () => askRedo(cardItem(), 'full')]]) {
+      const b = $(id);
+      b.addEventListener('pointerdown', (e) => { b._palm = e.pointerType === 'touch' && (bigTouch(e) || penJustUsed() || Boolean(S.cardInk || S.cardErase)); });
+      b.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch' && bigTouch(e)) b._palm = true; });
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const palm = b._palm;
+        b._palm = false;
+        if (!palm && !b.disabled) fn();
+      });
+    }
     document.addEventListener('pointerdown', (e) => {
       // 长回答的卡片开着，这一下落在卡片外：笔（电脑上是鼠标）落下就收起，那一笔照常写在纸上。
       // 手指落在纸上不马上收：干净的一下轻点（touchUp）或明确地挪纸、缩放（touchMove 里的 firmMove）时才收——搭在纸上的手掌、手环
@@ -7795,6 +9101,8 @@
         else if (S.cards.length && !S.qMin) minQ();
       }
       if (!$('#menu').contains(e.target) && e.target !== $('#menuBtn')) hideMenu();
+      // 回答长短的小单子：点外面收起（点的是那两个钮时由它自己开、关）
+      if (!$('#sizePick').hidden && !$('#sizePick').contains(e.target) && !(e.target.closest && e.target.closest('.size-btn'))) closeSizePick();
       if (!$('#targetPick').hidden && !$('#targetPick').contains(e.target)) $('#targetPick').hidden = true;
       // 输入页码的小框：点框外面收起（点的是页码时由它自己开、关）
       if (!$('#pageJump').hidden && !$('#pageJump').contains(e.target) && !(e.target.closest && e.target.closest('#pageNo')) && !onChipPage(e)) closePageJump();
@@ -7808,10 +9116,15 @@
       if (!$('#drawer').hidden && !$('#drawer').contains(e.target)
         && e.target !== $('#drawerBtn') && e.target !== $('#nbTitle') && !$('#nbChip').contains(e.target)
         && !$('#targetPick').contains(e.target) && !$('#folderPick').contains(e.target) && !$('#nbMenu').contains(e.target)
-        && !$('#nameAsk').contains(e.target) && !$('#toast').contains(e.target)) toggleDrawer(false);
+        && !$('#nameAsk').contains(e.target) && !$('#copyAsk').contains(e.target) && !$('#toast').contains(e.target)) toggleDrawer(false);
     });
     document.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      if (!$('#copyAsk').hidden) { // 复制时带什么的卡片开着：Esc 取消、回车复制；别的键不管（不换笔、不交给 AI）
+        if (e.key === 'Escape') answerCopy(false);
+        else if (e.key === 'Enter') { e.preventDefault(); answerCopy(true); }
+        return;
+      }
       // Ctrl+Z 撤销；Ctrl+Shift+Z、Ctrl+Y 重做（Mac 上 Cmd 一样）
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); redo(); }
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); } else if (e.key === 'p') setTool('pen');
@@ -7820,6 +9133,7 @@
       else if (e.key === 'l') setTool('lasso');
       else if (e.key === 'Enter') check();
       else if (e.key === 'Escape' && S.guide) closeGuide();
+      else if (e.key === 'Escape' && !$('#sizePick').hidden) closeSizePick();
       else if (e.key === 'Escape' && !$('#pageJump').hidden) closePageJump();
       else if (e.key === 'Escape' && !$('#newAnsList').hidden) closeNewAnsList();
       else if (e.key === 'Escape' && S.card) closeCard();
@@ -7828,7 +9142,7 @@
     });
     window.addEventListener('resize', () => { closeCard(); resize(); if (S.guide) { S.guide.sig = null; layoutGuide(); } }); // 转动 iPad、窗口变化：卡片收起，重新量、重新摆（引导的标签也重排）
     // 输入页码的小框、「几页有新回答」的单子开着时转动 iPad：不收起（输入框里可能已经打了字），跟着页码、记号挪到它们新的位置下面
-    window.addEventListener('resize', () => { if (!$('#pageJump').hidden) placePageJump(); if (!$('#newAnsList').hidden) placeNewAnsList(); });
+    window.addEventListener('resize', () => { if (!$('#pageJump').hidden) placePageJump(); if (!$('#newAnsList').hidden) placeNewAnsList(); placeSizePick(); });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') { resetInput(); flushSave(); return; }
       processPending();
@@ -7844,6 +9158,9 @@
     document.body.classList.toggle('collapsed', S.collapsed);
     resize();
     fitCheckWidth(); // 「AI」按钮按最长的那几个字定宽：要在摆右下角那一条之前
+    updateSize(); // 「AI」旁边的回答长短开关：写上这台设备记着的那一档，钮按最长的档名定宽（2026-11-17）
+    fitSizeWidth();
+    watchBarFit(); // 顶栏挤不下时那个开关收成小格子
     restoreRounds(); // 刷新前交的、还没走完的那一轮
     placeTools(); // 右下角那一条这时才显示出来：摆回拖到过的位置
     try { await document.fonts.load(`${NOTE_FS}px Xiaolai`); } catch (e) { /* 用系统字体 */ }
@@ -7886,7 +9203,7 @@
   // 方便自动化测试
   window.__ink = { S, check, send, sendAll, computeGroups, openPage, openNotebook, replay, processPending, loadCards, tapAiItem, inkStrokes, flowStrip, toggleFlow, setVerdict, undo, renderAI,
     openCard, closeCard, neighborOnScreen, loadNotebooks, cardItem, isDot, noteTextBox, roomObstacles, writeOnZones,
-    readLabels, setReads, openGuide, closeGuide, loadOffers, showStraight };
+    readLabels, setReads, openGuide, closeGuide, loadOffers, showStraight, isOpen, openBox, openRowBoxes };
 
   init();
 })();

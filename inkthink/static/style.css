@@ -164,6 +164,8 @@ body.collapsed #drawer { top: 0; padding-top: calc(env(safe-area-inset-top) + 58
 #aiRoot .badge.fresh .bdg { animation: badgeHop .45s ease-in-out 2; }
 #aiRoot .badge .bdot { fill: #d23c2e; stroke: #fff; stroke-width: 1.5; } /* 卡片上有还没交给 Claude 的红字 */
 @keyframes badgeHop { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-9px); } }
+/* 摊在纸上的长回答（2026-11-17）：和短批注同一种蓝字（.ai-item text），细线连到所答的笔迹；卡片上有还没交的红字时右上角一个红点 */
+#aiRoot .ai-open .bdot { fill: #d23c2e; stroke: #fff; stroke-width: 1.5; }
 /* 空白本子里收成小蓝点的短批注（阶段 D1）：一个实心的小蓝点，外面一圈淡的光晕，没有数字（有数字的圈号是长回答）；
    点一下浮出来时光晕加深；浮出来时上面写了还没交的红字，右上角一个红点；采纳的深蓝带 ★ */
 #aiRoot .ai-dot circle.pt { fill: var(--ai); stroke: #fff; stroke-width: 1.2; }
@@ -238,11 +240,13 @@ body.collapsed #targetPick { top: calc(env(safe-area-inset-top) + 58px); left: m
 #targetPickList, #folderPickList { max-height: min(62vh, 560px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
 #targetPick .tp-folder { margin: 8px 8px 2px; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #targetPick .tp-folder:first-child { margin-top: 2px; }
+#targetPick .tp-folder .tp-near { color: var(--ai); } /* 这本的原文件在这个文件夹里（2026-11-17）：排在最前，标出来 */
 .panel .row .tp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 6px 0; }
 .panel .row .tp-l1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .panel .row .tp-l1.none { color: var(--muted); }
 .panel .row .tp-l2 { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .panel .row .tp-check { flex: none; font-weight: 600; }
+.panel .row .tp-l2 .tp-ai { color: #222; font-weight: 600; } /* 不是 Claude 的对话：小字最前面的 AI 名字（2026-11-17） */
 #targetPick .tp-sess { padding-left: 14px; } /* 对话缩在文件夹名下面 */
 /* 选中的那一项：白底加粗边框（不整块涂色） */
 .panel button.row.on { background: #fff; color: #222; font-weight: 600; box-shadow: inset 0 0 0 1.5px #222; }
@@ -281,13 +285,26 @@ body.collapsed #targetPick { top: calc(env(safe-area-inset-top) + 58px); left: m
   z-index: 28;
 }
 #answerCard::-webkit-scrollbar { display: none; }
-/* 小蓝点浮出来的那张小卡片（阶段 D1）：只有那条短批注的几行，宽度按字（app.js 的 popWidth）；浅黄底、蓝色虚线细框，
-   和长回答的白底实线卡片分得开。红笔写在上面不收（点「AI」时它连红字一起变成卡片），点别处、落笔收回 */
+/* 短批注浮出来的那张小卡片（小蓝点，阶段 D1；2026-11-18 起空白本子里纸上的短批注点一下也浮出它）：只有那条短批注的几行，
+   宽度按字（app.js 的 popWidth，至少放得下底下那一个钮）；浅黄底、蓝色虚线细框，和长回答的白底实线卡片分得开。
+   底下一个钮：「收成蓝点」/「放回纸上」。不在上面写红字（2026-11-18 起），点别处、落笔收回 */
 #answerCard.note-pop { background: #fffdf6; border: 1px dashed rgba(47, 95, 174, .55); border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, .12); }
 /* 卡片顶上的「‹ 上一条」「下一条 ›」：贴在卡片顶上（内容滑动时不动），界面的字体（不是蓝色手写体），到头的那个变灰 */
 #acNav { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; gap: 8px; padding: 6px 8px; background: #fff; border-bottom: 1px solid rgba(47, 95, 174, .18);
   font: 14px/1.2 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
 #acNav button { height: 30px; min-width: 0; padding: 0 12px; border-radius: 15px; font-size: 14px; white-space: nowrap; }
+/* 卡片底下一排（2026-11-17，暂定）：「摊在纸上」/「收起」靠左，「再短点」「展开讲」靠右；贴在卡片底下（内容滑动时不动），界面的字体。
+   按钮看上去高 32，点得到的范围往上下伸到这一排的上下沿（44），左右只伸进按钮之间的空里；交了还没回的那个写「已交」（浅蓝底），两个都不能点 */
+#acActs { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: #fff;
+  border-top: 1px solid rgba(47, 95, 174, .18); font: 14px/1.2 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+#acActs .ac-fill { flex: 1; }
+/* 上下 6 像素也归按钮，圆角的底色和边框只画在中间 32 像素。左右各多留 3 像素给手指。 */
+#acActs button { position: relative; isolation: isolate; appearance: none; box-sizing: border-box; height: 44px; min-width: 0; margin: 0 -3px; padding: 0 16px;
+  border: 0; border-radius: 0; background: transparent; font-size: 14px; white-space: nowrap; }
+#acActs button::before { content: ''; position: absolute; inset: 6px 3px; z-index: -1; pointer-events: none;
+  box-sizing: border-box; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+#acActs button.sent:disabled { color: #1f3d7a; opacity: 1; }
+#acActs button.sent::before { background: #dce6f5; border-color: var(--ai); }
 #acSizer { position: relative; overflow: hidden; }
 #acPage { position: absolute; left: 0; top: 0; width: 440px; box-sizing: border-box; padding: 12px 16px 14px; transform-origin: 0 0; }
 /* 卡片上的红字：叠在内容上，和内容一起缩放、一起滑；不接点按（笔、手指由卡片自己接） */
@@ -296,6 +313,7 @@ body.collapsed #targetPick { top: calc(env(safe-area-inset-top) + 58px); left: m
 /* Claude 接着回的一段：上面一条细线，前面一行较淡的红色「红字：……」（它回应的那句红字） */
 #answerCard .ac-seg { margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(47, 95, 174, .25); }
 #answerCard .ac-mq { margin-bottom: 6px; color: #d23c2e; opacity: .7; font-size: 18px; }
+#answerCard .ac-mq.ac-redo { color: var(--ai); } /* 按「再短点」「展开讲」重写的那一段：不是红字，用蓝（和「问：」一样淡） */
 #answerCard .ac-q { margin-bottom: 6px; opacity: .6; font-size: 18px; } /* 顶上一行较淡的「问：……」 */
 #answerCard .ac-line { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 纸上的短批注收成的卡片：最上面那块照它在纸上的样子画（app.js 的 fillNote），宽高按纸上那一块（连同写出框的红字）换算 */
@@ -514,6 +532,14 @@ body.collapsed #targetPick { top: calc(env(safe-area-inset-top) + 58px); left: m
 .drag-ghost { position: fixed; z-index: 45; margin: 0; pointer-events: none; box-sizing: border-box; box-shadow: 0 8px 24px rgba(0, 0, 0, .22); opacity: .95; }
 .drag-ghost.nb-ghost { padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drag-bar { position: fixed; z-index: 45; width: 4px; border-radius: 2px; background: var(--ai); pointer-events: none; }
+/* 抽屉列表里拖动改上下顺序（2026-11-18）：抓起的文件夹那一行和它展开着的本子一起变淡；松手会排到哪画一条横的插入线——
+   排在文件夹里的缩进、和里面的本子对齐，排在外面的整行宽（app.js 的 listDropMark）。线用界面上的深色：蓝色留给 Claude 的东西 */
+#nbList .nf-item.lifted, #nbList .nb-item.carried { opacity: .35; }
+.drag-line { position: fixed; z-index: 45; height: 3px; border-radius: 2px; background: #222; pointer-events: none; }
+/* 文件夹那一行上的「＋」（在这个文件夹里新建本子）：看上去和旁边的改名、删除一样是个线条图标，点得到的范围 44×44
+   （宽 44；高看上去 32，用看不见的 ::after 往上下各伸 6，伸进行与行之间的空，不盖住上下两行看得见的地方） */
+#nbList .nb-acts .nf-add { position: relative; min-width: 44px; color: #4a463f; }
+#nbList .nb-acts .nf-add::after { content: ''; position: absolute; inset: -6px 0; }
 .dr-pages { display: flex; align-items: center; gap: 4px; }
 .dr-acts { margin-left: auto; display: flex; }
 .dr-acts button { color: #4a463f; }
@@ -682,6 +708,39 @@ body:not(.collapsed) #trouble { top: calc(var(--bar) + env(safe-area-inset-top) 
 #tools #check.locked, #bar #barCheck.locked { background: #ebe8e1; border-color: var(--line); color: #6b665d; }
 .ck-lock { display: inline-block; vertical-align: -2px; margin-right: 4px; }
 .ck-lock svg { display: block; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* 「AI」旁边的回答长短开关（2026-11-17，暂定）：白底细框的一个圆钮，写着现在这一档和 ▾（看得出能点开）；最小宽度由页面按最长的档名算好
+   （fitSizeWidth），换档时不变宽变窄。点开的小单子 #sizePick 挨着它：右下角那一条上的在它上面，顶栏上的在它下面（位置由页面算） */
+.size-btn { white-space: nowrap; box-sizing: border-box; font-size: 14px; color: #222; }
+#tools .size-btn { border-color: var(--line); background: #fff; padding: 0 10px; margin-left: 2px; }
+#bar .size-btn { padding: 0 10px; }
+/* 顶栏挤不下时（.tight，app.js 的 fitBarSize）：名字收起，换成三格小格子，亮几格是第几档（点一下 1 格、讲清楚 2 格、展开讲 3 格） */
+#bar .size-btn .sz-meter { display: none; }
+#bar .size-btn.tight { min-width: 36px !important; padding: 0 5px; }
+#bar .size-btn.tight .sz-name { display: none; }
+#bar .size-btn.tight .sz-caret { margin-left: 2px; font-size: 9px; }
+#bar.tight { gap: 4px; } /* 收成小格子时三组之间也挨近一点（英文、744 宽、「New on 2 pages」时差这几个像素） */
+#bar .size-btn.tight .sz-meter { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; vertical-align: -2px; }
+#bar .size-btn .sz-meter i { display: block; width: 4px; border-radius: 1px; background: #d8d3c8; }
+#bar .size-btn .sz-meter i:nth-child(1) { height: 6px; }
+#bar .size-btn .sz-meter i:nth-child(2) { height: 10px; }
+#bar .size-btn .sz-meter i:nth-child(3) { height: 14px; }
+#bar .size-btn[data-size="brief"] .sz-meter i:nth-child(1), #bar .size-btn[data-size="clear"] .sz-meter i:nth-child(-n+2), #bar .size-btn[data-size="full"] .sz-meter i { background: #222; }
+.size-btn .sz-caret { margin-left: 4px; color: var(--muted); font-size: 12px; }
+#sizePick { width: 290px; right: auto; z-index: 40; }
+#sizePick .sz-row { min-height: 52px; }
+#sizePick .sz-row .tp-l2 { white-space: normal; } /* 说明可以折行：英文比中文长，不截成省略号 */
+#sizePick .sz-row.on::after { content: '✓'; flex: none; font-weight: 600; }
+/* 复制这本…、复制这一页…（2026-11-18）：带什么三选一，一行一项（写带什么、下面一句小字说明），每行至少 52 高；
+   选中的那一行照选中按钮的样子（白底加粗边框，button.on），右边一个 ✓。没选中的不涂白底，和卡片同底 */
+#copyAsk .cp-opts { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
+#copyAsk .cp-opt { position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px;
+  width: 100%; height: auto; min-height: 52px; padding: 6px 36px 6px 12px; text-align: left; background: transparent; }
+#copyAsk .cp-opt.on { background: #fff; font-weight: 600; }
+#copyAsk .cp-opt .cp-l2 { color: var(--muted); font-size: 12px; font-weight: 400; }
+#copyAsk .cp-opt.on::after { content: '✓'; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); font-weight: 600; }
+#copyAsk #copyAskWhere { margin: 10px 0 12px; font-size: 13px; }
+/* 抽屉里「复制这一页」：书页、推送的页上灰着（还点得到，点了说一句为什么） */
+.dr-acts #actCopyPage.off { color: #c9c3b6; }
 #actTarget { text-align: left; padding: 0 10px; }
 /* 抽屉最下面的语言切换：当前的那个加框 */
 #langRow { margin-top: 14px; }
@@ -761,3 +820,19 @@ html[lang="en"] #guideCard { --gk: 5.4em; }
 .g-badge { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--ai); color: #fff; font-size: 13px; font-family: "Xiaolai", "Kaiti SC", STKaiti, KaiTi, "PingFang SC", sans-serif; }
 .g-foot { display: flex; justify-content: flex-end; padding-top: 8px; }
 #guideOk { pointer-events: auto; min-width: 96px; }
+
+/* 点按范围至少 44（2026-11-17 用户定；DESIGN.md 的 touch-target，苹果建议的大小）：按钮看上去的大小一点不变，
+   用一层看不见的 ::after 把能点到的范围往外伸。伸出去的部分只落在按钮之间的空里：紧挨着的两个各让一半（重叠处归后面的那个），
+   谁也不盖住别人看得见的地方。
+   - 右下角那一条上的按钮：高、宽 40 → 44
+   - 全屏时左上角那一排（翻页、加页、新回答的记号）：36 → 44；「单页 / 连续」那一对挨得近（只隔 2），只往上下伸
+   - 退出全屏后顶栏上的按钮：高 36 → 44（顶栏 52 高，上下各有 8 的空）；左右各伸 4，那一对只往上下伸
+   - 抽屉里的勾选行：高 36 → 44
+   - 新文件一组里的「加入」「忽略」：高 30 → 42（折成两排时两排只隔 6，再伸就盖到上一排了）
+   屏幕上方「Claude 生成了某某」那一条上的按钮（高 32）要截断长文件名（overflow: hidden），伸不出去，没改 */
+#tools button, #chipRow > button:not(#nbChip), #chipRow .pair button, #bar button, .dr-check, .of-acts button { position: relative; }
+/* inset 是从边框里面那一圈算起的：这些按钮都有 1 像素的边框，所以写的数比要伸出去的多 1 */
+#tools button::after { content: ''; position: absolute; inset: -3px; }
+#chipRow > button:not(#nbChip)::after, #bar button::after { content: ''; position: absolute; inset: -5px; }
+#chipRow .pair button::after, #bar .pair button::after, .dr-check::after { content: ''; position: absolute; inset: -5px -1px; }
+.of-acts button::after { content: ''; position: absolute; inset: -7px -1px; }

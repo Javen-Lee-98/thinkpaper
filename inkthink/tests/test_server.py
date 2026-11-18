@@ -715,7 +715,9 @@ class PromptTest(unittest.TestCase):
                      "不是越多越好", "写英文就用英文回", "sketch", "ink_confirm", "【草稿纸·整本】"):
             self.assertIn(must, p)
         # 长回答（2026-11-13）：平板标圈号、点开看全文；不再自己用 number 配页末的 write，不再改写（revises）
-        for must in ("长的用 write，anchor 填所答的那条红字（或它讲的那处笔迹），q 填问题原文", "平板在那里标一个圈号，用户点圈号才看到全文，不占纸面",
+        # 2026-11-17 起空白本子里不太长、旁边有空的长回答摊在纸上（open_answer），否则照旧标圈号
+        for must in ("长的用 write，anchor 填所答的那条红字（或它讲的那处笔迹），q 填问题原文",
+                     "旁边有空又不太长，草稿纸把它摊在纸上；否则标一个圈号，用户点开才看到全文，不占纸面（想放哪、要收着，用 ink_reply 的 place、fold）",
                      "写在纸上别处的，回一条新的 write（anchor 填那条红笔），旧的那条用户自己擦"):
             self.assertIn(must, p)
         # 规则瘦身（2026-11-16）：不另画 number、anchor 不写 end 由服务把关（settle_items），说法只在工具说明里
@@ -1411,6 +1413,115 @@ class PageLayoutTest(unittest.TestCase):
             self.assertEqual([p["pdf"] for p in info["pageInfo"]], [0, 1, 2, None, 3])
             self.assertEqual(first_stroke(app, nb, 3), "blank-note")
 
+    # 挪过页序的书更新（2026-11-17 用户定）：保留用户排的先后，新加的页跟在原文件里它前面那一页后面
+    SLIDES = {"A": "Intro: weekend trip planner", "B": "Method: simple travel budget", "C": "Result: total cost 300 yuan",
+              "C2": "Result: total cost 350 yuan", "D": "Summary and the next steps", "X": "Agenda for today and tomorrow"}
+
+    def moved_book(self, tmp, letters="ABCD"):
+        """一本 A B C D，每页写一笔（a b c d），B 后面插一张空白纸（写着 _），再把 D 挪到最前：D A B _ C。"""
+        app = make_app(tmp)
+        src = Path(tmp) / "src" / "例会.pdf"
+        src.parent.mkdir()
+        make_slides(src, [self.SLIDES[k] for k in letters])
+        nb = app.import_document(src)
+        for i, k in enumerate(letters):
+            app.save_page(nb, i, ink_page(k.lower()))
+        app.save_page(nb, app.insert_page(nb, 1), ink_page("_"))
+        app.move_page(nb, 4, 0)
+        return app, src, nb
+
+    def order(self, app, nb):
+        info = app.notebook_info(nb)
+        return [p["pdf"] for p in info["pageInfo"]], [first_stroke(app, nb, i) for i in range(info["pages"])]
+
+    def test_update_keeps_the_order_the_user_moved_to(self):
+        """还在的页按用户排的先后，笔迹跟着各自的页；新加的页 X 跟在原文件里它前面那一页 B（和 B 后面的空白纸）后面；
+        「改过」「新加的」记在原文件页号下，平板按每页的原文件页号去找，挪过页序也指对页；更新后先翻到改过的那一页（在这本里的位置）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app, src, nb = self.moved_book(tmp)
+            self.assertEqual(self.order(app, nb), ([3, 0, 1, None, 2], ["d", "a", "b", "_", "c"]))
+            time.sleep(1.1)
+            make_slides(src, [self.SLIDES[k] for k in ("A", "B", "X", "C2", "D")])  # B 后面加了 X，C 改了一个数
+            offer = app.add_offers("S", "idea", [{"path": str(src)}])[0]  # 平板上点「原文件改过 · 点一下更新」那一条
+            res = app.accept_offer(offer["id"], "update")
+            self.assertEqual(self.order(app, nb), ([4, 0, 1, None, 2, 3], ["d", "a", "b", "_", None, "c"]))
+            info = app.notebook_info(nb)
+            status = [info["changes"]["pages"].get(str(p["pdf"]), {}).get("status") for p in info["pageInfo"]]
+            self.assertEqual(status, [None, None, None, None, "new", "changed"])  # 平板的提示条按这个出：X 是新加的，C 改过
+            self.assertTrue(app.old_page_jpeg(nb, 3).startswith(b"\xff\xd8"))  # C 的旧版
+            self.assertEqual(res["summary"], "第 6 页有改动；新增第 5 页")  # 平板上那句话：这本里现在的页码
+            self.assertEqual(res["headline"], "第 4 页有改动；新增第 3 页")  # 给 Claude 的：原文件的页号
+            self.assertEqual(res["page"], 5)  # 先翻到改过的 C：这本里的第 6 页（不是原文件页号当页码的第 4 页）
+
+    def test_update_opens_at_the_changed_page_after_blank_pages(self):
+        """没挪过页序、但前面插过空白页的书：更新后先翻到的也是改过的那一页（以前直接拿原文件页号当页码，翻到空白页上）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(tmp)
+            src = Path(tmp) / "src" / "例会.pdf"
+            src.parent.mkdir()
+            make_slides(src, [self.SLIDES[k] for k in "ABC"])
+            nb = app.import_document(src)
+            app.insert_page(nb, 0)  # A _ B C
+            time.sleep(1.1)
+            make_slides(src, [self.SLIDES[k] for k in ("A", "B", "C2")])
+            res = app.accept_offer(app.add_offers("S", "idea", [{"path": str(src)}])[0]["id"], "update")
+            self.assertEqual((res["summary"], res["headline"], res["page"]), ("第 4 页有改动", "第 3 页有改动", 3))
+            self.assertEqual(app.notebook_info(nb)["pageInfo"][3]["pdf"], 2)
+
+    def test_update_message_skips_pages_the_user_deleted(self):
+        """平板上那句话不提用户删掉了的页（它不在这本里，没有页码）；改动全在删掉了的页上时照旧写原文件页号。给 Claude 的照旧都写。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(tmp)
+            src = Path(tmp) / "例会.pdf"
+            make_slides(src, [self.SLIDES[k] for k in "ABCD"])
+            nb = app.import_document(src)
+            app.delete_page(nb, 1)  # 删了 B：A C D
+            time.sleep(1.1)
+            make_slides(src, [self.SLIDES["A"], "Method: itemized travel budget", self.SLIDES["C"],
+                              "Summary and some open questions"])  # B、D 都改了
+            s = app.update_document(nb)
+            self.assertEqual((s["text"], s["headline"], s["page"]), ("第 3 页有改动", "第 2、4 页有改动", 2))
+            time.sleep(1.1)
+            make_slides(src, [self.SLIDES["A"], "Method: a trip budget, revised", self.SLIDES["C"],
+                              "Summary and some open questions"])  # 只改了删掉的 B
+            s = app.update_document(nb)
+            self.assertEqual((s["text"], s["headline"], s["page"]), ("第 2 页有改动", "第 2 页有改动", 0))
+
+    def test_file_swapped_pages(self):
+        """原文件自己换了两页的先后（A B C D → A C B D）。对齐不交换先后：挪了位置的 C 按「删掉一页、加一页」算，
+        C 上的字另存（和以前一样）。没挪过的书跟原文件：A C B D；挪过的（D A B _ C）保留用户排的先后，C 跟在原文件里它前面的 A 后面。"""
+        for moved in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                app, src, nb = self.moved_book(tmp)
+                if not moved:
+                    app.move_page(nb, 0, 4)  # 挪回去：A B _ C D
+                    self.assertEqual(self.order(app, nb)[1], ["a", "b", "_", "c", "d"])
+                time.sleep(1.1)
+                make_slides(src, [self.SLIDES[k] for k in "ACBD"])
+                s = app.update_document(nb)
+                self.assertEqual(s["headline"], "新增第 2 页；删掉了旧版第 3 页（上面的手写另存了）")
+                self.assertEqual(s["text"], f"新增第 {3 if moved else 2} 页；删掉了旧版第 3 页（上面的手写另存了）")
+                want = ([3, 0, 1, 2, None], ["d", "a", None, "b", "_"]) if moved else ([0, 1, 2, None, 3], ["a", None, "b", "_", "d"])
+                self.assertEqual(self.order(app, nb), want)
+                self.assertEqual(len(list(app._nb_dir(nb).glob("removed-*-page-0002.json"))), 1)
+
+    def test_undo_after_moving_brings_the_order_back(self):
+        """Claude 改了原文件（B 后面加了 X、C 改了），平板上撤回：文件回到改之前，这本原地换回去，页序回到更新前的 D A B _ C。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app, src, nb = self.moved_book(tmp)
+            before = self.order(app, nb)
+            app.keeper.keep(src, "覆盖前")
+            e = app.record_edit(app.keeper.history(src)[0], src, "overwrite", src)
+            time.sleep(1.1)
+            make_slides(src, [self.SLIDES[k] for k in ("A", "B", "X", "C2", "D")])
+            app.update_document(nb, src, edit=e["eid"])
+            app.save_page(nb, 4, ink_page("x"))  # 在新加的 X 上写了字
+            self.assertEqual(self.order(app, nb), ([4, 0, 1, None, 2, 3], ["d", "a", "b", "_", "x", "c"]))
+            out = app.undo_book(nb)
+            self.assertEqual((out["ok"], out["action"]), (True, "restored"), out)
+            self.assertEqual(self.order(app, nb), before)
+            self.assertEqual(len(list(app._nb_dir(nb).glob("removed-*-page-0002.json"))), 1)  # X 上的字另存着
+
     def test_seen_per_conversation_adopts_old_data(self):
         """以前不分对话记的 seen.json：第一个来记的对话接着用，别的对话从头算。"""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1980,7 +2091,8 @@ class HttpTest(unittest.TestCase):
             return {str(p.relative_to(self.app.data)): p.read_bytes() for p in nbdir.rglob("*") if p.is_file()} | \
                    {str(p.relative_to(self.app.books)): p.read_bytes() for p in self.app.books.rglob("*") if p.is_file()}
         before = files()
-        self.assertEqual(self.j("GET", "/api/folders")[1], {"folders": []})
+        # top：抽屉最外层的顺序（2026-11-18 起一起给，见 test_folder_order.py）；没排过时就是本子列表的先后
+        self.assertEqual(self.j("GET", "/api/folders")[1], {"folders": [], "top": [pad["id"], pad2["id"], book]})
         st, r = self.j("POST", "/api/folders/new", {"name": "  原先 ", "nb": pad["id"]})
         self.assertEqual(st, 200)
         f1 = r["id"]
@@ -1990,17 +2102,19 @@ class HttpTest(unittest.TestCase):
         self.assertEqual([f["name"] for f in r["folders"]], ["原先", "课题"])               # 按建立的先后
         self.assertEqual(self.j("POST", "/api/folders/new", {"name": "课题"})[0], 400)     # 重名
         self.assertEqual(self.j("POST", "/api/folders/new", {"name": "  "})[0], 400)       # 空名字
-        for fixed in ("scratch", "board"):                                               # 草稿本、Claude 推送不进文件夹
-            self.assertEqual(self.j("POST", "/api/folders/move", {"nb": fixed, "folder": f2})[0], 400)
+        # 草稿本不进文件夹（推送本子 2026-11-17 起能进，见 test_push_books.py）；还没有推过页面时没有「board」这本
+        self.assertEqual(self.j("POST", "/api/folders/move", {"nb": "scratch", "folder": f2})[0], 400)
+        self.assertEqual(self.j("POST", "/api/folders/move", {"nb": "board", "folder": f2})[0], 404)
         self.assertEqual(self.j("POST", "/api/folders/new", {"name": "草稿", "nb": "scratch"})[0], 400)
         self.assertEqual(self.j("POST", "/api/folders/move", {"nb": "pad:nope", "folder": f2})[0], 404)
         self.assertEqual(self.j("POST", "/api/folders/move", {"nb": pad2["id"], "folder": "f-nope"})[0], 404)
         self.j("POST", "/api/folders/move", {"nb": book, "folder": f2})
         self.j("POST", "/api/folders/move", {"nb": pad2["id"], "folder": f2})
         r = self.j("POST", "/api/folders/move", {"nb": pad["id"], "folder": f2})[1]       # 换一个文件夹：从原来的拿出来
-        self.assertEqual({f["name"]: f["items"] for f in r["folders"]}, {"原先": [], "课题": [book, pad2["id"], pad["id"]]})
+        # 给平板的 items 按抽屉里的先后（2026-11-18）：没在文件夹里排过的，按本子列表的先后（文件里记的是放进去的先后，见下面 saved）
+        self.assertEqual({f["name"]: f["items"] for f in r["folders"]}, {"原先": [], "课题": [pad["id"], pad2["id"], book]})
         r = self.j("POST", "/api/folders/move", {"nb": pad2["id"], "folder": ""})[1]      # 移出
-        self.assertEqual({f["name"]: f["items"] for f in r["folders"]}, {"原先": [], "课题": [book, pad["id"]]})
+        self.assertEqual({f["name"]: f["items"] for f in r["folders"]}, {"原先": [], "课题": [pad["id"], book]})
         r = self.j("POST", "/api/folders/rename", {"id": f1, "name": "以前的"})[1]
         self.assertEqual([f["name"] for f in r["folders"]], ["以前的", "课题"])
         self.assertEqual(self.j("POST", "/api/folders/rename", {"id": f1, "name": "课题"})[0], 400)
@@ -2015,7 +2129,7 @@ class HttpTest(unittest.TestCase):
         # 导入的书改名：文件夹里跟着换成新名字
         self.j("POST", "/api/notebook/rename", {"nb": book, "title": "例会_v48"})
         book2 = "book:例会_v48.pdf"
-        self.assertEqual(self.j("GET", "/api/folders")[1]["folders"][1]["items"], [book2, pad["id"]])
+        self.assertEqual(self.j("GET", "/api/folders")[1]["folders"][1]["items"], [pad["id"], book2])
         # 删一本：文件夹照常，里面不再有它；文件夹里有已经不在的本子（比如电脑上挪走了）：照常读，给平板的列表里滤掉
         self.j("POST", "/api/notebook/delete", {"nb": pad["id"]})
         self.assertEqual(self.j("GET", "/api/folders")[1]["folders"][1]["items"], [book2])
@@ -2040,7 +2154,7 @@ class HttpTest(unittest.TestCase):
         self.assertNotIn("book:新的.pdf", json.loads((nbdir / "folders.json").read_text("utf-8"))["folders"][0]["items"])
         # 文件坏了：读的时候当没有，改的时候报错、不覆盖
         (nbdir / "folders.json").write_text("{坏了", "utf-8")
-        self.assertEqual(self.j("GET", "/api/folders")[1], {"folders": []})
+        self.assertEqual(self.j("GET", "/api/folders")[1]["folders"], [])
         self.assertEqual(self.j("POST", "/api/folders/new", {"name": "x"})[0], 400)
         self.assertEqual((nbdir / "folders.json").read_text("utf-8"), "{坏了")
 
@@ -2172,8 +2286,9 @@ class HttpTest(unittest.TestCase):
         img = Path(self.tmp.name) / "plot.jpg"
         img.write_bytes(base64.b64decode(TINY_JPEG))
         st, shown = self.j("POST", "/bridge/show", {"sid": "B", "path": str(img), "title": "一周气温"})
-        self.assertEqual((st, shown["page"], shown["title"]), (200, 0, "一周气温"))
-        self.assertEqual(self.call("GET", "/api/boardbg?i=0")[1], "image/png")
+        self.assertEqual((st, shown["page"], shown["title"], shown["nbTitle"]), (200, 0, "一周气温", "推送 · idea"))
+        self.assertTrue(shown["nb"].startswith("board:"), shown)
+        self.assertEqual(self.call("GET", "/api/boardbg?nb=" + urllib.parse.quote(shown["nb"]) + "&i=0")[1], "image/png")
         self.assertEqual(self.j("POST", "/bridge/show", {"sid": "B", "path": str(img) + ".none"})[0], 400)
 
         # 平板不在线时快照直接失败
@@ -2234,11 +2349,13 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(self.call("PUT", f"/api/page?nb={nb}&i={i}", page)[0], 200)
 
     def test_notebook_remembers_its_conversation(self):
-        """每本记住自己的对话：第一次发送时记下；之后别的对话「最近打字」也不漂移；原对话不在了先问（410）。"""
+        """每本记住自己的对话：第一次发送时记下；之后别的对话「最近打字」也不漂移；原对话不在了先问（410）。
+        没选过对话、连着不止一个对话时不替用户定（2026-11-17 用户定，见 test_target_first.py）：这里第一次带上选的 A。"""
         self.j("POST", "/bridge/hello", {"sid": "A", "label": "MY_PAPER", "cwd": "E:\\a"})
         self.j("POST", "/bridge/hello", {"sid": "B", "label": "idea", "cwd": "E:\\b"})
         self.j("POST", "/bridge/active", {"sid": "A"})
-        st, sent = self.j("POST", "/api/send", send_payload())                     # 没绑过：发给最近打字的 A，并记下
+        self.assertEqual(self.j("POST", "/api/send", send_payload())[0], 410)       # 没选过、连着两个：不发给最近打字的 A，先问
+        st, sent = self.j("POST", "/api/send", send_payload(target="A"))           # 选了 A：发给 A，并记下
         self.assertEqual((st, sent["label"]), (200, "MY_PAPER"))
         self.assertEqual(self.j("GET", "/api/notebook?nb=scratch")[1]["target"]["sid"], "A")
         self.j("POST", "/bridge/active", {"sid": "B"})                              # B 变成最近打字的
@@ -2267,7 +2384,7 @@ class HttpTest(unittest.TestCase):
         self.j("POST", "/bridge/hello", {"sid": "A", "label": "MY_PAPER", "cwd": "E:\\a"})
         self.assertEqual(self.j("GET", "/bridge/poll?sid=A")[1]["submission"]["id"], sent["id"])
 
-    def test_claim_binds_open_notebook_and_pushes_bind_board(self):
+    def test_claim_binds_open_notebook_and_pushes_record_who_pushed(self):
         self.j("POST", "/bridge/hello", {"sid": "A", "label": "MY_PAPER", "cwd": "E:\\a"})
         self.j("POST", "/bridge/hello", {"sid": "B", "label": "idea", "cwd": "E:\\b"})
         self.j("POST", "/api/notebook/target", {"nb": "scratch", "sid": "A"})
@@ -2279,8 +2396,9 @@ class HttpTest(unittest.TestCase):
         self.assertTrue(self.j("GET", "/bridge/status?sid=B")[1]["isTarget"])
         img = Path(self.tmp.name) / "fig.png"
         fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 40, 30), 0).save(str(img))
-        self.j("POST", "/bridge/show", {"sid": "A", "path": str(img)})              # A 推来的页：在上面写的发回 A
-        self.assertEqual(self.app.nb_target("board")["sid"], "A")
+        nb = self.j("POST", "/bridge/show", {"sid": "A", "path": str(img)})[1]["nb"]  # A 推来的页：在上面写的发回 A
+        self.assertEqual(self.app.push_target(nb, "p0000")["sid"], "A")             # 2026-11-17 起记在这一页上
+        self.assertIsNone(self.app.nb_target(nb))                                  # 不再把整本绑给推的对话
 
     def test_status_has_the_protocol_and_messages_only_the_page(self):
         """固定说明在状态里（插件放进系统提示）；发给对话的投递只放这一页的内容。hello 带不带 proto 都一样：服务不再看。"""
@@ -2940,7 +3058,7 @@ class HttpTest(unittest.TestCase):
         st, a = self.j("POST", "/api/offer-accept", {"id": oid})
         self.assertEqual((st, a["nb"], a["page"], a["title"]), (200, "book:周末安排.pdf", 0, "周末安排"))
         self.assertEqual(self.app.notebook_info(a["nb"])["pages"], 1)
-        self.assertNotIn("board", [n["id"] for n in self.j("GET", "/api/notebooks")[1]])
+        self.assertFalse([n["id"] for n in self.j("GET", "/api/notebooks")[1] if n["id"].startswith("board")])  # 不进任何推送本子
         self.assertEqual(self.j("GET", "/api/offers")[1], [])
 
     def test_offer_of_a_file_that_is_gone_or_fails_to_import(self):
@@ -3097,7 +3215,7 @@ class HttpTest(unittest.TestCase):
 class LocalOnlyBridgeTest(unittest.TestCase):
     """「只在本地」的本子，Claude 一侧（/bridge/*）也不往里放东西、不换掉它，出错信息里也不列它的名字（2026-11-16 用户定：
     「拦住，也不列名字」）。以前只拦写批注（2026-11-12）：再导入同一个原文件会原地更新它，带 replace 会按名字换掉它，
-    另存出来的新文件导入时它跟着换，往设成只在本地的「Claude 推送」也推得进去，名字写错时的出错信息把它也列出来。
+    另存出来的新文件导入时它跟着换，往设成只在本地的推送本子也推得进去，名字写错时的出错信息把它也列出来。
     用户自己在平板上（/api/*）的更新、替换照常。例子文件都是编的（菜单、家务分工、游园计划）。"""
     setUp = HttpTest.setUp
     tearDown = HttpTest.tearDown
@@ -3268,18 +3386,23 @@ class LocalOnlyBridgeTest(unittest.TestCase):
         self.assertIn("对应的那本设成了只在本地", res["text"])
 
     def test_show_into_a_local_board_is_refused(self):
-        """往设成只在本地的「Claude 推送」推页面：拒绝，不加页、不改它发往的对话；取消后照常推。"""
+        """往设成只在本地的推送本子推页面：拒绝，不加页、也不另开一本同文件夹的（2026-11-17 起按项目文件夹各一本），
+        回的话不带本子名；取消后照常推进同一本。"""
         self.online()
         img = Path(self.tmp.name) / "花园.png"
         fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 40, 30), 0).save(str(img))
-        self.assertEqual(self.j("POST", "/bridge/show", {"sid": "B", "path": str(img)})[0], 200)
-        self.set_local("board")
-        err = self.refused("/bridge/show", {"path": str(img), "title": "第二张"})
-        self.assertTrue(err.startswith("「Claude 推送」这本只在本地"), err)
-        self.assertEqual(len(self.app.board_index()["pages"]), 1)
-        self.set_local("board", False)
+        st, r = self.j("POST", "/bridge/show", {"sid": "B", "path": str(img)})
+        self.assertEqual(st, 200, r)
+        nb = r["nb"]
+        nb = self.j("POST", "/api/notebook/rename", {"nb": nb, "title": "园子的照片"})[1]["id"]
+        self.set_local(nb)
+        err = self.refused("/bridge/show", {"path": str(img), "title": "第二张"}, hidden=("园子的照片", "推送 ·"))
+        self.assertTrue(err.startswith("这个文件夹的推送本子只在本地"), err)
+        self.assertEqual(len(self.app.board_index(nb)["pages"]), 1)
+        self.assertEqual(len(self.app.boards()), 1)                                    # 没有另开一本
+        self.set_local(nb, False)
         st, r = self.j("POST", "/bridge/show", {"sid": "B", "path": str(img), "title": "第二张"})
-        self.assertEqual((st, r["page"]), (200, 1))
+        self.assertEqual((st, r["nb"], r["page"]), (200, nb, 1))
 
     def test_name_lists_leave_out_local_notebooks(self):
         """名字写错时列「现有」的本子：只在本地的不列；只写了名字的一部分时，也不往只在本地的本子上配。
@@ -3639,7 +3762,8 @@ class CardMarksTest(unittest.TestCase):
         self.assertIn("圈号 4 的卡片上我用红笔写了批注，见图 E:\\d\\p002-card-4.png：蓝字是你之前的回答，红字是我写的。回应用 ink_reply 的 write，card 填 4（再带上 page=2）", scan)
         # 固定说明里只留一句指路（2026-11-16 规则瘦身：怎么回在附了卡片的消息里和 ink_reply 的说明里）
         p = prompt.protocol()
-        self.assertIn("卡片上的红字：用户在长回答的卡片上（或纸上的短批注上）写了红字时，消息里附那张卡片的图和怎么回，照那一段做（write 带 card）。", p)
+        self.assertIn("卡片上的红字：用户在长回答的卡片上写了红字时，消息里附那张卡片的图和怎么回，照那一段做（write 带 card）；"
+                      "写在纸上蓝字批注上的红字照纸上别的红笔问题回。", p)  # 2026-11-18：纸上的短批注上的红字不再收成卡片
         self.assertIn("回应接在那张卡片下面（要改写整段，也写在下面）。", scan)
         self.assertIn("这段接在那张卡片最下面，不出新的圈号；要改写整段，也把改好的写在下面", tool_desc("ink_reply"))
 
@@ -3662,9 +3786,13 @@ class CardMarksTest(unittest.TestCase):
         self.assertEqual(prompt.card_image_line({"n": 4, "img": "d.png"}), "- 圈号 4 的卡片：d.png（蓝字是你之前的回答，红字是我在卡片上写的）")
         self.assertEqual(prompt.fmt_prev({"n": 3, "q": "不显示", "text": "车票要提前买", "note": True, "more": [{"q": "哪天", "text": "出发前三天"}]}),
                          "圈号 3（原来是短批注）：车票要提前买\n  - 接着（回应红字「哪天」）：出发前三天")
-        # 规则瘦身（2026-11-16）：这一句只在 ink_reply 的说明里（固定说明「卡片上的红字」那一条指路过去）
-        self.assertIn("用户在纸上的短批注上直接写了红字时，那条短批注交上来时已收成圈号、变成这样一张卡片，回应的办法一样。", tool_desc("ink_reply"))
-        self.assertIn("或纸上的短批注上", prompt.protocol())
+        # 2026-11-18 起纸上的短批注上写红字不再收成卡片（批注和红字都留在纸上）：ink_reply 的说明照别的红笔问题回，
+        # 以前收成的卡片上的红字照卡片的办法回；固定说明里不再说「或纸上的短批注上」
+        self.assertIn("用户在纸上的短批注上（或紧挨着它）用红笔写了字时，那条短批注照旧留在纸上，书写过程里写明那组红笔写在哪条批注上："
+                      "照别的红笔问题回，anchor 填那组红笔（以前由短批注收成的卡片上的红字，照上面卡片的办法回）。", tool_desc("ink_reply"))
+        self.assertNotIn("交上来时已收成圈号", tool_desc("ink_reply"))
+        self.assertNotIn("或纸上的短批注上", prompt.protocol())
+        self.assertIn("写在纸上蓝字批注上的红字照纸上别的红笔问题回", prompt.protocol())
 
     def test_prev_answers_carry_the_parts_after(self):
         """「你之前在这一页写过的批注」：长回答后面接着回过的各段另起一行跟在后面（前 200 个字）。"""
@@ -3850,6 +3978,117 @@ class DotNoteTest(unittest.TestCase):
         self.assertEqual(server.snapshot_unsent(0, 2), "这一页有 2 个小蓝点上有我还没交的红字：快照的图里只有小蓝点，看不到这些红字；"
                                                      "我在平板上点「AI」时会连同红字一起交给你。")
         self.assertIsNone(server.snapshot_unsent(0, 0))
+
+
+NOTE_ON_TEXT = "车票要提前买：出发前三天在网上订好"  # 17 个字：消息里只写开头 16 个字加「…」
+NOTE_ON_HEAD = "车票要提前买：出发前三天在网上订…"
+
+
+def paper_note(aid="n1", text=NOTE_ON_TEXT, **kw):
+    """空白本子里展开在纸上的一条短批注（字在 x 460–、y 290– 那一行）。"""
+    it = {"id": aid, "req": "r1", "type": "note", "t": 1_700_000_000_000, "on": ["q1"], "text": text, "box": [100, 290, 400, 310],
+          "lay": {"x": 460, "y": 290, "w": 380, "h": 37, "lines": [text], "fs": 21, "lh": 29},
+          "paths": [{"d": "M402 300 L458 300", "cls": "leader", "w": 1.3}], "hit": [454, 286, 846, 331]}
+    it.update(kw)
+    return it
+
+
+class NoteStaysTest(unittest.TestCase):
+    """红笔批过的短批注留在纸上（2026-11-18 用户改的，《产品定义》第 2 节）：平板不再把那条批注收成圈号卡片，红字照旧是纸上的
+    红笔问题；服务认出那组红笔写在哪条批注上（pages.red_on_notes），书写过程里写明「写在蓝字批注「开头几个字…」上」。
+    单页交（按平板发来的组和笔迹 id）和整本检测（服务端自己分组）都认；不附卡片的图。"""
+    T = 1_700_000_000_000
+
+    def page(self, *extra, ai=None):
+        t = self.T
+        strokes = [stroke("q1", t - 60_000, 100, 300, n=38),                  # 黑字：那条批注指着的
+                   stroke("r1", t + 10_000, 470, 300, red=True, n=10),        # 红字：压在批注的字上
+                   stroke("r2", t + 20_000, 100, 700, red=True, n=10)]        # 红字：纸上别处
+        return {"v": 1, "strokes": strokes + list(extra), "ai": [paper_note()] if ai is None else ai}
+
+    def groups(self, *more):
+        t = self.T
+        g = [{"id": "g1", "ids": ["q1"], "t0": t - 60_000, "t1": t - 58_900, "n": 1, "erased": 0, "bbox": [100, 300, 396, 301]},
+             {"id": "g2", "ids": ["r1"], "t0": t + 10_000, "t1": t + 10_270, "n": 1, "erased": 0, "bbox": [470, 300, 542, 301], "red": True,
+              "note_on": "平板发来的不认"},
+             {"id": "g3", "ids": ["r2"], "t0": t + 20_000, "t1": t + 20_270, "n": 1, "erased": 0, "bbox": [100, 700, 172, 701], "red": True}]
+        return g + list(more)
+
+    def test_red_on_notes(self):
+        """压到批注的字（四周放宽 NOTE_PAD）才算；批注到之前写的、擦掉的不算；收成小蓝点的、擦掉的、横划掉的批注不算；压到两条的归压得多的。"""
+        page = self.page()
+        ink = {s["id"]: s for s in page["strokes"]}
+        got = pages.red_on_notes(page, [("g2", [ink["r1"]]), ("g3", [ink["r2"]])])
+        self.assertEqual({k: v["id"] for k, v in got.items()}, {"g2": "n1"})
+        early = dict(ink["r1"], t0=self.T - 1000)
+        self.assertEqual(pages.red_on_notes(page, [("g2", [early])]), {})                     # 那条批注到之前写的
+        self.assertEqual(pages.red_on_notes(page, [("g2", [dict(ink["r1"], erasedAt=self.T + 11_000)])]), {})
+        below = stroke("r9", self.T + 10_000, 470, 290 + 21 * 1.2 + 9, red=True, n=10)      # 字底下 9（放宽的一圈里）
+        self.assertEqual(list(pages.red_on_notes(page, [("g9", [below])])), ["g9"])
+        far = stroke("r9", self.T + 10_000, 470, 290 + 21 * 1.2 + 14, red=True, n=10)       # 再往下：不算
+        self.assertEqual(pages.red_on_notes(page, [("g9", [far])]), {})
+        for gone in (dict(paper_note(), dot={"at": [410, 300], "t": 1, "why": "ink"}), paper_note(erasedAt=5), paper_note(dismissed=True),
+                     paper_note(on=["nope"])):
+            self.assertEqual(pages.red_on_notes(dict(page, ai=[gone]), [("g2", [ink["r1"]])]), {}, gone)
+        two = dict(page, ai=[paper_note(), paper_note("n2", "记得带伞", lay={"x": 460, "y": 330, "w": 120, "h": 37, "lines": ["记得带伞"],
+                                                                            "fs": 21, "lh": 29})])
+        both = [stroke("r5", self.T + 10_000, 470, 318, red=True, n=3), stroke("r6", self.T + 10_500, 470, 345, red=True, n=12)]
+        self.assertEqual(pages.red_on_notes(two, [("g5", both)])["g5"]["id"], "n2")              # 压得多的那条
+        # 从别处写过来、顺带压到批注的：连同批注的字太宽（> 510）、太高（比字高出 240 以上）的整组不算（平板以前的 noteFits）
+        wide = stroke("r7", self.T + 10_000, 100, 300, red=True, n=50)                        # x 100 → 492，压到批注的字头
+        self.assertEqual(pages.red_on_notes(page, [("g7", [wide])]), {})
+        tall = {"id": "r8", "t0": self.T + 10_000, "w": 2.1, "c": "r", "pts": [[480, 300 + 10 * k, 0.5, 30 * k] for k in range(30)]}  # 往下拉出 290
+        self.assertEqual(pages.red_on_notes(page, [("g8", [tall])]), {})
+        ok = {"id": "r8", "t0": self.T + 10_000, "w": 2.1, "c": "r", "pts": [[480, 300 + 10 * k, 0.5, 30 * k] for k in range(20)]}    # 往下 190：算
+        self.assertEqual(list(pages.red_on_notes(page, [("g8", [ok])])), ["g8"])
+
+    def test_single_page_message_names_the_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(tmp)
+            app.save_page("scratch", 0, json.dumps(self.page()), client="t")
+            req = dict(send_payload(), groups=self.groups())
+            sub_id, text = app.save_submission(req)
+            meta = json.loads((Path(tmp) / "data" / "submissions" / sub_id / "meta.json").read_text("utf-8"))
+        line = next(ln for ln in text.splitlines() if ln.startswith("g2｜"))
+        self.assertTrue(line.endswith(f"｜红笔（问题，写在蓝字批注「{NOTE_ON_HEAD}」上）"), line)
+        self.assertTrue(next(ln for ln in text.splitlines() if ln.startswith("g3｜")).endswith("｜红笔（问题）"))
+        self.assertEqual([g.get("note_on") for g in meta["groups"]], [None, NOTE_ON_TEXT, None])   # 平板发来的 note_on 不认
+        self.assertNotIn("卡片上的红字", text)                                                    # 不附卡片的图
+        self.assertNotIn("card-", text)
+
+    def test_answered_and_dots_are_not_named(self):
+        """回答过的红笔不写是哪条（照旧「回答过」）；那条批注收成了小蓝点的，红字照旧是纸上的红笔问题、不说写在哪条上。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(tmp)
+            app.save_page("scratch", 0, json.dumps(self.page()), client="t")
+            gs = self.groups()
+            gs[1]["answered"] = True
+            _, text = app.save_submission(dict(send_payload(), groups=gs))
+            self.assertTrue(next(ln for ln in text.splitlines() if ln.startswith("g2｜")).endswith("｜红笔（回答过）"))
+            folded = self.page(ai=[paper_note(dot={"at": [410, 300], "t": self.T + 1, "why": "ink"})])
+            app.save_page("scratch", 0, json.dumps(folded), client="t")
+            _, text = app.save_submission(dict(send_payload(), groups=self.groups()))
+            self.assertTrue(next(ln for ln in text.splitlines() if ln.startswith("g2｜")).endswith("｜红笔（问题）"))
+            self.assertNotIn("写在蓝字批注", text)
+
+    def test_scan_names_the_note(self):
+        """整本检测（服务端自己分组）：一样写明那组红笔写在哪条批注上，只写一次（纸上别处的红笔不写）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(tmp)
+            app.save_page("scratch", 0, json.dumps(self.page()), client="t")
+            _, text, n = app.scan("scratch")
+        self.assertEqual(n, 1)
+        self.assertEqual(text.count(f"｜红笔（问题，写在蓝字批注「{NOTE_ON_HEAD}」上）"), 1, text)
+        self.assertEqual(text.count("｜红笔（问题）"), 1)
+
+    def test_label(self):
+        self.assertEqual(prompt.red_label({"red": True, "note_on": "记得带伞"}), "｜红笔（问题，写在蓝字批注「记得带伞」上）")
+        self.assertEqual(prompt.red_label({"red": True, "note_on": "  a\n b  "}), "｜红笔（问题，写在蓝字批注「a b」上）")
+        self.assertEqual(prompt.red_label({"red": True, "note_on": "x" * 16}), "｜红笔（问题，写在蓝字批注「" + "x" * 16 + "」上）")
+        self.assertEqual(prompt.red_label({"red": True, "note_on": "x" * 17}), "｜红笔（问题，写在蓝字批注「" + "x" * 16 + "…」上）")
+        self.assertEqual(prompt.red_label({"red": True, "note_on": ""}), "｜红笔（问题）")
+        self.assertEqual(prompt.red_label({"red": True, "answered": True, "note_on": "记得带伞"}), "｜红笔（回答过）")
+        self.assertEqual(prompt.red_label({"note_on": "记得带伞"}), "")
 
 
 def _rgb_count(pix, pred, box=None, step=1):

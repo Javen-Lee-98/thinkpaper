@@ -141,8 +141,8 @@ await js('window.__ink.toggleFlow()');
 await sleep(600);
 
 // ================= 5. 推送页：纸外面照旧是灰底
-await T.post('/bridge/show', { sid: 'S1', path: PNG, title: '路线图' });
-await T.openNotebook('board', 0);
+const shown5 = await T.post('/bridge/show', { sid: 'S1', path: PNG, title: '路线图' }); // 进这个对话所在文件夹的推送本子（2026-11-17）
+await T.openNotebook(shown5.nb, 0);
 await T.waitFor('window.__ink.S.bgImg', 8000);
 await setView(0.5, 300, 260);
 g = await geo();

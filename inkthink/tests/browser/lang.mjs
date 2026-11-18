@@ -233,12 +233,14 @@ await T.tap('#nameAskOk', 1000);
 if (!(await T.visible('#drawer'))) await T.tap('#nbChip');
 T.ok('英文：文件夹那一行写着几本，文件夹名（你起的）不翻译', (await T.text('#nbList .nf-name')) === '课题' && (await T.text('#nbList .nf-count')) === '0 notebooks',
   [await T.text('#nbList .nf-name'), await T.text('#nbList .nf-count')]);
-const fbtn = await js(`(() => { const b = document.querySelector('#nbList .nb-item .nb-more'); return b ? b.getAttribute('aria-label') : ''; })()`);
+const OWN_MORE = '#nbList .nb-item:not([data-nb="scratch"]) .nb-more'; // 草稿本（2026-11-18 起也有「⋯」，只有「复制这本…」）下面那本
+const fbtn = await js(`(() => { const b = document.querySelector(${JSON.stringify(OWN_MORE)}); return b ? b.getAttribute('aria-label') : ''; })()`);
 T.ok('英文：本子右边的「⋯」，说明是英文', fbtn === 'More actions', fbtn);
-await T.tap('#nbList .nb-item .nb-more', 400);
+await T.tap(OWN_MORE, 400);
 left = mine(await leftover(false));
 const menuEn = await js(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.textContent)`);
-T.ok('英文：「⋯」点开的菜单', (await T.visible('#nbMenu')) && left.length === 0 && JSON.stringify(menuEn) === JSON.stringify(['Move to a folder…', 'Rename…', 'Delete this notebook…']), [left, menuEn]);
+T.ok('英文：「⋯」点开的菜单', (await T.visible('#nbMenu')) && left.length === 0
+  && JSON.stringify(menuEn) === JSON.stringify(['Move to a folder…', 'Move up', 'Move down', 'Rename…', 'Copy this notebook…', 'Delete this notebook…']), [left, menuEn]);
 await T.tap('#nbMenu [data-act=folder]', 500);
 left = mine(await leftover(false));
 T.ok('英文：点开的小列表', (await T.visible('#folderPick')) && left.length === 0 && (await T.text('#folderPickList')).includes('课题'), [left, await T.text('#folderPickList')]);

@@ -108,7 +108,9 @@ const sub2 = await T.waitSub('S1'), vs = (sub2 && T.metaOf(sub2).verdicts) || []
 T.ok('决定带回去了，带着种类', JSON.stringify(vs.map((v) => [v.id, v.kind, v.verdict, v.text])) === JSON.stringify([['s1', 'label', 'yes', '导致'], ['s2', 'node', 'yes', '作业太多'], ['s3', 'link', 'no', '包含'], ['s4', 'group', 'yes', '源头']]), vs);
 T.ok('消息里逐条写着：关系词、概念、分组采纳，连线不采纳', Boolean(sub2) && ['s1建议的关系词「导致」：采纳', 's2建议加的概念「作业太多」：采纳', 's3建议的连线「包含」：不采纳', 's4建议的分组「源头」：采纳'].every((t) => sub2.text.includes('- ' + t)), sub2 && sub2.text.slice(-600));
 T.ok('消息里说明采纳的已变成实线、不采纳的已变淡', /修改建议的决定：图里标 s1、s2、s3、s4 的虚线是你在概念图上建议加的东西/.test(sub2.text) && /采纳的在平板上已变成实线/.test(sub2.text) && /不采纳的已变淡/.test(sub2.text), sub2.text.slice(-400));
-M = await mapItems();
+// 服务那边一收到这次投递，上面 waitSub 就回来了；页面要等「交上去」的回话到了才把这四条标成带出去了——等它一下再看
+// （2026-11-18：整套一起跑时这一条偶尔抢在回话前面看，单独跑也碰到过一次）
+for (let k = 0; k < 25; k++) { M = await mapItems(); if (kinds.every((x) => M[x].sent)) break; await sleep(200); }
 T.ok('带出去以后：四条都不能再点，纸上写着已采纳 / 不采纳', kinds.every((k) => M[k].sent && M[k].marks === '' && / sent/.test(M[k].cls)) && M.node.stat === '已采纳' && M.label.stat === '已采纳' && M.group.stat === '已采纳' && M.link.stat === '不采纳', kinds.map((k) => [k, M[k].sent, M[k].marks, M[k].stat]));
 T.ok('带出去以后同意的还是实线，不同意的还是虚线', M.node.dash === 'none' && M.label.dash === 'none' && M.group.dash === 'none' && M.link.dash !== 'none', kinds.map((k) => M[k].dash));
 

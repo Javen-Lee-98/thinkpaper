@@ -304,6 +304,11 @@ def ai_box(it, struck="skip"):
     在给 Claude 的图、缩略图里只有那个点（struck="faded" 的往来稿照旧写字）；别的是字（lay）、整块（hit）、图（fig）、
     示意图里的字（labels）和线（paths）的并。什么都没有返回 None。"""
     at = badge_at(it)
+    op = open_of(it)
+    if op:  # 摊在纸上的长回答（2026-11-17）：那一段字连同连过去的细线；圈号不画
+        out = [op["x"], op["y"], op["x"] + op["w"], op["y"] + op["h"]]
+        lb = _path_box(op.get("lead")) if op.get("lead") else None
+        return union(out, lb) if lb else out
     if it.get("type") == "write":
         return [at[0] - BADGE_R, at[1] - BADGE_R, at[0] + BADGE_R, at[1] + BADGE_R] if at else None
     dot = dot_at(it)
@@ -434,6 +439,20 @@ def badge_at(it):
     return None
 
 
+OPEN_FS, OPEN_LH = 21, 29  # 摊在纸上的长回答：字号、行高（和平板 app.js 的 NOTE_FS、NOTE_LH 一样）
+
+
+def open_of(it):
+    """摊在纸上的长回答（2026-11-17，平板 app.js 的 isOpen）：write 上的 spread = {x, y, w, h, rows, lead?, …}，
+    rows 是 [{y（相对 spread.y）, h, w, t（一行字）| tex（公式的 LaTeX）}]。不是的（收着的、别的类型）返回 None。"""
+    p = it.get("spread") if isinstance(it, dict) and it.get("type") == "write" else None
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool) for k in ("x", "y", "w", "h")):
+        return None
+    rows = [r for r in p.get("rows") or [] if isinstance(r, dict) and isinstance(r.get("y"), (int, float))
+            and (isinstance(r.get("t"), str) or isinstance(r.get("tex"), str))]
+    return dict(p, rows=rows) if rows else None
+
+
 def answers_of(page):
     """这一页没擦掉的长回答，按圈号排：[{n, q, text}]（存回 PDF、往来稿、整本消息都用）。"""
     out = [a for a in page.get("ai") or [] if badge_at(a) and not a.get("erasedAt") and not a.get("dismissed")
@@ -450,8 +469,13 @@ MQ_COLOR = (0.85, 0.56, 0.52)     # 「红字：……」那一行：淡一些�
 
 
 def more_of(it):
-    """长回答下面接着回的各段（有字的）：[{id, t, req, q, text, on}]。"""
+    """长回答下面接着回的各段（有字的）：[{id, t, req, q, text, on, redo?}]。"""
     return [m for m in it.get("more") or [] if isinstance(m, dict) and str(m.get("text") or "").strip()]
+
+
+def redo_head(m):
+    """接着的一段是点「再短点」「展开讲」请 AI 重写的（redo，2026-11-17）：那一段前面写的一行（和平板卡片上的一样）；不是返回空串。"""
+    return {"brief": "按「再短点」重写：", "full": "按「展开讲」重写："}.get(m.get("redo") if isinstance(m, dict) else None, "")
 
 
 def marks_of(it):
@@ -482,6 +506,92 @@ def dot_items(page):
 def dot_notes(page):
     """这一页收成小蓝点的短批注的原话，按先后。整本消息里说明图里那几个点是什么。"""
     return [str(a.get("text")).strip() for a in dot_items(page)]
+
+
+# 红笔写在纸上的短批注上（2026-11-18 用户改的：《产品定义》第 2 节「红笔批过的短批注留在纸上」）：那条蓝字和红字都留在纸上，
+# 交上去时书写过程里那组红笔写明写在哪条批注上（prompt.red_label），AI 照别的红笔问题回在红字旁边。
+# 「写在上面」的判法和平板以前收成卡片时一样（app.js 原来的 noteFollowups）：那组红笔里这条批注到了之后写的笔，有一点压到批注的字
+# 四周放宽 NOTE_PAD 的那一块，就算冲着它；压到两条的归压得多的那条。字宽按写蓝字的字体量（和平板的 noteTextBox 差一点，放宽的一圈够了）
+NOTE_PAD = 10  # 和平板 app.js 的 NOTE_PAD 一样
+
+
+def note_text_box(it):
+    """短批注在纸上的字占的那一块（页面坐标）：每行按字体量宽，高从第一行字顶到最后一行字底（平板 app.js 的 noteTextBox）。"""
+    lay = it.get("lay") or {}
+    lines = [str(ln) for ln in lay.get("lines") or []]
+    fs, lh = float(lay.get("fs") or 21), float(lay.get("lh") or 28)
+    tw = max([fs] + [_font().text_length(ln, fontsize=fs) for ln in lines])
+    x, y = float(lay["x"]), float(lay["y"])
+    return [x, y + 2, x + tw, y + (max(1, len(lines)) - 1) * lh + fs * 1.2]
+
+
+def paper_notes(page):
+    """纸上看得见的、展开着的短批注（note、question）：有字、有排版、没擦掉、没横划掉、指着的字还在、没收成小蓝点。"""
+    live = live_ids(page)
+    out = []
+    for a in page.get("ai") or []:
+        lay = a.get("lay") if isinstance(a, dict) else None
+        if (isinstance(lay, dict) and a.get("type") in ("note", "question") and str(a.get("text") or "").strip() and lay.get("lines")
+                and all(isinstance(lay.get(k), (int, float)) for k in ("x", "y")) and not a.get("erasedAt") and not a.get("dismissed")
+                and not ai_gone(a, live) and not dot_at(a)):
+            out.append(a)
+    return out
+
+
+def _pts_in(s, b):
+    """一笔压到框 b 里的长度（沿笔画每 3 个单位数一点；平板 app.js 的 inkInBox）。"""
+    p = s.get("pts") or []
+    if not p:
+        return 0
+    inside = lambda x, y: b[0] <= x <= b[2] and b[1] <= y <= b[3]  # noqa: E731
+    if len(p) == 1:
+        return 1 if inside(p[0][0], p[0][1]) else 0
+    n = 0
+    for i in range(1, len(p)):
+        x0, y0, x1, y1 = p[i - 1][0], p[i - 1][1], p[i][0], p[i][1]
+        k = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / 3))
+        for j in range(0 if i == 1 else 1, k + 1):
+            if inside(x0 + (x1 - x0) * j / k, y0 + (y1 - y0) * j / k):
+                n += 1
+    return n
+
+
+NOTE_FIT_W = 510   # 那组红字连同批注的字一共宽过这么多（平板以前收成卡片时要缩到 0.8 以下：440 宽的卡片排 408，408 / 0.8）……
+NOTE_FIT_GROW = 240  # ……或比批注的字高出这么多：是从别处写过来、顺带压到批注的，不算冲着它（平板以前的 noteFits，2026-11-14 第二轮）
+
+
+def _ink_box(strokes):
+    """几笔的外框（点的外框四周加半个笔宽，和平板的 strokeBox 一样）。"""
+    xs = [p[0] for s in strokes for p in s.get("pts") or []]
+    ys = [p[1] for s in strokes for p in s.get("pts") or []]
+    h = max([float(s.get("w") or 2) / 2 for s in strokes] or [1])
+    return [min(xs) - h, min(ys) - h, max(xs) + h, max(ys) + h]
+
+
+def red_on_notes(page, groups):
+    """红笔那几组各写在哪条短批注上：{组号: 那条批注}。groups：[(组号, 那组的笔迹)]，只给要看的（红笔、还要回答的）。
+    一组压到两条的归压得多的那条；连同那条批注的字一共太宽、太高的（NOTE_FIT_W、NOTE_FIT_GROW）整组不算冲着它。"""
+    notes = paper_notes(page)
+    if not notes:
+        return {}
+    tbs = [note_text_box(a) for a in notes]
+    boxes = [[b[0] - NOTE_PAD, b[1] - NOTE_PAD, b[2] + NOTE_PAD, b[3] + NOTE_PAD] for b in tbs]
+    out = {}
+    for gid, strokes in groups:
+        best = None
+        for a, tb, b in zip(notes, tbs, boxes):
+            ss = [s for s in strokes if not s.get("erasedAt") and s.get("pts") and (s.get("t0") or 0) > (a.get("t") or 0)]
+            hit = sum(_pts_in(s, b) for s in ss)
+            if hit and (best is None or hit > best[0]):
+                best = (hit, a, tb, ss)
+        if not best:
+            continue
+        _, a, tb, ss = best
+        g = _ink_box(ss)
+        e = [min(tb[0], g[0]), min(tb[1], g[1]), max(tb[2], g[2]), max(tb[3], g[3])]
+        if e[2] - e[0] + 8 <= NOTE_FIT_W and e[3] - e[1] <= tb[3] - tb[1] + NOTE_FIT_GROW:
+            out[gid] = a
+    return out
 
 
 def unsent_on_page(page):
@@ -542,7 +652,8 @@ def _rough_sheet(it):
 
     block("a", ([("问：" + str(it["q"]), 18, "q")] if it.get("q") else []) + [(it.get("text") or "", 20, "")])
     for m in more_of(it):
-        block(str(m.get("id")), ([("红字：" + str(m["q"]), 18, "mq")] if m.get("q") else []) + [(m["text"], 20, "")])
+        head = redo_head(m)  # 点「再短点」「展开讲」请重写的那一段：写明按哪个钮重写（和平板卡片上一样占一行），不是「红字：」
+        block(str(m.get("id")), ([(head, 18, "q")] if head else [("红字：" + str(m["q"]), 18, "mq")] if m.get("q") else []) + [(m["text"], 20, "")])
     for k, o in enumerate(it.get("older") or []):
         if isinstance(o, dict) and str(o.get("text") or "").strip():
             block(f"o{k}", [(o["text"], 20, "old")])
@@ -647,8 +758,11 @@ def content_extent(page, base_h, blank=False):
             right = max(right, min(tw, b[2] + 30))
     live = live_ids(page)
     for it in page.get("ai") or []:
-        lay, at, dot = it.get("lay"), badge_at(it), dot_at(it)
-        if at and not it.get("erasedAt"):  # 长回答的圈号
+        lay, at, dot, op = it.get("lay"), badge_at(it), dot_at(it), open_of(it)
+        if op and not it.get("erasedAt") and not it.get("dismissed"):  # 摊在纸上的长回答（只在空白本子里有，这里是以防万一）
+            bottom = max(bottom, op["y"] + op["h"] + 40)
+            right = max(right, min(tw, op["x"] + op["w"] + 10))
+        elif at and not it.get("erasedAt"):  # 长回答的圈号
             bottom = max(bottom, at[1] + BADGE_R + 40)
             right = max(right, min(tw, at[0] + BADGE_R + 10))
         elif dot and not it.get("erasedAt") and not it.get("dismissed") and not ai_gone(it, live):  # 收成小蓝点的短批注：图里只有那个点
@@ -828,7 +942,9 @@ def _answer_pages(doc, answers, no, width):
             put(ln, ANSWER_FS, AI)
         for seg in more_of(a):  # 接在卡片下面的各段回应（回应卡片上的红字），前面写着它回应的那句红字；红字本身这里不画
             put("", ANSWER_FS, AI)
-            if seg.get("q"):
+            if redo_head(seg):  # 点「再短点」「展开讲」请重写的那一段（2026-11-17）
+                put(redo_head(seg), ANSWER_FS - 2, Q_COLOR)
+            elif seg.get("q"):
                 for ln in wrap_text("红字：" + str(seg["q"]), inner, ANSWER_FS - 2):
                     put(ln, ANSWER_FS - 2, MQ_COLOR)
             for ln in wrap_text(seg["text"], inner, ANSWER_FS):
@@ -842,6 +958,23 @@ def _answer_pages(doc, answers, no, width):
                 put("", ANSWER_FS - 2, Q_COLOR)
             for ln in wrap_text(o["text"], inner, ANSWER_FS - 2):
                 put(ln, ANSWER_FS - 2, Q_COLOR)
+
+
+def _draw_open(pg, sp, P, ox, oy, col, tx, op):
+    """画摊在纸上的一段长回答（open_of 的结果）：细线（lead），每一行字照平板上的位置写（基线在行顶 + 字号，和短批注一样），
+    公式那一行写它的 LaTeX 源码（小一号；PDF 里排不出 KaTeX 的样子，照实写出来，不编一个看着像的）。"""
+    if sp.get("lead"):
+        shape = pg.new_shape()
+        draw_svg_path(shape, str(sp["lead"]), (ox, oy))
+        shape.finish(color=col, width=1.3, lineCap=1, lineJoin=1, closePath=False, stroke_opacity=op)
+        shape.commit()
+    for r in sp["rows"]:
+        y = sp["y"] + _num(r.get("y"))
+        if isinstance(r.get("tex"), str):
+            h = _num(r.get("h"), OPEN_LH)
+            pg.insert_text(P(sp["x"], y + h / 2 + 6), r["tex"], fontsize=15, color=col, **NOTE_KW, **tx)
+        elif r.get("t"):
+            pg.insert_text(P(sp["x"], y + OPEN_FS), r["t"], fontsize=OPEN_FS * 0.9, color=col, **NOTE_KW, **tx)
 
 
 def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip", blank=False):
@@ -901,7 +1034,11 @@ def _draw_page(doc, page, base_h, bg=None, ai=True, struck="skip", blank=False):
         lay = it.get("lay")
         col = ADOPTED if it.get("adopted") else AI  # 采纳的深蓝
         at = badge_at(it)
-        if it.get("type") == "write":  # 长回答：纸上只有圈号（蓝圈加数字），不画回答文字；和平板一样，没看过的实心、看过的空心
+        sp = open_of(it)
+        if sp:  # 摊在纸上的长回答（2026-11-17）：和平板一样画那一段字（连到所答笔迹的细线照画）；公式画不出排好的样子，写它的 LaTeX 源码
+            _draw_open(pg, sp, P, ox, oy, col, tx, op)
+            continue
+        if it.get("type") == "write":  # 收着的长回答：纸上只有圈号（蓝圈加数字），不画回答文字；和平板一样，没看过的实心、看过的空心
             if at:
                 draw_badge(pg, P(*at), str(it.get("n") or ""), col, bool(it.get("seen")), op)
             continue

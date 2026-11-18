@@ -40,18 +40,18 @@ function blues(subId, crop, b) {
     im.onerror = () => res(null); im.src = 'data:image/jpeg;base64,${jpg}'; })`);
 }
 
-// 1. Claude 推送一页文档到平板；点提示上的「打开」，在文档上用红笔画一道，点「AI」
+// 1. 对话推送一页文档到平板（进它所在文件夹的推送本子）；点提示上的「打开」，在文档上用红笔画一道，点「AI」
 const shown = await T.post('/bridge/show', { sid: 'S1', path: DOC, title: '提纲' });
-T.ok('平板上提示 Claude 推送了一页', shown.ok === true && (await T.waitFor(`/推送了一页：提纲/.test(document.querySelector('#toast').textContent) && !document.querySelector('#toast').hidden`)), [shown, await toastText()]);
+T.ok('平板上提示对话推送了一页', shown.ok === true && (await T.waitFor(`/推送了一页：提纲/.test(document.querySelector('#toast').textContent) && !document.querySelector('#toast').hidden`)), [shown, await toastText()]);
 await T.tap('#toast button');
-T.ok('点「打开」：到了那一页文档上（有印刷的底图）', (await T.waitFor(`window.__ink.S.nb && window.__ink.S.nb.id === 'board' && window.__ink.S.page && window.__ink.S.bgImg`)), await T.evalJS(`window.__ink.S.nb && window.__ink.S.nb.id`));
+T.ok('点「打开」：到了那一页文档上（有印刷的底图）', (await T.waitFor(`window.__ink.S.nb && window.__ink.S.nb.id === ${JSON.stringify(shown.nb)} && window.__ink.S.page && window.__ink.S.bgImg`)), await T.evalJS(`window.__ink.S.nb && window.__ink.S.nb.id`));
 await sleep(800);
 await T.tap('#tools [data-tool=red]');
 await T.pen(T.line(150, 620, 300));
 await T.tap('#tools [data-tool=pen]');
 await T.tap('#check');
 const sub1 = await T.waitSub('S1'), meta1 = sub1 && T.metaOf(sub1);
-T.ok('交上去了：是推送的那一页，红笔那组算写在文档上', Boolean(meta1) && meta1.nb === 'board' && meta1.groups.length === 1 && meta1.groups[0].on === 'doc' && /提纲/.test(sub1.text), meta1 && meta1.groups);
+T.ok('交上去了：是推送的那一页，红笔那组算写在文档上', Boolean(meta1) && meta1.nb === shown.nb && meta1.groups.length === 1 && meta1.groups[0].on === 'doc' && /提纲/.test(sub1.text), meta1 && meta1.groups);
 
 // 2. Claude 对文档里的四处各提一条修改（用图里的像素框指），另写两条普通的页边批注
 const SUG = ['改为：II 第一天去海边', '改为：III 第二天爬山', '删去这句', '改为：V 小结'], BOX = [130, 200, 270, 340].map((y) => [80, y, 520, y + 35]);
@@ -168,7 +168,7 @@ S4 = await sug();
 T.ok('回报改成了：纸上那条写「已改」', res.ok === true && S4[0].stat === '已改' && S4[0].result.ok === true && S4[0].verdict === 'yes', S4[0]);
 T.ok('回报没改成：纸上写「没改成」和原因，决定清掉，✓ × 钮回来可以重新定', S4[2].stat === '没改成：原文件被占用' && S4[2].verdict === null && !S4[2].sent && S4[2].marks === '✓×', S4[2]);
 await T.saved();
-const disk = T.pageFile('board', 0).ai;
+const disk = T.pageFile(shown.nb.replace(':', '-'), 0).ai; // 推送本子的数据在 notebooks/board-<编号>/
 T.ok('存到电脑上的页面文件里有这些决定和回报', disk.filter((a) => a.type === 'suggest').length === 4 && disk.find((a) => a.text === SUG[0]).result.ok === true && disk.find((a) => a.text === SUG[1]).verdict === 'no'
   && disk.find((a) => a.text === SUG[1]).sent === true && disk.find((a) => a.text === SUG[2]).result.text === '原文件被占用' && disk.find((a) => a.text === '这个记号留着').adopted === true, disk.map((a) => [a.type, a.verdict, a.sent, a.result]));
 

@@ -16,6 +16,8 @@ export type InkpadStatus = {
   targetNb?: string
   /** 平板上开着的那本设成了「只在本地」：不显示它的名字，也不说它发往谁 */
   targetLocal?: boolean
+  /** 平板上开着的那本还没选过发往哪个对话、又连着不止一个对话：第一次点「AI」时在平板上选 */
+  targetUnset?: boolean
   /** 连着的对话数 */
   sessions?: number
   /** 用电脑名访问的固定地址（电脑名.local），IP 变了也能用 */

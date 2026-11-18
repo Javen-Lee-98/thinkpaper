@@ -1,4 +1,5 @@
 // 长回答卡片上的红字（2026-11-14 用户定，《产品定义》第 3 节「在卡片上用红笔批注、追问」）。查：
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 红笔落在卡片里：卡片不收、写在卡片上（跟着内容滑）、纸上不多笔迹，存盘后那条回答有 marks 和 sheet；
 // 黑笔落在卡片里：卡片收起、哪里都不多笔迹；笔落在卡片外：卡片收起、纸上照常多一笔；
 // 手指在卡片里上下滑、红字跟着走；笔刚用过时落下的手指（手掌）不滑；手掌先搭在纸上不收卡片，搭着时红笔照样在卡片上写、手掌再挪也不挪纸；
@@ -92,8 +93,8 @@ T.ok('（前提）交上去了：两句红笔', Boolean(meta1) && meta1.groups.l
 const LONG = ['先说结论：总价和重量成正比。', '第二句：和店家无关（只要单价一样）。', '$$y = k \\bar{x}$$', '']
   .concat(Array.from({ length: 24 }, (_, k) => `第 ${k + 3} 条理由：单价不变时，买得越多花得越多，称越准越好。`)).join('\n');
 await T.post('/bridge/reply', { sid: 'S1', submission: sub1.id, items: [
-  { type: 'write', anchor: 'g1', q: '为什么是线性的？', text: LONG },
-  { type: 'write', anchor: 'g2', q: '单位对吗？', text: '新的说法：单位是千克。' }] });
+  { type: 'write', fold: true, anchor: 'g1', q: '为什么是线性的？', text: LONG },
+  { type: 'write', fold: true, anchor: 'g2', q: '单位对吗？', text: '新的说法：单位是千克。' }] });
 T.ok('（前提）两条长回答落下：圈号 1、2', await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 2`, 10000));
 await sleep(400);
 const w1 = await answerN(1), w2 = await answerN(2);

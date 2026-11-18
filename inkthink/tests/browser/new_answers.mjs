@@ -1,4 +1,5 @@
 // 别的页有新回答的记号（2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」；细节暂定，用户之后在平板上试）。查：
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // Claude 回在不是眼前这一页的页上（交完翻走了）：页码旁出一个记号，全屏时在左上角本子名后面、退出全屏后在顶栏的 ‹ 页码 › 后面。
 // 样子（2026-11-16 夜用户试过后改）：只有一页有「● 第 2 页」，点了翻过去；几页都有「● 2 页有新回答 ▾」，点了在它下面出一张小单子，
 // 每页一行「第 2 页」，点一行翻过去、收起单子，点外面收起；看过的页从单子和数目里去掉（第 11 步）。
@@ -55,7 +56,7 @@ T.ok('原来那句提示照旧（「Claude 在别的页写了批注」）', (awa
 T.ok('当前页还是第 1 页，回答没落到第 1 页', (await S('S.idx')) === 0 && (await aiCount(0)) === 0);
 
 // ================= 2. 又回在第 3 页：「● 2 页有新回答 ▾」；回在眼前这一页（第 1 页）上的不出记号
-await reply(sub3, [{ type: 'write', anchor: 'g1', text: '第三页的长回答' }]);
+await reply(sub3, [{ type: 'write', fold: true, anchor: 'g1', text: '第三页的长回答' }]);
 T.ok('又回在第 3 页：记号写「2 页有新回答 ▾」，说明里列着 2、3 两页', await T.waitFor(`document.querySelector('#chipNew .na-no').textContent === '2 页有新回答'`, 8000)
   && (await mark()).text === '2 页有新回答▾' && (await mark()).label === 'Claude 在第 2、3 页有新回答，点一下列出来', await mark());
 const sub1 = await writeRedAndSend(300);
@@ -200,8 +201,10 @@ const rowFits = () => js(`(() => { const vis = (e) => getComputedStyle(e).displa
   const bar = document.querySelector('#bar'), bs = [...bar.querySelectorAll('button, #pageNo')].filter(vis), title = box(document.querySelector('#nbTitle')), prev = box(document.querySelector('#prev'));
   return { ids: bs.map((b) => b.id).join(), ok: bar.scrollWidth <= bar.clientWidth + 1 && bs.every((b) => { const r = box(b); return r.left >= 0 && r.right <= vw && r.width >= 36; })
     && bs.every((a, i) => bs.every((b, j) => i === j || !hit(box(a), box(b)))) && title.right <= prev.left + 0.5, na: Math.round(box(document.querySelector('#barNew')).width),
-    title: [Math.round(title.left), Math.round(title.right), Math.round(prev.left)] }; })()`);
-const FULL = 'nbChip,chipNew,chipPrev,chipNext,chipPair,chipAdd', BAR = 'drawerBtn,prev,pageNo,next,barNew,barSingle,barCont,barAdd,barCheck,menuBtn';
+    title: [Math.round(title.left), Math.round(title.right), Math.round(prev.left)], over: bar.scrollWidth - bar.clientWidth,
+    tight: document.querySelector('#barSize').classList.contains('tight') }; })()`);
+// 2026-11-17 起顶栏「AI」左边多了回答要多长的开关（barSize）：挤不下时它收成小格子（.tight），别的按钮不挤小
+const FULL = 'nbChip,chipNew,chipPrev,chipNext,chipPair,chipAdd', BAR = 'drawerBtn,prev,pageNo,next,barNew,barSingle,barCont,barAdd,barSize,barCheck,menuBtn';
 for (const lang of ['zh', 'en']) {
   for (const [w, h] of [[834, 1194], [744, 1133]]) {
     await T.cdp('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: true });

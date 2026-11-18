@@ -231,9 +231,9 @@ async function dragGrip(dx, dy) {
 const near = (a, b) => Math.abs(a[0] - b[0]) <= 2 && Math.abs(a[1] - b[1]) <= 2;
 const b0 = await barAt();
 T.ok('没拖过：那一条在右下角', b0[2] > 780 && b0[3] > 1140, b0);
-await dragGrip(-300, -500);
+await dragGrip(-200, -500); // 2026-11-17 起那一条多了回答要多长的开关、宽了：往左拖 200（拖 300 会顶到屏幕左边）
 const b1 = await barAt();
-T.ok('按住把手拖：那一条跟着走', near(b1, [b0[0] - 300, b0[1] - 500]), [b0, b1]);
+T.ok('按住把手拖：那一条跟着走', near(b1, [b0[0] - 200, b0[1] - 500]), [b0, b1]);
 await tap('#tools [data-tool="red"]');
 T.ok('拖过以后上面的按钮照样能点（换成红笔）', (await js(`window.__ink.S.tool`)) === 'red');
 await tap('#tools [data-tool="pen"]');
@@ -252,7 +252,7 @@ s = await st();
 T.ok('点「退出全屏」：顶栏和左侧工具栏回来', s.collapsed === false && (await T.visible('#bar')) && (await T.visible('#rail')) && !(await T.visible('#drawer')), s);
 T.ok('本子名和右下角那一条收起', !(await T.visible('#nbChip')) && !(await T.visible('#tools')));
 const barBtns = await shown('#bar button', 'b.id');
-T.ok('顶栏：抽屉、翻页、「单页」「连续」一对图标、加页图标、AI、更多', barBtns === 'drawerBtn,prev,next,barSingle,barCont,barAdd,barCheck,menuBtn', barBtns);
+T.ok('顶栏：抽屉、翻页、「单页」「连续」一对图标、加页图标、回答要多长（2026-11-17）、AI、更多', barBtns === 'drawerBtn,prev,next,barSingle,barCont,barAdd,barSize,barCheck,menuBtn', barBtns);
 ic = await icons('bar');
 T.ok('顶栏上的「单页」「连续」「加页」也是图标按钮：有图没有字，说明和左上角的一样，不小于 36×36，线条颜色不淡', allIcons(ic), ic);
 T.ok('顶栏上那一对：连续时「连续」图标选中，「单页」图标没选中', (await pairOf('bar')) === 'flow', await pairOf('bar'));
@@ -382,7 +382,7 @@ T.ok('删回一页：「单页 / 连续」那一对和 ‹ › 又不见了，�
 // 11d. 退出全屏：一页时顶栏上也没有「单页 / 连续」那一对，有加页图标；顶栏上的加页图标同样加一页、翻过去
 await tap('#toolsBars');
 let bb = await shown('#bar button', 'b.id');
-T.ok('退出全屏、只有一页：顶栏上没有「单页 / 连续」那一对，有加页图标', bb === 'drawerBtn,prev,next,barAdd,barCheck,menuBtn' && !(await T.visible('#barSingle'))
+T.ok('退出全屏、只有一页：顶栏上没有「单页 / 连续」那一对，有加页图标', bb === 'drawerBtn,prev,next,barAdd,barSize,barCheck,menuBtn' && !(await T.visible('#barSingle'))
   && !(await T.visible('#barCont')) && isIcon(await iconOf('#barAdd'), ADD, 'addv'), [bb, await iconOf('#barAdd')]);
 await T.tap('#barAdd', 300);
 const pb = (await at(1, 2)) && (await pg());
@@ -390,7 +390,7 @@ srv = await srvOf(made[0]);
 T.ok('点顶栏上的加页图标：变成两页，翻到第 2 页（竖版），页码写 2/2，电脑上也多了一页', Boolean(pb) && pb.idx === 1 && pb.no === '2/2' && pb.baseH === 1414
   && srv.pages === 2 && srv.pageInfo[1].blank && srv.sizes[1].h === 1414, [pb, srv.pages, srv.sizes]);
 bb = await shown('#bar button', 'b.id');
-T.ok('两页了：顶栏上的「单页 / 连续」那一对出来了（「连续」选中）', bb === 'drawerBtn,prev,next,barSingle,barCont,barAdd,barCheck,menuBtn' && (await pairOf('bar')) === 'flow',
+T.ok('两页了：顶栏上的「单页 / 连续」那一对出来了（「连续」选中）', bb === 'drawerBtn,prev,next,barSingle,barCont,barAdd,barSize,barCheck,menuBtn' && (await pairOf('bar')) === 'flow',
   [bb, await pairOf('bar')]);
 await tap('#fsBtn');
 await T.openNotebook('scratch', 0);

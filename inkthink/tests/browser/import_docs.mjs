@@ -127,7 +127,7 @@ const mdText = execFileSync(PY, ['-c', 'import pymupdf as fitz,sys; sys.stdout.b
 T.ok('Markdown 导入成一本书：排成了一页，有底图，提示「正在导入 …」', s5.id === 'book:对照.pdf' && s5.pages === 1 && s5.bg > 0 && !s5.sheet && t5[0][0] === '正在导入 对照.md…' && t5[0][1] === true, [s5, t5]);
 T.ok('排出来的 PDF 里是文件里的字；原件另留了一份', mdText.includes('MarkerXYZ') && mdText.includes('第 1 页') && existsSync(join(T.BOOKS, '_原件', '对照.md')), mdText.slice(0, 80));
 
-// 6. 导入图片：和从平板上传一样，自己成为一本（「Claude 推送」那本只放 Claude 推过来的）
+// 6. 导入图片：和从平板上传一样，自己成为一本（推送本子只放对话推过来的）
 await openPanel();
 await tapRow('figs');
 await T.waitFor(`document.querySelector('#isCrumbs').textContent === 'proj › figs'`);
@@ -139,7 +139,7 @@ const px6 = await js(`(() => { const v = window.__ink.S.view, d = devicePixelRat
 T.ok('图片导入成自己的一本，纸上画着这张（红色的）图，提示「正在导入 …」「已导入」', s6.id === 'book:chart.pdf' && s6.kind === 'book' && s6.pages === 1 && s6.bg > 0
   && s6.chip.trim() === 'chart' && px6[0] > 200 && px6[1] < 90 && px6[2] < 90 && t6[0][0] === '正在导入 chart.png…' && /^已导入《chart》/.test(t6[t6.length - 1][0]), [s6, px6, t6]);
 const nbs6 = (await T.apiJson('/api/notebooks')).map((n) => n.id);
-T.ok('没有放进「Claude 推送」：那本没出现，书多了这一本', same(await bookList(), ['例会汇报_v1', '对照', 'chart'].sort()) && !nbs6.includes('board')
+T.ok('没有放进推送本子：哪本推送本子都没出现，书多了这一本', same(await bookList(), ['例会汇报_v1', '对照', 'chart'].sort()) && !nbs6.some((id) => id.startsWith('board'))
   && !existsSync(join(T.DATA, 'notebooks', 'board', 'bg-0000.png')), [await bookList(), nbs6]);
 
 // 7. 「从平板上传…」：点了去选文件；选一个 PDF，传上来成一本书

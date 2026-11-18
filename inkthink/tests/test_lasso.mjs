@@ -1,6 +1,7 @@
 // static/lasso.js 的测试：node --test tests/test_lasso.mjs
 // 套索里的纯计算：点在不在圈里（按绕数，绕两圈、8 字都算里面）、哪几笔被圈中（一半以上的点在圈里；擦掉的不算）、
-// 挪一笔的点（只改 x、y，挪过去再挪回来分毫不差）、挪 SVG 路径、挪 Claude 的一条东西（每一种坐标字段）、哪几条跟着走、拖动夹在纸内。
+// 挪一笔的点（只改 x、y，挪过去再挪回来分毫不差）、挪 SVG 路径、挪 Claude 的一条东西（每一种坐标字段）、哪几条怎么跟着走、
+// 只挪箭头连线的一头（和照 app.js 的算法在新的两头上重画的一样）、撤销恢复时照原样放回的字段、拖动夹在纸内。
 // 画圈、拖动、撤销重做、跟着走的蓝字在页面上的样子，在浏览器测试 tests/browser/lasso.mjs 里。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -135,49 +136,165 @@ test('挪 Claude 的一条东西：每一种坐标字段都挪，共用一个数
   const f = { id: 'f1', type: 'figure', fig: { x: 48, y: 100, w: 600, h: 400 }, labels: [{ x: 300, y: 508, w: 80, text: '图注', fs: 20 }], hit: [40, 92, 656, 544] };
   L.shiftItem(f, 10, 20);
   assert.deepEqual([f.fig, f.labels[0]], [{ x: 58, y: 120, w: 600, h: 400 }, { x: 310, y: 528, w: 80, text: '图注', fs: 20 }]);
+  // 摊在纸上的长回答（2026-11-17）：spread 的 x、y 和细线 lead 都挪；每一行的相对位置、大小不动；圈号的位置 at 也挪
+  const sp = { id: 's', type: 'write', at: [500, 100], spread: { x: 400, y: 80, w: 200, h: 66, side: 'right', by: 'auto', rows: [{ y: 0, h: 29, w: 120, t: '一行' }], lead: 'M380 90 Q390 90 398 92' } };
+  const sp0 = clone(sp);
+  L.shiftItem(sp, 10, -5);
+  assert.deepEqual([sp.at, sp.spread.x, sp.spread.y, sp.spread.lead, sp.spread.rows, sp.spread.w], [[510, 95], 410, 75, 'M390 85 Q400 85 408 87', sp0.spread.rows, 200]);
+  L.shiftItem(sp, -10, 5);
+  assert.deepEqual(sp, sp0);
   // 不认识的、坏的字段：不动、不报错
-  const odd = { id: 'o', type: 'circle', box: [1, 2, 3], lay: { x: 'a', y: 1 }, at: [1], paths: [null, { cls: 'x' }] };
+  const odd ={ id: 'o', type: 'circle', box: [1, 2, 3], lay: { x: 'a', y: 1 }, at: [1], paths: [null, { cls: 'x' }] };
   const odd0 = clone(odd);
   L.shiftItem(odd, 5, 5);
   assert.deepEqual(odd, odd0);
 });
 
-test('坐标取下来、放回去：不是一位小数的坐标挪过去再放回原数，分毫不差；先后和挪的时候一样', () => {
-  const a = { id: 'a1', type: 'arrow', on: ['s1'], on2: ['s2'], box: [10.123456789, 20, 30, 40], hit: [1, 2, 3, 4],
-    lay: { x: 123.45678901234, y: 77.7777777, w: 50, h: 24, lines: ['推出'] }, paths: [{ d: 'M1.25 2 Q3 4 5 6', w: 2 }, { d: 'M7 8 L9 10' }] };
-  const a0 = clone(a), pre = L.coordsOf(a);
-  assert.deepEqual(pre, [10.123456789, 20, 30, 40, 1, 2, 3, 4, 123.45678901234, 77.7777777, 'M1.25 2 Q3 4 5 6', 'M7 8 L9 10']);
-  assert.deepEqual(a, a0); // 取的时候不改它
+test('带坐标的字段取下来、放回去：深拷贝；不是一位小数的坐标挪过去再放回原样，分毫不差；多出来、少了的字段也照原样', () => {
+  const a = { id: 'a1', type: 'arrow', on: ['s1'], on2: ['s2'], text: '推出', box: [10.123456789, 20, 30, 40], hit: [1, 2, 3, 4],
+    lay: { x: 123.45678901234, y: 77.7777777, w: 50, h: 24, lines: ['推出'] }, paths: [{ d: 'M1.25 2 Q3 4 5 6', w: 2 }, { d: 'M7 8 L9 10' }], sym: undefined };
+  const a0 = clone(a), pre = L.fieldsOf(a);
+  assert.deepEqual(Object.keys(pre), ['box', 'hit', 'lay', 'paths']); // 只取带坐标的字段（text、on 这些不取；值是 undefined 的当没有）
+  assert.deepEqual(pre, { box: a.box, hit: a.hit, lay: a.lay, paths: a.paths });
+  assert.notEqual(pre.lay, a.lay); // 是拷贝
+  assert.deepEqual(clone(a), a0);  // 取的时候不改它
   L.shiftItem(a, 137.6, -0.7);
-  const post = L.coordsOf(a);
+  const post = L.fieldsOf(a);
   L.shiftItem(a, -137.6, 0.7);
-  assert.notEqual(JSON.stringify(a), JSON.stringify(a0)); // 加了又减：最后一位差了（这就是要照原数放回去的原因）
-  L.putCoords(a, pre);
-  assert.deepEqual(a, a0);
-  L.putCoords(a, post);
-  assert.deepEqual(L.coordsOf(a), post);
+  assert.notEqual(JSON.stringify(a), JSON.stringify(a0)); // 加了又减：最后一位差了（这就是要照原样放回去的原因）
+  L.putFields(a, pre);
+  assert.deepEqual(clone(a), a0);
+  L.putFields(a, post);
+  assert.deepEqual(L.fieldsOf(a), post);
+  // 放回去的是拷贝：之后改它身上的，快照不跟着变
+  L.putFields(a, pre);
+  a.lay.x = 1;
+  assert.equal(pre.lay.x, 123.45678901234);
+  // 快照里没有的带坐标字段从它身上拿掉，有的加上；别的字段不动
+  const n = { id: 'n', type: 'note', text: '一句', box: [1, 2, 3, 4], lay: { x: 5, y: 6 }, paths: [{ d: 'M1 2 Q3 4 5 6', cls: 'leader' }] };
+  L.putFields(n, { box: [1, 2, 3, 4], lay: { x: 5, y: 9 }, paths: [], hit: [0, 0, 1, 1] });
+  assert.deepEqual(n, { id: 'n', type: 'note', text: '一句', box: [1, 2, 3, 4], lay: { x: 5, y: 9 }, paths: [], hit: [0, 0, 1, 1] });
+  L.putFields(n, { box: [1, 2, 3, 4] });
+  assert.deepEqual(n, { id: 'n', type: 'note', text: '一句', box: [1, 2, 3, 4] });
+  assert.deepEqual(L.FIELDS, ['box', 'vbox', 'hit', 'sym', 'labelOf', 'at', 'lay', 'fig', 'labels', 'paths', 'dot', 'popMap', 'fromMap', 'from', 'spread']); // spread：摊在纸上的长回答（2026-11-17）
 });
 
-test('哪几条跟着走：指着的、没擦掉的笔迹全在选中的里面才跟', () => {
+test('哪几条怎么跟着走：指着的、没擦掉的笔迹全在选中的里面才整条走；箭头、连线两头分开看', () => {
   const sel = new Set(['a', 'b']), live = new Set(['a', 'b', 'c']);
-  assert.equal(L.follows({ type: 'note', on: ['a'] }, sel, live), true);
-  assert.equal(L.follows({ type: 'note', on: ['a', 'b'] }, sel, live), true);
-  assert.equal(L.follows({ type: 'note', on: ['a', 'c'] }, sel, live), false);  // 还指着别的笔迹
-  assert.equal(L.follows({ type: 'note', on: ['a', 'gone'] }, sel, live), true); // 指着的另一笔擦掉了、不在了：只看还在的
-  assert.equal(L.follows({ type: 'note', on: ['gone'] }, sel, live), false);     // 指着的都没了（纸上本来就不画）
-  assert.equal(L.follows({ type: 'note' }, sel, live), false);                   // 没指着笔迹（box、页面末尾）
-  assert.equal(L.follows({ type: 'write', on: [] }, sel, live), false);
-  assert.equal(L.follows({ type: 'arrow', on: ['b'], on2: ['a'] }, sel, live), true);
-  assert.equal(L.follows({ type: 'arrow', on: ['c'], on2: ['a'] }, sel, live), false);
-  assert.equal(L.follows({ type: 'suggest', on: ['a'], onDoc: true }, sel, live), false); // 指着书页上的印刷文字
-  assert.equal(L.follows({ type: 'proposal', on: ['a'] }, sel, live), false);
+  const M = (a, f) => L.followMode(a, sel, live, f);
+  assert.equal(M({ type: 'note', on: ['a'] }), 'go');
+  assert.equal(M({ type: 'note', on: ['a', 'b'] }), 'go');
+  assert.equal(M({ type: 'note', on: ['a', 'c'] }), '');      // 还指着别的笔迹
+  assert.equal(M({ type: 'note', on: ['a', 'gone'] }), 'go'); // 指着的另一笔擦掉了、不在了：只看还在的
+  assert.equal(M({ type: 'note', on: ['gone'] }), '');        // 指着的都没了（纸上本来就不画）
+  assert.equal(M({ type: 'note' }), '');                      // 没指着笔迹（box、页面末尾）
+  assert.equal(M({ type: 'write', on: [] }), '');
+  assert.equal(M({ type: 'suggest', on: ['a'], onDoc: true }), ''); // 指着书页上的印刷文字
+  assert.equal(M({ type: 'proposal', on: ['a'] }), '');
+  // 箭头、连线：终点 on、起点 on2
+  assert.equal(M({ type: 'arrow', on: ['b'], on2: ['a'] }), 'go');        // 两头都选中：整条走
+  assert.equal(M({ type: 'arrow', on: ['c'], on2: ['a'] }), 'from');      // 只有起点那头选中
+  assert.equal(M({ type: 'arrow', on: ['a'], on2: ['c'] }), 'to');        // 只有终点那头选中
+  assert.equal(M({ type: 'link', on: ['b'], on2: ['c'] }), 'to');
+  assert.equal(M({ type: 'link', on: ['c'], on2: ['b'] }), 'from');
+  assert.equal(M({ type: 'arrow', on: ['a'] }), 'to');                    // 起点指着印刷文字（没记笔迹）：那头不动
+  assert.equal(M({ type: 'arrow', on2: ['a'] }), 'from');
+  assert.equal(M({ type: 'arrow', on: ['a', 'c'], on2: ['b'] }), 'from'); // 终点那组只选中了一部分：终点不动
+  assert.equal(M({ type: 'arrow', on: ['a', 'c'], on2: ['c'] }), '');
+  assert.equal(M({ type: 'arrow', on: ['c'], on2: ['c'] }), '');
+  assert.equal(M({ type: 'arrow' }), '');
+  assert.equal(M({ type: 'arrow', on: ['a', 'gone'], on2: ['c'] }), 'to'); // 擦掉了的不算
   // 概念图上建议的新概念：连线的那一头也要在选中的里面
   const node = { type: 'node', on: ['a'], paths: [{ d: 'M0 0 C1 1 2 2 3 3' }, { d: 'M10 10 Q20 20 30 40' }] };
-  assert.equal(L.follows(node, sel, live, (p) => p[0] === 30 && p[1] === 40), true);
-  assert.equal(L.follows(node, sel, live, () => false), false);
-  assert.equal(L.follows(node, sel, live), false);
-  assert.equal(L.follows({ type: 'node', on: ['a'], paths: [{ d: 'M0 0 C1 1 2 2 3 3' }] }, sel, live), true); // 没有连线
+  assert.equal(M(node, (p) => p[0] === 30 && p[1] === 40), 'go');
+  assert.equal(M(node, () => false), '');
+  assert.equal(M(node), '');
+  assert.equal(M({ type: 'node', on: ['a'], paths: [{ d: 'M0 0 C1 1 2 2 3 3' }] }), 'go'); // 没有连线
   assert.deepEqual(L.linkEnds(node), [[30, 40]]);
+});
+
+// 照 app.js 的 arrowPaths 造一条箭头（同一个算法，抄一份对着查；bow 的正负 sign 代替随机数）
+function arrowGeo(p1, p2, sign) {
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1], len = Math.hypot(dx, dy) || 1, nx = -dy / len, ny = dx / len, bow = len * 0.12 * sign;
+  const r = (v) => Math.round(v * 10) / 10;
+  const c = [(p1[0] + p2[0]) / 2 + nx * bow, (p1[1] + p2[1]) / 2 + ny * bow];
+  const ang = Math.atan2(p2[1] - c[1], p2[0] - c[0]), hl = 15;
+  const h1 = [p2[0] - hl * Math.cos(ang - 0.45), p2[1] - hl * Math.sin(ang - 0.45)], h2 = [p2[0] - hl * Math.cos(ang + 0.45), p2[1] - hl * Math.sin(ang + 0.45)];
+  const lx = (p1[0] + p2[0]) / 2 + nx * (bow / 2 + 14 * Math.sign(bow)), ly = (p1[1] + p2[1]) / 2 + ny * (bow / 2 + 14 * Math.sign(bow));
+  return { shaft: `M${r(p1[0])} ${r(p1[1])} Q${r(c[0])} ${r(c[1])} ${r(p2[0])} ${r(p2[1])}`, head: `M${r(h1[0])} ${r(h1[1])} L${r(p2[0])} ${r(p2[1])} L${r(h2[0])} ${r(h2[1])}`, lx, ly };
+}
+const ptsOf = (d) => (String(d).match(/-?\d*\.?\d+/g) || []).map(Number);
+const near = (u, v, e = 0.11) => Math.abs(u - v) <= e;
+const sameLine = (d, e, tol, msg) => { const u = ptsOf(d), v = ptsOf(e); assert.equal(u.length, v.length, msg); u.forEach((x, i) => assert.ok(near(x, v[i], tol), `${msg}：${d} 对 ${e}`)); };
+
+test('箭头只有一头跟着走：那一头挪过去，另一头一点不动；和照 arrowPaths 在新的两头上重画的一样；挪回来回到原样', () => {
+  const g = arrowGeo([100, 100], [300, 100], 1);
+  const a = { id: 'a', type: 'arrow', on: ['t'], on2: ['f'], text: '推出', box: [300, 80, 360, 120], paths: [{ d: g.shaft, w: 2 }, { d: g.head, w: 2 }],
+    hit: [90, 90, 310, 110], lay: { x: g.lx, y: g.ly - 18, w: 200, h: 24, lines: ['推出'], fs: 18, lh: 24 } };
+  const a0 = clone(a);
+  assert.equal(L.bendItem(a, 'to', 0, 200), true);
+  const s = L.shaftOf(a);
+  assert.deepEqual(s.p1, [100, 100]); // 起点不动
+  assert.deepEqual(s.p2, [300, 300]); // 终点挪了 (0, 200)
+  const g2 = arrowGeo([100, 100], [300, 300], 1);
+  sameLine(a.paths[0].d, g2.shaft, 0.11, '线身');
+  sameLine(a.paths[1].d, g2.head, 0.2, '箭头');
+  assert.ok(near(a.lay.x, g2.lx, 0.2) && near(a.lay.y, g2.ly - 18, 0.2), JSON.stringify([a.lay, g2.lx, g2.ly])); // 关系词跟着线的中段
+  assert.deepEqual(a.box, [300, 280, 360, 320]); // 箭头的 box 是终点那块：跟着终点走
+  assert.deepEqual(a.hit, [90, 90, 310, 310]);   // 首尾外面 10
+  assert.deepEqual([a.paths[0].w, a.paths[1].w, a.text, a.on, a.on2, a.lay.w, a.lay.lines], [2, 2, '推出', ['t'], ['f'], 200, ['推出']]);
+  // 挪回来：回到原样（数字差不过 0.1；箭头、关系词差不过 0.2）
+  L.bendItem(a, 'to', 0, -200);
+  sameLine(a.paths[0].d, a0.paths[0].d, 0.11, '挪回来的线身');
+  sameLine(a.paths[1].d, a0.paths[1].d, 0.2, '挪回来的箭头');
+  assert.ok(near(a.lay.x, a0.lay.x, 0.2) && near(a.lay.y, a0.lay.y, 0.2));
+  assert.deepEqual(a.box, a0.box);
+
+  // 起点那头跟着走：终点、终点那块不动；箭头跟着线的走向转
+  const b = clone(a0);
+  L.bendItem(b, 'from', -100, 50);
+  const t = L.shaftOf(b), g3 = arrowGeo([0, 150], [300, 100], 1);
+  assert.deepEqual([t.p1, t.p2], [[0, 150], [300, 100]]);
+  sameLine(b.paths[0].d, g3.shaft, 0.11, '起点挪了的线身');
+  sameLine(b.paths[1].d, g3.head, 0.2, '起点挪了的箭头');
+  assert.deepEqual(b.box, a0.box);
+  // 弯向另一边的照样弯向另一边；没有关系词、没有 box 的也行
+  const gn = arrowGeo([100, 100], [300, 100], -1), n = { type: 'arrow', paths: [{ d: gn.shaft }, { d: gn.head }], hit: [0, 0, 1, 1] };
+  L.bendItem(n, 'to', 0, 200);
+  sameLine(n.paths[0].d, arrowGeo([100, 100], [300, 300], -1).shaft, 0.11, '弯向另一边');
+  // 换成新的数组、对象：原来的那几个不变
+  const c = clone(a0), keep = { paths: c.paths, p0: c.paths[0], lay: c.lay, box: c.box, hit: c.hit };
+  L.bendItem(c, 'to', 10, 10);
+  assert.deepEqual([keep.paths, keep.p0, keep.lay, keep.box, keep.hit], [a0.paths, a0.paths[0], a0.lay, a0.box, a0.hit]);
+  // 认不出的线：不改，返回 false
+  const odd = { type: 'arrow', paths: [{ d: 'M1 2 C3 4 5 6 7 8' }], box: [1, 2, 3, 4] }, odd0 = clone(odd);
+  assert.equal(L.bendItem(odd, 'to', 5, 5), false);
+  assert.deepEqual(odd, odd0);
+  assert.equal(L.bendItem({ type: 'arrow' }, 'to', 5, 5), false);
+  assert.equal(L.bendItem(clone(a0), 'go', 5, 5), false);
+});
+
+test('概念图上建议的连线只有一头跟着走：关系词连同 ✓ × 钮围着的框按新线排；点、擦的范围连着关系词那块', () => {
+  const g = arrowGeo([100, 100], [300, 100], 1), w = 44, h = 30;
+  const spot = (geo, p1, p2) => { // 照 buildMap 排关系词：弯线中点外侧，按字的宽高再让开（抄一份对着查）
+    const mx = (p1[0] + p2[0]) / 2, my = (p1[1] + p2[1]) / 2, Lh = Math.hypot(geo.lx - mx, geo.ly - my), u = [(geo.lx - mx) / Lh, (geo.ly - my) / Lh];
+    const k = -14 + 8 + Math.abs(u[0]) * w / 2 + Math.abs(u[1]) * h / 2;
+    return [geo.lx + u[0] * k, geo.ly + u[1] * k];
+  };
+  const c0 = spot(g, [100, 100], [300, 100]), lay = { x: c0[0] - w / 2, y: c0[1] - h / 2, w, h, lines: ['导致'], fs: 20, lh: 26 };
+  const v = [lay.x - 6, lay.y - 4, lay.x + w + 6, lay.y + h + 4].map((x) => Math.round(x * 10) / 10);
+  const a = { id: 'k', type: 'link', on: ['t'], on2: ['f'], text: '导致', box: v, vbox: v, paths: [{ d: g.shaft, cls: 'dash', w: 2 }, { d: g.head, w: 2 }], lay,
+    hit: [Math.min(90, v[0]), Math.min(90, v[1]), Math.max(310, v[2]), Math.max(110, v[3])] };
+  L.bendItem(a, 'from', 0, -200);
+  const g2 = arrowGeo([100, -100], [300, 100], 1), c2 = spot(g2, [100, -100], [300, 100]);
+  sameLine(a.paths[0].d, g2.shaft, 0.11, '连线');
+  assert.equal(a.paths[0].cls, 'dash');
+  assert.ok(near(a.lay.x, c2[0] - w / 2, 0.2) && near(a.lay.y, c2[1] - h / 2, 0.2), JSON.stringify([a.lay, c2]));
+  const v2 = [a.lay.x - 6, a.lay.y - 4, a.lay.x + w + 6, a.lay.y + h + 4];
+  a.vbox.forEach((x, i) => assert.ok(near(x, v2[i], 0.2), JSON.stringify([a.vbox, v2])));
+  assert.deepEqual(a.box, a.vbox);
+  assert.notEqual(a.box, a.vbox); // 两个各是各的数组
+  assert.deepEqual(a.hit, [Math.min(90, a.vbox[0]), Math.min(-110, a.vbox[1]), Math.max(310, a.vbox[2]), Math.max(110, a.vbox[3])]);
 });
 
 test('拖动夹在纸内：到纸边为止；本来就出了纸边的那一边不再往外，也不拉回来', () => {

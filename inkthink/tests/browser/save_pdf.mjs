@@ -140,8 +140,11 @@ T.ok('原文件没被这次存回动过，也没多留底', readFileSync(PDF).eq
 await closeDrawer();
 await T.openNotebook('scratch', 0);
 await openDrawer();
-T.ok('草稿本那一行没有「存回 PDF」（连「⋯」都没有）', (await T.count('#nbList .nb-item.cur')) === 1 && (await T.count('#nbList .nb-item.cur .nb-more')) === 0
-  && !(await T.visible('#actSavePdf')), await T.count('#actSavePdf'));
+await T.tap('#nbList .nb-item.cur .nb-more', 300); // 草稿本的「⋯」（2026-11-18 起有，里面只有「复制这本…」）
+const scratchMenu = await T.evalJS(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act)`);
+T.ok('草稿本那一行的「⋯」里没有「存回 PDF」（只有「复制这本…」）', (await T.count('#nbList .nb-item.cur')) === 1 && JSON.stringify(scratchMenu) === '["copy"]'
+  && !(await T.visible('#actSavePdf')), [scratchMenu, await T.count('#actSavePdf')]);
+await T.tap('#nbList .nb-item.cur .nb-more', 300);
 await closeDrawer();
 const img = await T.post('/bridge/import', { sid: 'S1', path: PNG });
 await T.openNotebook(img.id, 0);
@@ -149,7 +152,7 @@ await openDrawer();
 await T.tap('#nbList .nb-item.cur .nb-more', 300);
 const imgMenu = await T.evalJS(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act)`);
 T.ok('从图片导入的本子那一行的「⋯」菜单里也没有「存回 PDF」', img.ok && (await T.evalJS(`window.__ink.S.nb.id`)) === img.id && (await T.count('#nbList .nb-item.cur')) === 1
-  && !(await T.visible('#actSavePdf')) && JSON.stringify(imgMenu) === '["folder","rename","delete"]', [img, imgMenu]);
+  && !(await T.visible('#actSavePdf')) && JSON.stringify(imgMenu) === '["folder","up","down","rename","copy","delete"]', [img, imgMenu]);
 const refuse = await T.api('/api/book/save-pdf', { method: 'POST', body: JSON.stringify({ nb: img.id }) });
 const why = (await refuse.json()).error || '';
 T.ok('直接请求存回会被拒，说明没有可以存回的原文件', refuse.status === 400 && /不是从电脑上的 PDF 导入的/.test(why), [refuse.status, why]);

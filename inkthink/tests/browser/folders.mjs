@@ -1,7 +1,8 @@
 // 抽屉里的本子分文件夹（《产品定义》第 2 节，2026-11-14 用户定）：只有一层；底下「＋ 新建文件夹…」；每本右边的「⋯」菜单里有「放进文件夹…」
 // （2026-11-16 起原来那个文件夹图标收进了「⋯」），点开的小列表能放进哪个文件夹、移出文件夹（在文件夹里时才有）、新建文件夹…；文件夹一行点一下折叠 / 展开，写着里面几本，
 // 折叠状态记在这台设备上（刷新后还记得）；文件夹能改名、能删（删前问一句，里面的本子回到外面，本子本身不动）；
-// 草稿本和「Claude 推送」没有「⋯」（不进文件夹）；当前打开的本子在折叠着的文件夹里时那个文件夹自动展开；新建的本子在文件夹外面；
+// 草稿本没有「⋯」（不进文件夹）；推送本子（2026-11-17 起「推送 · 文件夹名」）和别的本子一样排在里面、有「⋯」；
+// 当前打开的本子在折叠着的文件夹里时那个文件夹自动展开；新建的本子在文件夹外面；
 // 电脑上的 notebooks/folders.json 记的和抽屉里看到的一样；删掉一本、文件里有已经不在的本子，文件夹照常显示。
 // 截图存在 <临时目录>/folders/out/ 下。
 // 跑法：node tests/browser/folders.mjs [临时目录]；有一项不对退出码 1。
@@ -13,7 +14,7 @@ import { boot, PY } from '../browser_lib.mjs';
 const T = await boot({ name: 'folders', open: false });
 const js = T.evalJS, SRC = join(T.ROOT, 'src'), FILE = join(T.DATA, 'notebooks', 'folders.json');
 mkdirSync(SRC, { recursive: true });
-// 准备：三个自己建的本子、一本导入的书、Claude 推过来的一页（「Claude 推送」那本）
+// 准备：三个自己建的本子、一本导入的书、对话推过来的一页（进它所在文件夹的推送本子「推送 · idea」）
 const mk = async (title) => (await T.apiJson('/api/notebook/new', { method: 'POST', body: JSON.stringify({ title }) })).id;
 const P1 = await mk('随笔'), P2 = await mk('想法'), P3 = await mk('读书笔记');
 execFileSync(PY, ['-c', `import pymupdf as fitz,sys
@@ -21,7 +22,7 @@ doc=fitz.open(); p=doc.new_page(width=960,height=540); p.insert_text((60,120),"s
 pix=fitz.Pixmap(fitz.csRGB, fitz.IRect(0,0,200,120), 0); pix.set_rect(pix.irect,(200,220,255)); pix.save(sys.argv[2])`, join(SRC, '例会_v47.pdf'), join(SRC, 'fig.png')]);
 await T.post('/bridge/import', { sid: 'S1', path: join(SRC, '例会_v47.pdf') });
 await T.post('/bridge/show', { sid: 'S1', path: join(SRC, 'fig.png'), title: '图' });
-const BOOK = 'book:例会_v47.pdf';
+const BOOK = 'book:例会_v47.pdf', PUSH = '推送 · idea';
 await T.go();
 
 // ---- 小工具
@@ -73,15 +74,15 @@ async function sameAsFile() {
   return { ok, ui, file };
 }
 
-// 1. 打开抽屉：草稿本、Claude 推送在最上面，没有「⋯」；自己的本子和书有，「⋯」菜单里第一项是「放进文件夹…」
+// 1. 打开抽屉：草稿本在最上面（2026-11-18 起它也有「⋯」，里面只有「复制这本…」）；自己的本子、推送本子和书有，「⋯」菜单里第一项是「放进文件夹…」
 await drawer(true);
 let L = await list();
-T.ok('还没有文件夹：草稿本、Claude 推送在最上面，下面是自己的本子和书', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '随笔', '想法', '读书笔记', '例会_v47']), short(L));
-T.ok('草稿本和「Claude 推送」没有「⋯」，别的本子都有', L.filter((r) => r.nb === 'scratch' || r.nb === 'board').every((r) => !r.more)
-  && L.filter((r) => r.nb !== 'scratch' && r.nb !== 'board').every((r) => r.more), L);
+T.ok('还没有文件夹：草稿本在最上面，下面是自己的本子、推送本子（排在里面，不钉在上面）和书', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '随笔', '想法', '读书笔记', PUSH, '例会_v47']), short(L));
+T.ok('每一本都有「⋯」（草稿本、推送本子也有）', L.filter((r) => r.nb).every((r) => r.more) && L.some((r) => r.nb.startsWith('board:') && r.more), L);
 await tap(rowSel(P1) + ' .nb-more', 300);
 const menu1 = await js(`[...document.querySelectorAll('#nbMenu button')].map((b) => b.dataset.act + ':' + b.textContent)`);
-T.ok('「⋯」点开的菜单：放进文件夹…、改名…、删除这本…', JSON.stringify(menu1) === JSON.stringify(['folder:放进文件夹…', 'rename:改名…', 'delete:删除这本…']), menu1);
+T.ok('「⋯」点开的菜单：放进文件夹…、上移、下移（2026-11-18）、改名…、复制这本…（2026-11-18）、删除这本…',
+  JSON.stringify(menu1) === JSON.stringify(['folder:放进文件夹…', 'up:上移', 'down:下移', 'rename:改名…', 'copy:复制这本…', 'delete:删除这本…']), menu1);
 await tap(rowSel(P1) + ' .nb-more', 300); // 再点一下收起
 T.ok('抽屉底部「＋ 新建本子…」旁边是「＋ 新建文件夹…」（文字按钮）', (await T.text('#actNewFolder')) === '＋ 新建文件夹…'
   && (await js(`document.querySelector('#actNewFolder').parentElement === document.querySelector('#actNewNb').parentElement`)));
@@ -99,7 +100,7 @@ T.ok('点「＋ 新建文件夹…」：弹出起名字的卡片，名字空着�
 await typeName('课题');
 const F1 = fidOf('课题');
 L = await list();
-T.ok('建好了：抽屉里多了「课题」文件夹（空的、开着），电脑上记下了', Boolean(F1) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 0 本 开]', '随笔', '想法', '读书笔记', '例会_v47'])
+T.ok('建好了：抽屉里多了「课题」文件夹（空的、开着），电脑上记下了', Boolean(F1) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 0 本 开]', '随笔', '想法', '读书笔记', PUSH, '例会_v47'])
   && (await T.visible('#drawer')), short(L));
 
 // 3. 「随笔」的「⋯」→「放进文件夹…」：小列表里有「课题」、没有「移出文件夹」、有「新建文件夹…」；点「课题」放进去
@@ -112,7 +113,7 @@ T.ok('点「放进文件夹…」：紧挨着「⋯」弹出小列表——「�
 T.ok('小列表紧挨着「⋯」、整个在屏幕里、在抽屉上面', near.gap >= 0 && near.gap <= 8 && near.inScreen && near.aboveDrawer, near);
 await tap('#folderPickList [data-fid]');
 L = await list();
-T.ok('放进去了：「随笔」缩进列在「课题」下面，「课题」写着 1 本；小列表收起，抽屉还开着', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 1 本 开]', '· 随笔', '想法', '读书笔记', '例会_v47'])
+T.ok('放进去了：「随笔」缩进列在「课题」下面，「课题」写着 1 本；小列表收起，抽屉还开着', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 1 本 开]', '· 随笔', '想法', '读书笔记', PUSH, '例会_v47'])
   && !(await T.visible('#folderPick')) && (await T.visible('#drawer')), short(L));
 T.ok('电脑上记的：课题里是随笔', JSON.stringify(saved().folders.map((f) => [f.name, f.items])) === JSON.stringify([['课题', [P1]]]), saved());
 
@@ -122,7 +123,7 @@ await tap('#fpNew', 500);
 await typeName('旧的');
 const F2 = fidOf('旧的');
 L = await list();
-T.ok('从小列表里新建文件夹「旧的」，「想法」直接放进去', Boolean(F2) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 1 本 开]', '· 随笔', '[旧的 1 本 开]', '· 想法', '读书笔记', '例会_v47']), short(L));
+T.ok('从小列表里新建文件夹「旧的」，「想法」直接放进去', Boolean(F2) && JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 1 本 开]', '· 随笔', '[旧的 1 本 开]', '· 想法', '读书笔记', PUSH, '例会_v47']), short(L));
 
 // 5. 在文件夹里的「随笔」：小列表里「课题」打 ✓，有「移出文件夹」；移出后回到外面
 await menuOf(P1, 'folder');
@@ -132,14 +133,14 @@ T.ok('在文件夹里的本子：小列表里它在的「课题」打 ✓，多�
 await T.shot('3-folder-pick.png');
 await tap('#fpOut');
 L = await list();
-T.ok('移出文件夹：「随笔」回到外面，「课题」变成 0 本', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 0 本 开]', '[旧的 1 本 开]', '· 想法', '随笔', '读书笔记', '例会_v47']), short(L));
+T.ok('移出文件夹：「随笔」回到外面，「课题」变成 0 本', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 0 本 开]', '[旧的 1 本 开]', '· 想法', '随笔', '读书笔记', PUSH, '例会_v47']), short(L));
 // 再把「随笔」和书放进「课题」（书换过来的：从小列表里点）
 for (const nb of [P1, BOOK]) {
   await menuOf(nb, 'folder');
   await tap(`#folderPickList [data-fid=${JSON.stringify(F1)}]`);
 }
 L = await list();
-T.ok('「随笔」和导入的书放进「课题」', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 2 本 开]', '· 随笔', '· 例会_v47', '[旧的 1 本 开]', '· 想法', '读书笔记']), short(L));
+T.ok('「随笔」和导入的书放进「课题」', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 2 本 开]', '· 随笔', '· 例会_v47', '[旧的 1 本 开]', '· 想法', '读书笔记', PUSH]), short(L));
 let same = await sameAsFile();
 T.ok('电脑上 folders.json 记的和抽屉里看到的一样', same.ok, same);
 await T.shot('1-folders-open.png');
@@ -147,17 +148,17 @@ await T.shot('1-folders-open.png');
 // 6. 点「课题」那一行：折叠，里面的本子不列出来、▸；再点展开；折叠状态刷新后还记得
 await tap(folderSel(F1));
 L = await list();
-T.ok('点文件夹那一行：折叠，里面的本子不列出来，写着 2 本，▸', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 2 本 折]', '[旧的 1 本 开]', '· 想法', '读书笔记'])
+T.ok('点文件夹那一行：折叠，里面的本子不列出来，写着 2 本，▸', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 2 本 折]', '[旧的 1 本 开]', '· 想法', '读书笔记', PUSH])
   && L.find((r) => r.f === '课题').mark.startsWith('▸'), short(L));
 await tap(folderSel(F2));
-T.ok('「旧的」也能折叠', JSON.stringify(short(await list())) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 2 本 折]', '[旧的 1 本 折]', '读书笔记']), short(await list()));
+T.ok('「旧的」也能折叠', JSON.stringify(short(await list())) === JSON.stringify(['草稿本', '[课题 2 本 折]', '[旧的 1 本 折]', '读书笔记', PUSH]), short(await list()));
 await T.shot('1-folders-folded.png');
 await tap(folderSel(F2));
 T.ok('再点一下展开，▾', (await list()).find((r) => r.f === '旧的').open && (await list()).find((r) => r.f === '旧的').mark.startsWith('▾'), short(await list()));
 await T.reload();
 await drawer(true);
 L = await list();
-T.ok('刷新后还记得：「课题」折着、「旧的」开着（记在这台设备上）', JSON.stringify(short(L)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题 2 本 折]', '[旧的 1 本 开]', '· 想法', '读书笔记']), short(L));
+T.ok('刷新后还记得：「课题」折着、「旧的」开着（记在这台设备上）', JSON.stringify(short(L)) === JSON.stringify(['草稿本', '[课题 2 本 折]', '[旧的 1 本 开]', '· 想法', '读书笔记', PUSH]), short(L));
 let afterHash = hashNb();
 T.ok('新建、放进、移出、折叠：没改过别的文件（pads.json、各本子的文件夹一个字节没变）', before === afterHash, [before, afterHash]);
 
@@ -211,7 +212,7 @@ await answer('confirm', true);
 await menuOf(BOOK, 'delete', 1500);
 await drawer(true);
 L = await list();
-T.ok('删掉文件夹里的书：「课题二」照常显示，写着 1 本，里面只剩「随笔」', JSON.stringify(short(L).slice(0, 4)) === JSON.stringify(['草稿本', 'Claude 推送', '[课题二 1 本 开]', '· 随笔']), short(L));
+T.ok('删掉文件夹里的书：「课题二」照常显示，写着 1 本，里面只剩「随笔」', JSON.stringify(short(L).slice(0, 3)) === JSON.stringify(['草稿本', '[课题二 1 本 开]', '· 随笔']), short(L));
 const raw = saved();
 raw.folders[0].items.push('pad:ghost', 'book:不在了.pdf');
 writeFileSync(FILE, JSON.stringify(raw), 'utf8');

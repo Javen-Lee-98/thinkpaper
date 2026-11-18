@@ -48,12 +48,23 @@ const pickItems = () => T.evalJS(`[...document.querySelectorAll('#targetPickList
 const nbRows = () => T.evalJS(`[...document.querySelectorAll('#nbList .nb-item')].map((r) => ({ name: r.querySelector('.nb-name').textContent,
   tag: (r.querySelector('.nb-local') || {}).textContent || '', lock: Boolean(r.querySelector('[data-icon=lock]')) }))`);
 
-// 1. 没绑过的本子：发往最近打字的对话；发一次就记下
+// 写一笔，点「AI」，弹出选对话的单子后选 sid，看发给了谁（没选过对话的本子、连着不止一个对话：第一次先问，2026-11-17 用户定）
+const pickTo = async (sid) => {
+  await write();
+  await T.tap('#check');
+  const up = await T.waitFor(`!document.querySelector('#targetPick').hidden`, 5000);
+  const before = await sentToNow();
+  if (up) await T.tap(`#targetPickList button[data-sid=${sid}]`);
+  return { up, before, to: await sentTo() };
+};
+
+// 1. 没选过对话的本子、连着三个对话：不替用户发给最近打字的那个；第一次点「AI」先问，选了才发，选的那个记下
 const start = await T.evalJS(`({ n: window.__ink.S.sessions.length, first: window.__ink.S.sessions[0].sid, bound: (window.__ink.S.nb.target || {}).sid || null })`);
 T.ok('三个对话都连着，最近打字的是 proj-b；草稿本还没绑过对话', start.n === 3 && start.first === 'S2' && start.bound === null && savedTarget('scratch') === null, start);
-T.ok('抽屉里「这本发往」写着 proj-b（还没绑过：默认会发往的那个）', (await targetRow()).includes('这本发往：proj-b'), await T.text('#actTarget'));
-const r1 = await checkTo();
-T.ok('第一次点「AI」发给 proj-b，这本从此记成发往 proj-b（电脑上也记了）', r1 === 'S2' && (await bound()) === 'S2' && savedTarget('scratch') === 'S2', [r1, savedTarget('scratch')]);
+T.ok('抽屉里「这本发往」写着「还没选（点「AI」时选）」', (await targetRow()) === '这本发往：还没选（点「AI」时选） ▾', await T.text('#actTarget'));
+const r1 = await pickTo('S2');
+T.ok('第一次点「AI」先弹单子（这时谁都没收到）；选了 proj-b 才发给它，这本从此记成发往 proj-b（电脑上也记了）', r1.up && r1.before === '' && r1.to === 'S2'
+  && (await bound()) === 'S2' && savedTarget('scratch') === 'S2', [r1, savedTarget('scratch')]);
 
 // 2. 别的对话变成最近打字的：这本不跟着跑
 await T.post('/bridge/active', { sid: 'S1' });
@@ -81,16 +92,16 @@ await drawer(false);
 const r3 = await checkTo();
 T.ok('换了之后点「AI」发给 proj-a', r3 === 'S1', r3);
 
-// 4. 每本记自己的：另一本第一次发给当时最近打字的 proj-b，草稿本还是 proj-a
+// 4. 每本记自己的：另一本还没选过，第一次点「AI」也先问；选了 proj-b 记在它自己名下，草稿本还是 proj-a
 await T.post('/bridge/active', { sid: 'S2' });
 const now2 = await recent('S2');
 const at = await openNb('读书笔记');
-T.ok('在抽屉里点「读书笔记」换到那一本；它没绑过，「这本发往」写着最近打字的 proj-b', now2 && at === pad.id && (await bound()) === null
-  && (await targetRow()).includes('这本发往：proj-b'), [at, await T.text('#actTarget')]);
+T.ok('在抽屉里点「读书笔记」换到那一本；它没选过对话，「这本发往」写着「还没选」', now2 && at === pad.id && (await bound()) === null
+  && (await targetRow()) === '这本发往：还没选（点「AI」时选） ▾', [at, await T.text('#actTarget')]);
 y = 120;
-const r4 = await checkTo();
-T.ok('读书笔记第一次点「AI」发给 proj-b，记在它自己名下；草稿本记的还是 proj-a', r4 === 'S2' && savedTarget(padDir) === 'S2' && savedTarget('scratch') === 'S1',
-  [r4, savedTarget(padDir), savedTarget('scratch')]);
+const r4 = await pickTo('S2');
+T.ok('读书笔记第一次点「AI」先问，选了 proj-b 才发给它，记在它自己名下；草稿本记的还是 proj-a', r4.up && r4.before === '' && r4.to === 'S2'
+  && savedTarget(padDir) === 'S2' && savedTarget('scratch') === 'S1', [r4, savedTarget(padDir), savedTarget('scratch')]);
 const back = await openNb('草稿本');
 T.ok('回到草稿本：「这本发往」还是 proj-a', back === 'scratch' && (await bound()) === 'S1' && (await targetRow()).includes('这本发往：proj-a'), [back, await T.text('#actTarget')]);
 y = 420;

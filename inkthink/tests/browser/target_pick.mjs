@@ -46,10 +46,11 @@ const sentTo = async () => { for (let i = 0; i < 40; i++) { const got = await se
 let y = 150;
 const write = async () => { await T.pen(T.line(120, y, 220)); y += 80; await T.sleep(400); };
 
-// 1. 抽屉里那一行：草稿本没绑过，写默认会发往的那个（最近打字的 A1）；同一个文件夹开着两个，名字后面带它最近打的那句话的开头
+// 1. 抽屉里那一行：草稿本没选过对话、连着不止一个对话——写「还没选」（2026-11-17 用户定：不替用户定发给最近打字的那个；
+//    第一次点「AI」先弹单子，见 target_first.mjs）
 await drawer(true);
 const row1 = await T.text('#actTarget');
-T.ok('新本子没绑过对话：那一行照旧写默认会发往的（最近打字的 A1），带那句话的开头、带上一级文件夹名', row1 === '这本发往：idea（work）『先看周末的第二条路线…』 ▾', row1);
+T.ok('新本子没选过对话、连着四个对话：那一行写「还没选（点「AI」时选）」', row1 === '这本发往：还没选（点「AI」时选） ▾', row1);
 
 // 2. 点开：按文件夹分组
 await T.tap('#actTarget');
@@ -63,10 +64,7 @@ T.ok('A1：第一行是最近在那个对话里打的那句话；下面小字写
 T.ok('A2：还没打过字的照写「还没打过字」（淡一点）；下面写什么时候开的（26 小时前开的）、没执行过 /ink 就不写', by.A2.l1 === '还没打过字' && by.A2.none
   && /^(昨天|\d+月\d+日) \d\d:\d\d 开的 · (刚刚|\d+ 分钟前)活跃$/.test(by.A2.l2) && by.A2.l2.startsWith(startText(START_A2)), by.A2);
 T.ok('插件没报什么时候开的（B、C）：不写这一段，不编', /^(刚刚|\d+ 分钟前)活跃$/.test(by.B.l2) && /^(刚刚|\d+ 分钟前)活跃$/.test(by.C.l2) && by.B.l1 === '论文第二节的图' && by.C.l1 === '还没打过字', [by.B, by.C]);
-T.ok('现在会发往的 A1 打 ✓、是选中的样子，别的没有', by.A1.check && by.A1.on && !['A2', 'B', 'C'].some((s) => by[s].check || by[s].on), L);
-const look = await js(`(() => { const on = getComputedStyle(document.querySelector('#targetPickList button.on')), off = getComputedStyle(document.querySelector('#targetPickList button[data-sid=A2]'));
-  return { onBg: on.backgroundColor, onShadow: on.boxShadow, offBg: off.backgroundColor, onW: on.fontWeight }; })()`);
-T.ok('选中的那一行是白底加粗边框（不整块涂色）', look.onBg === 'rgb(255, 255, 255)' && /1\.5px/.test(look.onShadow) && look.onBg !== look.offBg, look);
+T.ok('还没选过：没有哪一行打着 ✓、是选中的样子', !['A1', 'A2', 'B', 'C'].some((s) => by[s].check || by[s].on), L);
 const tail = L.slice(-2);
 T.ok('最下面隔开一项「不发给 Claude（只在本地）」', tail[0].cls === 'tp-sep' && tail[1].id === 'tpLocal' && tail[1].l1 === '不发给 Claude（只在本地）', tail);
 const fit = await js(`(() => { const p = document.querySelector('#targetPick').getBoundingClientRect(); return p.left >= 0 && p.right <= innerWidth && p.top >= 0 && p.bottom <= innerHeight; })()`);
@@ -92,7 +90,10 @@ T.ok('屏幕上方那句「已交给……」用同一套叫法', said3.includes
 await drawer(true);
 await T.tap('#actTarget');
 const L4 = await items();
-T.ok('再点开：✓ 跟着换到 A2', L4.find((r) => r.sid === 'A2').check && !L4.find((r) => r.sid === 'A1').check, L4.filter((r) => r.check));
+T.ok('再点开：选过的 A2 打 ✓、是选中的样子，别的没有', L4.find((r) => r.sid === 'A2').check && L4.find((r) => r.sid === 'A2').on && !L4.some((r) => r.sid !== 'A2' && (r.check || r.on)), L4.filter((r) => r.check));
+const look = await js(`(() => { const on = getComputedStyle(document.querySelector('#targetPickList button.on')), off = getComputedStyle(document.querySelector('#targetPickList button[data-sid=A1]'));
+  return { onBg: on.backgroundColor, onShadow: on.boxShadow, offBg: off.backgroundColor, onW: on.fontWeight }; })()`);
+T.ok('选中的那一行是白底加粗边框（不整块涂色）', look.onBg === 'rgb(255, 255, 255)' && /1\.5px/.test(look.onShadow) && look.onBg !== look.offBg, look);
 await T.tap('#targetPickList button[data-sid=B]', 800);
 T.ok('选 B（work\\paper 里只有它）：那一行只写文件夹名', (await T.text('#actTarget')) === '这本发往：paper ▾', await T.text('#actTarget'));
 await drawer(false);

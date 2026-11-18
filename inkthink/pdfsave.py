@@ -198,7 +198,8 @@ def marks_of(page, h0):
             if it.get("adopted"):
                 text = "（AI 提供、已采纳）" + text
             for m in pages.more_of(it):  # 接在卡片下面的各段回应（回应卡片上的红字）；红字本身不写进 PDF
-                text += "\n\n" + (f"红字：{m['q']}\n" if m.get("q") else "") + str(m["text"]).strip()
+                head = pages.redo_head(m)  # 点「再短点」「展开讲」请重写的那一段（2026-11-17）：写明按哪个钮重写，不写「红字：」
+                text += "\n\n" + (f"{head}\n" if head else f"红字：{m['q']}\n" if m.get("q") else "") + str(m["text"]).strip()
             older = [o["text"].strip() for o in it.get("older") or [] if isinstance(o, dict) and str(o.get("text") or "").strip()]
             if older:
                 text += "\n\n之前的版本：\n" + "\n\n".join(older)

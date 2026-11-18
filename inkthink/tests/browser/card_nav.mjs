@@ -1,4 +1,5 @@
 // 卡片里换上一条、下一条（2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」；细节暂定，用户之后在平板上试）。查：
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 卡片顶上两个按钮「‹ 上一条」「下一条 ›」（界面的字体，贴在卡片顶上，内容滑动时不动），按这一页圈号的顺序换到相邻那条回答的卡片，
 // 擦掉的回答跳过；小蓝点浮出的小卡片不出。2026-11-16 夜起能跨页（第 1、3、12 步）：到这一页的头、尾时翻到那个方向最近的有回答的页，
 // 按钮上写出去哪一页；整本的头、尾才变灰；整本只有一条时两个都不出；
@@ -53,9 +54,9 @@ const sub1 = await T.waitSub('S1'), meta1 = sub1 && T.metaOf(sub1);
 T.ok('（前提）交上去了：三句红笔、一行黑字', Boolean(meta1) && meta1.groups.length === 4, meta1 && meta1.groups);
 const LONG = ['第三条的回答，比较长。'].concat(Array.from({ length: 30 }, (_, k) => `第 ${k + 1} 行：这一条写得长，卡片里要滑着看。`)).join('\n');
 await T.post('/bridge/reply', { sid: 'S1', submission: sub1.id, items: [
-  { type: 'write', anchor: 'g1', q: '第一问', text: '第一条回答。' },
-  { type: 'write', anchor: 'g2', q: '第二问', text: '第二条回答。' },
-  { type: 'write', anchor: 'g3', q: '第三问', text: LONG },
+  { type: 'write', fold: true, anchor: 'g1', q: '第一问', text: '第一条回答。' },
+  { type: 'write', fold: true, anchor: 'g2', q: '第二问', text: '第二条回答。' },
+  { type: 'write', fold: true, anchor: 'g3', q: '第三问', text: LONG },
   { type: 'note', anchor: 'g4', text: '短批注' }] });
 T.ok('（前提）落下：三个圈号、一条短批注', await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 3 && window.__ink.S.page.ai.length === 4`, 10000));
 await sleep(500);
@@ -66,7 +67,7 @@ await T.pen(T.line(120, 300, 300));
 await T.tool('pen');
 await T.tap('#check');
 const sub2 = await T.waitSub('S1');
-await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', anchor: 'g1', q: '第二页的问', text: '第二页唯一的回答。' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', fold: true, anchor: 'g1', q: '第二页的问', text: '第二页唯一的回答。' }] });
 T.ok('（前提）第 2 页：一个圈号', await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 1`, 10000));
 await sleep(400);
 const p2 = (await answers())[0];
@@ -129,7 +130,7 @@ C = await card();
 T.ok('换回圈号 1：那一笔红字又画出来了', C.id === w1.id && C.marks === 1, C);
 
 // ================= 6. 笔刚用过（一秒内）用手指碰按钮：当手掌，不换；接触面大的触点（像手掌）碰按钮：不换
-await penAt([[C.l + 30, C.b - 20]], 100); // 红笔在卡片里点一下（笔刚用过）
+await penAt([[C.l + 30, C.navBottom + 40]], 100); // 红笔在卡片里（内容上；2026-11-17 起卡片最底下是一排钮）点一下（笔刚用过）
 const n6 = ((await answerN(1)).marks || []).length;
 await tapNav('next');
 T.ok('笔刚用过（一秒内）手指点「下一条」：当手掌，不换', (await card()).id === w1.id);
@@ -231,10 +232,10 @@ await T.openNotebook(X.id, 0);
 if (await S('S.flow')) { await js(`window.__ink.toggleFlow()`); await sleep(800); }
 const sendOn = async (i, ys) => { await T.openPage(i); await T.tool('red'); for (const y of ys) await T.pen(T.line(120, y, 300)); await T.tool('pen'); await T.tap('#check'); return T.waitSub('S1'); };
 const xs1 = await sendOn(0, [300]), xs3 = await sendOn(2, [400]), xs5 = await sendOn(4, [300, 1340]);
-await T.post('/bridge/reply', { sid: 'S1', submission: xs1.id, items: [{ type: 'write', anchor: 'g1', q: '一', text: '第 1 页的回答。' }] });
-await T.post('/bridge/reply', { sid: 'S1', submission: xs3.id, items: [{ type: 'write', anchor: 'g1', q: '三', text: '第 3 页的回答。' }] });
-await T.post('/bridge/reply', { sid: 'S1', submission: xs5.id, items: [{ type: 'write', anchor: 'g2', q: '五下', text: '第 5 页下面那条（圈号 1）。' },
-  { type: 'write', anchor: 'g1', q: '五上', text: '第 5 页上面那条（圈号 2）。' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: xs1.id, items: [{ type: 'write', fold: true, anchor: 'g1', q: '一', text: '第 1 页的回答。' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: xs3.id, items: [{ type: 'write', fold: true, anchor: 'g1', q: '三', text: '第 3 页的回答。' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: xs5.id, items: [{ type: 'write', fold: true, anchor: 'g2', q: '五下', text: '第 5 页下面那条（圈号 1）。' },
+  { type: 'write', fold: true, anchor: 'g1', q: '五上', text: '第 5 页上面那条（圈号 2）。' }] });
 T.ok('（前提）第 5 页落下两条', await T.waitFor(`window.__ink.S.idx === 4 && window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 2`, 10000));
 const x5 = await answers(), x51 = x5.find((a) => a.n === 1), x52 = x5.find((a) => a.n === 2);
 T.ok('（前提）第 5 页圈号 1 在纸的下面（y > 1300），圈号 2 在上面', Boolean(x51 && x52) && x51.at[1] > 1300 && x52.at[1] < 500, x5.map((a) => [a.n, a.at]));
@@ -265,7 +266,7 @@ await sleep(600);
 T.ok('接触面很大的触点（像手掌）碰「下一条（第 5 页）」：不翻页、卡片还开着', (await S('S.idx')) === 2 && Boolean(await card()) && (await card()).id === x3.id);
 C = await card();
 await T.tool('red');
-await penAt([[C.l + 30, C.b - 20]], 100); // 红笔在卡片里点一下（笔刚用过）
+await penAt([[C.l + 30, C.navBottom + 40]], 100); // 红笔在卡片里（内容上；2026-11-17 起卡片最底下是一排钮）点一下（笔刚用过）
 await tapNav('next');
 await sleep(400);
 T.ok('笔刚用过（一秒内）手指点「下一条（第 5 页）」：当手掌，不翻', (await S('S.idx')) === 2 && Boolean(await card()) && (await card()).id === x3.id);

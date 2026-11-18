@@ -1,4 +1,4 @@
-// Claude 推送页面到平板：推一张图片、一个文本文件、一份 PDF 的某一页 →「Claude 推送」本子里多出一页，
+// 对话推送页面到平板：推一张图片、一个文本文件、一份 PDF 的某一页 → 推它的对话所在文件夹的推送本子（「推送 · 文件夹名」，2026-11-17 起各文件夹一本）里多出一页，
 // 平板上有提示能点开；打开后底图是推的东西，可以在上面写字、点「AI」交回推它的那个对话。
 // 跑法：node tests/browser/push_show.mjs [临时目录]；有一项不对退出码 1。
 import { boot, PY } from '../browser_lib.mjs';
@@ -29,7 +29,7 @@ writeFileSync(txt, Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join('
 
 // ---- 这个测试自己用的小工具
 const show = (body) => T.post('/bridge/show', Object.assign({ sid: 'S1' }, body));
-const boardDir = join(T.DATA, 'notebooks', 'board');
+let NB = '', boardDir = ''; // 第一次推的时候服务回这一本的 id；数据在 notebooks/board-<编号>/
 const boardIndex = () => JSON.parse(readFileSync(join(boardDir, 'index.json'), 'utf8')).pages;
 const toastText = () => T.evalJS(`document.querySelector('#toast').hidden ? '' : document.querySelector('#toast').firstChild.textContent`);
 const where = () => T.evalJS(`({ nb: window.__ink.S.nb.id, idx: window.__ink.S.idx, pages: window.__ink.S.nb.pages,
@@ -40,7 +40,7 @@ const openFromToast = async (title, i) => {
   const seen = up && (await T.visible('#toast button'));
   const text = await toastText(), btn = await T.text('#toast button');
   if (seen) await T.tap('#toast button');
-  const opened = await T.waitFor(`window.__ink.S.nb.id === 'board' && window.__ink.S.idx === ${i} && window.__ink.S.page && window.__ink.S.bgImg`);
+  const opened = await T.waitFor(`window.__ink.S.nb.id === ${JSON.stringify(NB)} && window.__ink.S.idx === ${i} && window.__ink.S.page && window.__ink.S.bgImg`);
   await T.sleep(500);
   return { seen, text, btn, opened };
 };
@@ -68,14 +68,18 @@ const isWhite = (p) => p[0] > 235 && p[1] > 235 && p[2] > 235;
 
 // 1. 推一张图片（带标题）
 const r1 = await show({ path: png, title: '一周气温' });
-T.ok('推图片：服务说推成了，是推送本子的第 1 页，平板在线', r1.ok === true && r1.page === 0 && r1.title === '一周气温' && r1.tabletOnline === true, r1);
+T.ok('推图片：服务说推成了，进了推它的对话所在文件夹那本「推送 · proj-a」的第 1 页，平板在线', r1.ok === true && r1.page === 0 && r1.title === '一周气温'
+  && r1.tabletOnline === true && /^board:[0-9a-f]{8}$/.test(r1.nb || '') && r1.nbTitle === '推送 · proj-a', r1);
+NB = r1.nb;
+boardDir = join(T.DATA, 'notebooks', NB.replace(':', '-'));
 const f0 = join(boardDir, 'bg-0000.png');
 const idx1 = existsSync(f0) ? boardIndex() : [];
-T.ok('电脑上「Claude 推送」本子里多了一页，记着标题和原文件', existsSync(f0) && statSync(f0).size > 500 && idx1.length === 1 && idx1[0].title === '一周气温' && idx1[0].src === png, idx1);
+T.ok('电脑上这本推送本子里多了一页，记着标题、原文件和谁推的', existsSync(f0) && statSync(f0).size > 500 && idx1.length === 1 && idx1[0].title === '一周气温' && idx1[0].src === png
+  && idx1[0].by && idx1[0].by.sid === 'S1' && idx1[0].by.label === 'proj-a' && idx1[0].by.ai === 'Claude', idx1);
 const o1 = await openFromToast('一周气温', 0);
-T.ok('平板上出了提示「Claude 推送了一页：一周气温」，带「打开」', o1.seen && o1.text === 'Claude 推送了一页：一周气温' && o1.btn === '打开', o1);
+T.ok('平板上出了提示「「proj-a」里的对话推送了一页：一周气温」（不写 Claude），带「打开」', o1.seen && o1.text === '「proj-a」里的对话推送了一页：一周气温' && o1.btn === '打开', o1);
 const w1 = await where();
-T.ok('点「打开」到了「Claude 推送」本子的这一页', o1.opened && w1.nb === 'board' && w1.idx === 0 && w1.pages === 1 && w1.chip.startsWith('Claude 推送'), w1);
+T.ok('点「打开」到了这本推送本子的这一页', o1.opened && w1.nb === NB && w1.idx === 0 && w1.pages === 1 && w1.chip.startsWith('推送 · proj-a'), w1);
 const b1 = await bgCount(), px1 = [await onScreen(100, 100), await onScreen(700, 100)];
 T.ok('底图就是推的那张图：载入的是 800×600、左上角一块红', Boolean(b1) && b1.w === 800 && b1.h === 600 && b1.red > 30000 && b1.dark > 100, b1);
 T.ok('屏幕上画出来了：左上角那块是红的，右边是白的', isRed(px1[0]) && isWhite(px1[1]), px1);
@@ -96,20 +100,20 @@ const o3 = await openFromToast('doc.pdf 第 2 页', 2);
 const b3 = await bgCount(), px3 = [await onScreen(500, 200), await onScreen(500, 1100)];
 T.ok('底图是 PDF 的第 2 页（上半截绿，不是另两页的蓝）', o3.opened && Boolean(b3) && b3.green > 100000 && b3.blue === 0 && b3.dark > 100, b3);
 T.ok('屏幕上画出来了：上面是绿的，下面是白纸', isGreen(px3[0]) && isWhite(px3[1]), px3);
-const info = await T.apiJson('/api/notebook?nb=board');
+const info = await T.apiJson('/api/notebook?nb=' + encodeURIComponent(NB));
 T.ok('推送本子现在共 3 页，每页记着标题', info.pages === 3 && (info.titles || []).join('｜') === '一周气温｜notes.txt 第 2 页｜doc.pdf 第 2 页', info.titles);
 await T.tap('#nbChip');
 const drawer = await T.evalJS(`({ open: !document.querySelector('#drawer').hidden, thumbs: document.querySelectorAll('#thumbs .th').length,
   names: [...document.querySelectorAll('#nbList .nb-item')].map((r) => r.querySelector('.nb-name').textContent + (r.classList.contains('cur') ? '（当前）' : '')),
   target: document.querySelector('#actTarget').textContent })`);
-T.ok('抽屉里有「Claude 推送」这本（当前），3 页，发往推它的对话 proj-a', drawer.open && (await T.visible('#nbList .nb-item.cur')) && drawer.names.includes('Claude 推送（当前）')
-  && drawer.thumbs === 3 && drawer.target.includes('这本发往：proj-a'), drawer);
+T.ok('抽屉里有「推送 · proj-a」这本（当前），3 页，这一页发往推它的对话 proj-a', drawer.open && (await T.visible('#nbList .nb-item.cur')) && drawer.names.includes('推送 · proj-a（当前）')
+  && drawer.thumbs === 3 && drawer.target.includes('这一页发往：proj-a'), drawer);
 await T.tap('#nbChip');
 
 // 4. 在推送页上写字，点「AI」交回去
 await T.tap('#tools [data-tool=red]');
 await T.pen(T.line(120, 620, 300));
-const inked = (await T.strokes()) === 1 && (await T.saved()) && T.pageFile('board', 2);
+const inked = (await T.strokes()) === 1 && (await T.saved()) && T.pageFile(NB.replace(':', '-'), 2);
 T.ok('能在推送页上写字，自己存到电脑上', Boolean(inked) && inked.strokes.length === 1 && inked.strokes[0].c === 'r', inked);
 await T.tap('#check');
 const sub = await T.waitSub('S1');
@@ -117,7 +121,7 @@ T.ok('点「AI」：交给了推它的对话 proj-a，最近打字的 proj-b 没
 T.ok('消息里说明这一页是推送的，写着是哪一页', Boolean(sub) && sub.text.includes('这一页是你推送到平板的东西')
   && sub.text.includes('页面：你推送到平板的「doc.pdf 第 2 页」'), sub && sub.text);
 const meta = sub ? T.metaOf(sub) : {};
-T.ok('投递记着是推送本子的第 3 页，红笔那一组在里面', meta.nb === 'board' && meta.page === 2 && (meta.role || {}).page === 'board'
+T.ok('投递记着是推送本子的第 3 页，红笔那一组在里面', meta.nb === NB && meta.page === 2 && (meta.role || {}).page === 'board'
   && (meta.groups || []).length === 1 && meta.groups[0].red === true, { nb: meta.nb, page: meta.page, role: meta.role });
 const img = sub ? join(T.DATA, 'submissions', sub.id, 'crop.jpg') : '';
 const shot = sub && existsSync(img) ? await fileCount(img) : null;

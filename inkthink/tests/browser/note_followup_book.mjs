@@ -1,15 +1,9 @@
-// 纸上的短批注上写红字（2026-11-14，细节暂定）：书页上（导入的 PDF，批注排在页面右边一栏）、连续模式、英文界面。查：
-// 1. 指着印刷文字（box）的一条短批注上写红字，同一口气往左写出很长一笔（写到了正文上）：带上它卡片要缩到 0.8 以下，
-//    这一组整组不算——批注不变，那两笔照旧作为一组普通的红笔交上去（2026-11-14 第二轮暂定）。
-//    再写一组只往左写出一百多个单位的：点「AI」收成圈号，圈号在所指那块印刷文字的右边；卡片缩到 0.8–1 之间，
-//    红字一笔不少、都在卡片里，相对它压着的字的位置和纸上一样；投递里有这张卡片。
-// 2. Claude 用 write + card 回：英文界面里屏幕上方的提示、卡片里「红字：」那一行都是英文；卡片里没有中文（这一页的内容都是英文）。
-// 3. 连续模式下几页一起交：第 1 页另一条批注上写了红字，翻到第 2 页写字、点「AI」——第 1 页（手上缓存着的相邻页）那条也先变成卡片、
-//    存到电脑上，整本消息里有它；相邻页的缓存里是新的样子；翻回第 1 页圈号在、红点没了。
+// 在导入的 PDF 上追问右栏的短批注。太宽的一组按普通红笔交，靠近蓝字的一组写明所批的那句话。
+// 长回答在红字旁出自己的圈号；再查英文界面、连续模式的相邻页、存盘、撤销和橡皮。
 // 只在无头 Edge 里跑过；笔是 pointerType 为 pen 的鼠标事件，手指是 CDP 的触摸事件。
 // 跑法：node tests/run_browser.mjs <临时目录> --only note_followup_book；有一项不对退出码 1。
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { boot, sleep, PY } from '../browser_lib.mjs';
 
@@ -31,15 +25,7 @@ const noteOf = (text) => js(`(() => { const S = window.__ink.S, a = S.page.ai.fi
 const item = (id) => S(`(() => { const a = S.page.ai.find((o) => o.id === ${JSON.stringify(id)}); return a ? JSON.parse(JSON.stringify(a)) : null; })()`);
 const badge = (id) => js(`(() => { const g = [...document.querySelectorAll('#aiRoot .badge')].find((x) => !x.classList.contains('nbr-badge') && x.dataset.id === ${JSON.stringify(id)}); if (!g) return null;
   const r = g.querySelector('circle').getBoundingClientRect(); return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, dot: Boolean(g.querySelector('.bdot')), seen: g.classList.contains('seen') }; })()`);
-const card = () => js(`(() => { const c = document.querySelector('#answerCard'); if (c.hidden) return null; const r = c.getBoundingClientRect(), S = window.__ink.S, a = window.__ink.cardItem();
-  const R = (e) => { const b = e.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
-  const pg = document.querySelector('#acPage').getBoundingClientRect(), sz = document.querySelector('#acSizer').getBoundingClientRect();
-  return { id: S.card && S.card.id, l: r.left, t: r.top, r: r.right, b: r.bottom, k: S.card && S.card.k, u: a && a.fromMap ? a.fromMap.u : null, text: c.innerText,
-    page: { l: pg.left, t: pg.top, r: pg.right, b: pg.top + sz.height },
-    lines: [...document.querySelectorAll('#acBody .ac-note text')].map((t) => Object.assign(R(t), { s: t.textContent })),
-    marks: [...document.querySelectorAll('#acInk path:not(.live), #acInk circle:not(.live)')].map((p) => Object.assign(R(p), { id: p.dataset.id })),
-    segs: [...document.querySelectorAll('#acMore .ac-seg')].map((d) => ({ mq: (d.querySelector('.ac-mq') || {}).textContent || null, text: d.querySelector('.ac-mbody').textContent })) }; })()`);
-const openBadge = async (id) => { await waitPen(); const b = await badge(id); if (!b) return null; await T.fingerTapAt(b.cx, b.cy); return card(); };
+const openBadge = async (id) => { await waitPen(); const b = await badge(id); if (b) await T.fingerTapAt(b.cx, b.cy); };
 const closeCardByTap = async () => { await waitPen(); const [x, y] = await T.screenOf(500, 900); await T.fingerTapAt(x, y); };
 const strokeScreen = async (st) => { const xs = st.pts.map((p) => p[0]), ys = st.pts.map((p) => p[1]);
   const [l, t] = await T.screenOf(Math.min(...xs), Math.min(...ys)), [r, b] = await T.screenOf(Math.max(...xs), Math.max(...ys)); return { l, t, r, b }; };
@@ -84,7 +70,7 @@ T.ok('（前提）书页开出了右边一栏，两条批注都在栏里；指�
   && (await S('S.M')) > 0, nB && [nB.lay, nB.box]);
 
 // ================= 1. 拉得很远：指着印刷文字的那条上写红字，一笔压在第一行几个词下面，同一口气往左写出很长一笔（写到了正文上）。
-//    带上这一组，卡片要缩到一半左右才放得下（u < 0.8）：这一组整组不算冲着这条批注，批注不变，那两笔照旧是普通的红笔交上去
+//    这一组伸进正文太远，按普通问题交；两笔仍在同一组
 const L = nB.lay;
 await T.tool('red');
 await T.pen(hline(L.x + 4, L.y + L.fs + 5, 120));
@@ -97,14 +83,15 @@ const sub2a = await T.waitSub('S1', 80), meta2a = sub2a && T.metaOf(sub2a);
 T.ok('拉得很远：点「AI」后那条批注照旧在纸上（没变卡片），投递里没有卡片', Boolean(meta2a) && !meta2a.cards && (await item(nB.id)).type === 'note' && (await noteOf(NB)).lines.length === L.lines.length,
   [meta2a && meta2a.cards, (await item(nB.id)).type]);
 T.ok('那两笔还在纸上，作为一组普通的红笔交上去了（整组，没拆开）', (await S(`${JSON.stringify(far)}.every((id) => S.page.strokes.some((s) => s.id === id && !s.erasedAt))`))
-  && Boolean(meta2a) && meta2a.groups.some((g) => g.red && !g.answered && far.every((id) => g.ids.includes(id))), meta2a && meta2a.groups.map((g) => [g.id, g.red, g.ids]));
+  && Boolean(meta2a) && meta2a.groups.some((g) => g.red && !g.answered && !g.note_on && g.ids.length === far.length && far.every((id) => g.ids.includes(id))
+    && sub2a.text.split('\n').some((l) => l.startsWith(g.id + '｜') && l.includes('｜红笔（问题）'))), meta2a && meta2a.groups.map((g) => [g.id, g.red, g.ids]));
 const toasts1 = await js('window.__toasts.slice()');
 T.ok('英文界面：交上去的提示是英文', toasts1.some((t) => t.startsWith('Handed to')) && !toasts1.some((t) => CJK.test(t)), toasts1);
 
-// ================= 1b. 写出框一点（往左写出约一百多个单位）：带上这一组卡片缩到 0.8–1 之间，照常收成圈号 1 的卡片
+// ================= 1b. 写出框一点（往左写出约一百多个单位）：仍算对右栏这条蓝字的追问
 nB = await noteOf(NB);
 const sP = nB.s, line0P = nB.lines[0], twMax = Math.max(...nB.lines.map((l) => (l.r - l.l) / sP));
-const reach = Math.max(60, Math.round(440 - twMax)); // 让这一块约 470 宽：u ≈ 0.87
+const reach = Math.max(60, Math.round(440 - twMax)); // 蓝字和这组红字合起来约 470 宽，还在算作追问的范围内
 await T.tool('red');
 await T.pen(hline(L.x + 4, L.y + L.fs + L.lh + 5, 100)); // 压着第二行的下沿
 await T.pen(hline(L.x - 20, L.y + L.fs + L.lh + 18, -reach, 12)); // 同一口气往左写出框
@@ -114,37 +101,38 @@ await T.saved();
 const relP = await Promise.all(reds.map(async (st) => relTo(await strokeScreen(st), line0P, sP)));
 await js('(window.__toasts = [], 1)');
 await T.tap('#check');
-const sub2 = await T.waitSub('S1', 80), meta2 = sub2 && T.metaOf(sub2), c2 = meta2 && (meta2.cards || [])[0];
-let wB = await item(nB.id);
-T.ok('点「AI」：那条批注收成了圈号 1 的卡片，只带进这一组的两笔（上一轮拉得很远的那两笔交过了、还在纸上）', Boolean(wB) && wB.type === 'write' && wB.n === 1
-  && wB.marks.map((m) => m.id).join() === reds.map((s) => s.id).join() && !(await S(`S.page.strokes.some((s) => ${JSON.stringify(reds.map((s) => s.id))}.includes(s.id))`))
-  && (await S(`${JSON.stringify(far)}.every((id) => S.page.strokes.some((s) => s.id === id))`)), wB);
-T.ok('写出框一点：卡片缩到 0.8–1 之间（u < 0.95，确实缩了），换算后的红字都在卡片的固定宽度里', Boolean(wB) && wB.fromMap.u >= 0.8 && wB.fromMap.u < 0.95
-  && wB.marks.every((m) => m.pts.every((p) => p[0] >= 16 && p[0] <= 424 && p[1] >= 0)), wB && [wB.fromMap, twMax, reach]);
-const box = wB.from.box;
-T.ok('指着印刷文字：圈号在那块印刷文字的右边、那一行的高度', Boolean(wB) && wB.at[0] > box[2] + 10 && wB.at[0] < box[2] + 70 && Math.abs(wB.at[1] - (box[1] + box[3]) / 2) < 10, [wB.at, box]);
-T.ok('投递里有这张卡片（原来是短批注、两笔红字）', Boolean(c2) && c2.note === true && c2.n === 1 && c2.marks.length === 2 && existsSync(c2.img), meta2 && meta2.cards);
+const sub2 = await T.waitSub('S1', 80), meta2 = sub2 && T.metaOf(sub2);
+const ids = reds.map((s) => s.id), on = meta2?.groups.find((g) => g.ids.includes(ids[0]));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+T.ok('写出框一点的两笔同组；消息在这组写明它批的是哪条蓝字', on?.red && !on.answered && on.note_on === NB && same(on.ids, ids)
+  && sub2.text.split('\n').some((l) => l.startsWith(on.id + '｜') && l.includes('写在蓝字批注「' + NB.slice(0, 16) + '…」上')), on);
+const after = await noteOf(NB), active = await S(`S.page.strokes.filter((s) => !s.erasedAt)`);
+T.ok('蓝字仍在右栏原处，指向原来那行印刷文字，没有圈号或卡片图', after?.id === nB.id && same(after.box, nB.box)
+  && same(after.lay, L) && same(after.lines.map((l) => l.s), L.lines) && !(await badge(nB.id)) && !meta2.cards);
+T.ok('两组红字仍在纸上，写出框的一笔也完整保留', far.every((id) => active.some((s) => s.id === id))
+  && reds.every((st) => same(active.find((s) => s.id === st.id)?.pts, st.pts)));
+const relAfter = await Promise.all(reds.map(async (st) => relTo(await strokeScreen(st), after.lines[0], after.s)));
+T.ok('两笔红字相对右栏第一行的位置没变', relAfter.every((r, i) => near(r, relP[i], 2.5)), [relP, relAfter]);
+await waitPen();
+const first = after.lines[0];
+await T.fingerTapAt((first.l + first.r) / 2, (first.t + first.b) / 2);
+T.ok('书页右栏点短批注没有收成蓝点的入口', await js(`document.querySelector('#answerCard').hidden`));
 
-// ================= 2. 点开卡片：最上面是原来那几行；两笔红字都在卡片里，相对它压着的字和纸上一样（整体缩小了一点）
-let C = await openBadge(nB.id);
-T.ok('点开卡片：最上面是原来那几行（同样换行）', Boolean(C) && C.lines.map((l) => l.s).join('|') === L.lines.join('|'), C && C.lines.map((l) => l.s));
-const kU = C ? C.k * C.u : 1;
-const relC = C ? reds.map((st) => { const m = C.marks.find((x) => x.id === st.id); return m && relTo(m, C.lines[0], kU); }) : [];
-T.ok('两笔红字相对第一行字的位置和纸上一样（页面单位；缩小了，差不到 2.5）', relC.length === 2 && relC.every((r, i) => near(r, relP[i], 2.5)), [relP, relC]);
-console.error(`  （量到的偏差，页面单位：${relC.map((r, i) => (r ? Math.max(...r.map((v, j) => Math.abs(v - relP[i][j]))).toFixed(2) : '?')).join('、')}；k=${C && C.k.toFixed(3)}，u=${C && C.u}）`);
-T.ok('写出框的那一笔完整显示在卡片里（左右都没被裁掉）', Boolean(C) && C.marks.every((m) => m.l >= C.l + 1 && m.r <= C.r - 1 && m.t >= C.page.t && m.b <= C.page.b), C && [C.marks, C.l, C.r]);
-console.error('截图：' + await T.shot('6-book-card.png'));
-await closeCardByTap();
-
-// ================= 3. Claude 用 write + card 回：英文界面里提示和「红字：」那一行都是英文
+// 书页上的长回答有自己的圈号，打开后照英文界面显示。
 await js('(window.__toasts = [], 1)');
-await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', card: 1, q: 'Why a blanket?', text: 'The grass by the lake is often wet in the morning.' }] });
-T.ok('回应接在这张卡片下面', await T.waitFor(`(window.__ink.S.page.ai.find((a) => a.n === 1).more || []).length === 1`, 10000));
-await sleep(500);
+const answer = 'The grass by the lake is often wet in the morning.';
+await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', anchor: on.id, q: 'Why a blanket?', text: answer }] });
+T.ok('长回答落在书页上了', await landed(3));
+const reply = await S(`S.page.ai.find((a) => a.text === ${JSON.stringify(answer)})`);
+T.ok('长回答在红字旁出自己的圈号，原批注仍在右栏', reply?.type === 'write' && reply.id !== nB.id && Boolean(await badge(reply.id)) && !reply.from
+  && same(reply.on, ids) && reply.at[0] >= on.bbox[0] && reply.at[0] <= on.bbox[2] + 300
+  && Math.abs(reply.at[1] - on.bbox[3]) < 300 && (await noteOf(NB))?.id === nB.id, reply);
 const toasts3 = await js('window.__toasts.slice()');
 T.ok('屏幕上方的提示是英文（Claude replied with 1 answer）', toasts3.includes('Claude replied with 1 answer'), toasts3);
-C = await openBadge(nB.id);
-T.ok('卡片里接着的一段前面写着「Your red note: Why a blanket?」，整张卡片没有中文', Boolean(C && C.segs[0]) && C.segs[0].mq === 'Your red note: Why a blanket?' && !CJK.test(C.text), C && [C.segs, C.text]);
+await openBadge(reply.id);
+const cardText = await js(`document.querySelector('#answerCard').innerText`);
+T.ok('卡片里有英文问题和回答，整张卡片没有中文', cardText.includes('Why a blanket?') && cardText.includes('Q:') && cardText.replace(/\s+/g, ' ').includes(answer) && !CJK.test(cardText), cardText);
+console.error('截图：' + await T.shot('6-book-card.png'));
 await closeCardByTap();
 
 // ================= 4. 连续模式下几页一起交：第 1 页另一条批注上写红字，翻到第 2 页写字、点「AI」
@@ -162,33 +150,31 @@ await js('(window.__toasts = [], 1)');
 await T.tap('#check');
 const sub3 = await T.waitSub('S1', 80), meta3 = sub3 && T.metaOf(sub3);
 T.ok('几页一起交：两页都在', Boolean(meta3) && meta3.kind === 'scan' && Boolean(meta3.pages['1']) && Boolean(meta3.pages['2']), meta3 && Object.keys(meta3.pages || {}));
-T.ok('整本消息里第 1 页那条批注已经是圈号 2 的卡片（原来是短批注、带上 page=1）', Boolean(sub3) && sub3.text.includes('圈号 2 的卡片原来是你写在纸上的一条短批注') && sub3.text.includes('card 填 2（再带上 page=1）'),
-  sub3 && sub3.text.slice(0, 1200));
-const cachedA = await S(`(() => { const e = S.flowCache.get(0); const a = e && e.page.ai.find((o) => o.id === ${JSON.stringify(nA.id)}); return a ? { type: a.type, n: a.n, marks: (a.marks || []).map((m) => m.id) } : null; })()`);
-T.ok('相邻页的缓存里也是新的样子（圈号 2，红字在卡片上）', Boolean(cachedA) && cachedA.type === 'write' && cachedA.n === 2 && cachedA.marks.join() === mkA, cachedA);
+const gid = Object.keys(meta3?.pages?.['1']?.gx || {}).find((k) => meta3.pages['1'].gx[k].ids.includes(mkA));
+T.ok('整本消息标明第 1 页这组红字写在买牛奶的批注上', gid && sub3.text.split('\n').some((l) => l.includes(gid + '｜') && l.includes('写在蓝字批注「' + NA.slice(0, 16) + '…」上')));
+const cached = await S(`S.flowCache.get(0).page`);
 const disk = await T.apiJson(`/api/page?nb=${encodeURIComponent(imp.id)}&i=0`);
-const dA = disk.ai.find((a) => a.id === nA.id);
-T.ok('电脑上第 1 页存的也是新的样子；纸上没有那一笔了', Boolean(dA) && dA.type === 'write' && dA.from.type === 'note' && !disk.strokes.some((s) => s.id === mkA), dA);
+function stillOnPage(page) {
+  const a = page.ai.find((o) => o.id === nA.id);
+  return a?.type === 'note' && !a.dot && same(a.lay, nA.lay) && page.strokes.some((s) => s.id === mkA && !s.erasedAt);
+}
+T.ok('相邻页的缓存里，原处有蓝字，红笔仍是纸上的一笔', stillOnPage(cached));
+T.ok('电脑上第 1 页也存着同样的蓝字和红笔', stillOnPage(disk));
 const toasts4 = await js('window.__toasts.slice()');
 T.ok('英文界面：几页一起交的提示是英文', toasts4.length > 0 && !toasts4.some((t) => CJK.test(t)), toasts4);
 await T.openPage(0);
-T.ok('翻回第 1 页：圈号 2 在、圈在所指那句红笔的右边，红点没了（记下交过了）', await T.waitFor(`(() => { const a = window.__ink.S.page.ai.find((o) => o.n === 2); const g = a && document.querySelector('#aiRoot .badge[data-id="' + a.id + '"]');
-  return g && !g.querySelector('.bdot') && a.at[0] > 300 && a.at[0] < 370 && Math.abs(a.at[1] - 212) < 10 && a.marks.every((m) => m.req === ${JSON.stringify(sub3 && sub3.id)}); })()`, 8000), await item(nA.id));
+T.ok('翻回第 1 页，右栏批注仍指着原来的笔迹，红笔也在', (await noteOf(NA))?.lines.length === nA.lines.length
+  && same((await item(nA.id)).on, meta1.groups[0].ids) && stillOnPage(await S('S.page')));
 
-// ================= 5. 撤销、橡皮：这一页最近一步是写在那条批注上的那一笔（交的时候挪进了卡片）——撤销把它从卡片上撤掉（说一句）；
-//    橡皮碰到收成的圈号＝擦掉这一整条，撤销能找回
-await js('(window.__toasts = [], 1)');
+// 撤销纸上那笔红字，再擦右栏的批注。
 await T.tap('#toolsUndo');
-await sleep(300);
-T.ok('撤销：那一笔从卡片上撤掉了（卡片还在），屏幕上方说的是英文「Undid red ink on an answer card」', (await item(nA.id)).type === 'write' && (await item(nA.id)).marks.length === 0
-  && (await js('window.__toasts.slice()')).includes('Undid red ink on an answer card'), [(await item(nA.id)).marks, await js('window.__toasts.slice()')]);
-const atA = (await item(nA.id)).at;
+T.ok('撤销只撤掉写在蓝字上的那一笔，右栏的字还在', !(await S(`S.page.strokes.some((s) => s.id === ${JSON.stringify(mkA)} && !s.erasedAt)`))
+  && (await noteOf(NA))?.lines.length === nA.lines.length);
 await T.tool('eraser');
-await T.pen([[atA[0] - 2, atA[1]], [atA[0] + 2, atA[1] + 1]]);
-T.ok('橡皮碰到收成的圈号：这一整条擦掉了（圈号不画了）', Boolean((await item(nA.id)).erasedAt) && !(await badge(nA.id)));
+await T.pen(hline(nA.lay.x + 4, nA.lay.y + nA.lay.fs / 2, 15));
+T.ok('橡皮擦掉右栏的批注，字不再画出来', Boolean((await item(nA.id)).erasedAt) && !(await noteOf(NA)).lines.length);
 await T.tap('#toolsUndo');
-await sleep(300);
-T.ok('撤销：找回来了（圈号又在）', !(await item(nA.id)).erasedAt && Boolean(await badge(nA.id)));
+T.ok('撤销后，找回原处的几行蓝字', !(await item(nA.id)).erasedAt && same((await noteOf(NA)).lines.map((l) => l.s), nA.lay.lines));
 await T.tool('pen');
 
 T.ok('页面没有报错', !T.errors.length, T.errors);

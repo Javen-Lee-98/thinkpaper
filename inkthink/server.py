@@ -113,6 +113,7 @@ def clean_shapes(v):
 EDITABLE_EXT = {".md", ".txt", ".tex", ".doc", ".docx", ".rtf", ".odt", ".ppt", ".pptx", ".odp"}  # 原文件是这些的书：Claude 能改
 IMAGE_EXT = {".png", ".jpg", ".jpeg"}
 LINE_ANCHOR = re.compile(r"g\d+:\d+")  # 一组里的第几行
+SUB_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")  # 一次投递的编号（App.save_submission、new_sub_dir 起的）
 FIG_EXT = {".png", ".jpg", ".jpeg", ".svg"}  # figure 收的图
 FIG_NAME = re.compile(r"^[0-9a-f]{16}\.png$")
 # /static/ 后面只收普通的相对路径（字母、数字、_ . -，用 / 分段）。这个接口不需要访问码，所以先按字面检查、再碰文件系统：
@@ -364,12 +365,79 @@ class Conflict(Exception):
     """这一页在别的设备上改过了：旧版本不覆盖（返回 409）。"""
 
 
-class TargetGone(ValueError):
-    """这本绑定的对话不在了：先问发往哪个对话（返回 410）。"""
+class PageGone(Exception):
+    """平板按页的键存的那一页已经不在这本里了（页序里没有，删掉的页里也没有）：一个字都不写到别的页上，
+    那份另存到 data/conflicts/（返回 410，带 pageGone）。"""
 
-    def __init__(self, label):
-        super().__init__(f"这本原来发往「{label}」，那个对话现在不在了。选一个对话再发。")
+
+# 平板说的那一页已经删掉了（多半是在别的设备上删的）：交给 Claude、在它后面加页时都这样说
+PAGE_DELETED = "这一页已经从这本里删掉了（可能是在别的设备上删的），可以在抽屉的「显示已删的页」里还原"
+# 平板存的那一页是这本书更新以前的，新版里对不上了（那一页在新版里没了等，见 App.key_now）：没存进本子，另存了一份
+BOOK_PAGE_GONE = "这本在你写的时候更新成了新版，这一页在新版里没有了，刚写的没存进本子。你这边没存上的字另存在电脑上：data/conflicts/{}"
+
+
+class TargetGone(ValueError):
+    """这本绑定的对话不在了：先问发往哪个对话（返回 410）。pushed：是推送本子里推这一页的那个对话不在了（2026-11-17）；
+    pushed 为 False 而是推送页的，是这一页改发到的那个不在了。"""
+
+    def __init__(self, label, pushed=None):
+        if pushed is True:
+            text = f"推这一页的「{label}」对话现在不在了。选一个对话再发。"
+        elif pushed is False:
+            text = f"这一页改发到的「{label}」对话现在不在了。选一个对话再发。"
+        else:
+            text = f"这本原来发往「{label}」，那个对话现在不在了。选一个对话再发。"
+        super().__init__(text)
         self.label = label
+
+
+def real_dir(p):
+    """文件夹的完整写法（短文件名展开、相对路径补全），拿来比两个文件夹是不是包含关系；不在了、写法不对的原样返回。"""
+    try:
+        return str(Path(p).resolve()) if p else ""
+    except (OSError, ValueError):
+        return str(p)
+
+
+def write_whole(f, text):
+    """先写到旁边的临时文件、再整个换上：别的请求同时在读这个文件时，读到的要么是旧的一整份、要么是新的一整份，
+    不会读到写了一半的（空的）。直接 write_text 是先清空再写，平板恰好在这时取本子列表就会报「Expecting value」
+    （2026-11-17 浏览器测试里偶发，查出来的）。换的那一下碰上别的线程正开着这个文件读（Windows 不让换），等一等再试。"""
+    f = Path(f)
+    tmp = f.with_name(f"{f.name}.{uuid.uuid4().hex[:6]}.tmp")
+    try:
+        tmp.write_text(text, "utf-8")
+        for k in range(40):
+            try:
+                os.replace(tmp, f)
+                return
+            except PermissionError:
+                if k == 39:
+                    raise
+                time.sleep(0.005)
+    finally:  # 没换成（盘满、写到一半出错、一直换不上）：不留下临时文件；换成了的话它已经不在了
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def read_whole(f):
+    """读 write_whole 写的那种小文件：正好碰上它在换的那一下（Windows 上这时打不开，报 PermissionError），等一等再读。"""
+    for k in range(40):
+        try:
+            return Path(f).read_text("utf-8")
+        except PermissionError:
+            if k == 39:
+                raise
+            time.sleep(0.005)
+
+
+class TargetUnset(ValueError):
+    """这本还没选过发往哪个对话、又连着不止一个对话：先在平板上选（返回 410，带 pick；2026-11-17 用户定）。"""
+
+    def __init__(self):
+        super().__init__("这本还没选发往哪个对话：在抽屉里点「这本发往」选一个再发")
 
 
 class ClientGone(Exception):
@@ -469,9 +537,10 @@ class Bridge:
     def tablet_online(self):
         return time.time() - self.tablet_seen < TABLET_ALIVE_S
 
-    def hello(self, sid, label, cwd, started=None, hint="", ink=False):
+    def hello(self, sid, label, cwd, started=None, hint="", ink=False, ai=""):
         """插件登记（或重新登记）这个对话。started：对话开始的时刻（毫秒；插件从 $.session.usage() 取，拿不到就不给，
-        这里也不另编一个）；hint：插件连上时从对话记录里取的最后一句用户打的话；ink：这个对话里执行过 /ink。
+        这里也不另编一个）；hint：插件连上时从对话记录里取的最后一句用户打的话；ink：这个对话里执行过 /ink；
+        ai：这个对话是哪个 AI（2026-11-17，为以后接别的 AI 留的；写回纸上的蓝字记作者、推的页上记是谁推的时用，没报过的记 Claude，见 App.author_of）。
         没给的沿用上次登记时记下的。"""
         with self.cond:
             now = time.time()
@@ -481,7 +550,8 @@ class Bridge:
                                   "seen": now, "active": old.get("active", now),
                                   "started": int(started) if good_start else old.get("started"),
                                   "hint": hint[:40] if hint else old.get("hint"),
-                                  "ink": bool(ink) or bool(old.get("ink"))}
+                                  "ink": bool(ink) or bool(old.get("ink")),
+                                  "ai": ai[:40] if ai else old.get("ai") or ""}
             self.queues.setdefault(sid, [])
         self.emit("sessions")
 
@@ -564,7 +634,8 @@ class App:
     def __init__(self, args):
         self.data = Path(args.data).resolve() if args.data else ROOT / "data"
         self.books = Path(args.books).resolve() if args.books else ROOT / "books"
-        for d in (self.data / "notebooks" / "board", self.data / "submissions", self.data / "cache",
+        # 推送本子的目录推第一页时才建（2026-11-17 起按项目文件夹各一本；以前那本「Claude 推送」的 notebooks/board 也不再预先建）
+        for d in (self.data / "notebooks", self.data / "submissions", self.data / "cache",
                   self.data / "confirms", self.books):
             d.mkdir(parents=True, exist_ok=True)
         self.cfg = load_config(Path(args.config) if args.config else ROOT / "config.json")
@@ -579,6 +650,8 @@ class App:
         self.reads_seen = {}
         self.reads_lock = threading.Lock()
         self.folder_lock = threading.Lock()  # 抽屉里的文件夹（notebooks/folders.json）：读改写不让别的请求插进来
+        self.settings_lock = threading.Lock()  # 本子设置（settings.json）：读改写不让别的请求插进来（见 set_setting）
+        self.push_lock = threading.Lock()  # 推页面：找这个文件夹的推送本子、没有就新开一本、加页，一次只办一件（不各开一本）
         self._rounds = {}  # 投递编号 -> 已经记过的进展
         self.page_lock = threading.Lock()
         self.dev_seen = {}  # 设备 id -> (最近一次请求的时刻, IP)，只在内存里  # 存页面：比版本号和写文件之间不让别的请求插进来
@@ -740,14 +813,208 @@ class App:
             full = full[:2500] + "……"
         return full
 
-    # -- Claude 推送的页面（board）
+    # -- 推送的页（board）：对话用 ink_show 推到平板上的页。
+    #    2026-11-17 用户定：按项目文件夹各一本（《产品定义》第 2 节「本子、对话、AI 的关系」）。id 是「board:<8 位编号>」，
+    #    数据在 notebooks/board-<编号>/，登记在 notebooks/boards.json：[{id, dir（文件夹的完整写法、小写，比较用；对话没有文件夹是空的）,
+    #    cwd, label（文件夹名）, created}]。同一个文件夹再推还进同一本（改过名也是）；删掉的从登记里拿掉，再推新开一本。
+    #    以前那本公用的「Claude 推送」（id「board」，数据在 notebooks/board/）里已有的页留在原处，新的推送不再进它。
+    #    各本的 index.json 记着每页：title、file（底图）、h、src；2026-11-17 起推的页还有 by（谁推的：sid、label、cwd、ai）、
+    #    t（推的时刻）；用户改发到别的对话后另有 to（{sid, label, cwd}），by 不改（见 bind_page_target）。
+    #    两种都能改名（名字记在本子的 settings.json 的 title）、删除（挪开留着）、放进抽屉里的文件夹
 
-    def board_index(self):
-        f = self.data / "notebooks" / "board" / "index.json"
-        return json.loads(f.read_text("utf-8")) if f.exists() else {"pages": []}
+    BOARD_ID = re.compile(r"^[0-9a-f]{8}$")
 
-    def add_board_page(self, src, page_no=None, title=None):
-        """把一个文件变成平板上的一页：图片原样，PDF/SVG 等渲染成图，文本排成页。返回页码（0 起）。"""
+    def boards(self, strict=False):
+        """登记着的各个文件夹的推送本子（按建立的先后）。文件不在、坏了是空的。
+        strict：读了要接着改写登记的地方用——文件在却读不出来（一时打不开、坏了）就报错，不当成空的
+        （当成空的再写回去，登记着的别的推送本子就没了）。"""
+        f = self.data / "notebooks" / "boards.json"
+        try:
+            items = json.loads(read_whole(f)) if f.exists() else []
+        except (OSError, ValueError):
+            if strict:
+                raise ValueError("推送本子的登记一时读不出来，这次没动它；稍后再试")
+            return []
+        return [b for b in items if isinstance(b, dict) and isinstance(b.get("id"), str) and self.BOARD_ID.match(b["id"])] \
+            if isinstance(items, list) else []
+
+    def _save_boards(self, items):
+        f = self.data / "notebooks" / "boards.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        write_whole(f, json.dumps(items, ensure_ascii=False, indent=1))
+
+    def _board_dir(self, nb):
+        """推送本子的数据目录（不建）：以前那本是 notebooks/board，各文件夹的是 notebooks/board-<编号>。没有这本：KeyError。"""
+        if nb == "board":
+            return self.data / "notebooks" / "board"
+        if nb.startswith("board:") and any(b["id"] == nb[6:] for b in self.boards()):
+            return self.data / "notebooks" / ("board-" + nb[6:])
+        raise KeyError(f"没有这个本子：{nb}")
+
+    @staticmethod
+    def push_dir_key(cwd):
+        """推送本子按哪个文件夹认：完整写法（短文件名展开），不分大小写；对话没有文件夹是空串。"""
+        return real_dir(cwd).lower() if cwd else ""
+
+    def push_book_of(self, cwd):
+        """这个文件夹的推送本子 id；还没有（或删掉了）是 None。"""
+        d = self.push_dir_key(cwd)
+        return next(("board:" + b["id"] for b in self.boards() if b.get("dir", "") == d), None)
+
+    def new_push_book(self, sess):
+        """给推页面的对话所在的文件夹新开一本推送本子（登记下来），返回 id。"""
+        cwd = str(sess.get("cwd") or "")
+        with self.file_lock:
+            items = self.boards(strict=True)
+            bid = uuid.uuid4().hex[:8]
+            while any(b["id"] == bid for b in items):
+                bid = uuid.uuid4().hex[:8]
+            items.append({"id": bid, "dir": self.push_dir_key(cwd), "cwd": cwd, "label": str(sess.get("label") or ""),
+                          "created": datetime.now().isoformat(timespec="seconds")})
+            self._save_boards(items)
+        return "board:" + bid
+
+    def drop_push_book(self, nb):
+        """刚开的推送本子第一页就没推成（文件不在、转换失败……）：从登记里拿掉，连同它刚建的空目录。只在 bridge_show 里用。"""
+        d = self._board_dir(nb)
+        with self.file_lock:
+            self._save_boards([b for b in self.boards(strict=True) if b["id"] != nb[6:]])
+        shutil.rmtree(d, ignore_errors=True)
+
+    def push_folder_title(self, nb, items=None):
+        """推送本子是哪个文件夹的：文件夹名；别处有同名的文件夹也有推送本子时带上上一级文件夹名（和平板选对话单子的 folderTitle
+        同一套叫法）。对话没有文件夹的、以前那本「Claude 推送」是空串。"""
+        items = self.boards() if items is None else items
+        b = next((x for x in items if nb.startswith("board:") and x["id"] == nb[6:]), None)
+        if not b or not b.get("dir"):
+            return ""
+        label = b.get("label") or Path(b.get("cwd") or "").name or "对话"
+        clash = any(x is not b and x.get("dir") and x.get("dir") != b.get("dir") and (x.get("label") or "") == (b.get("label") or "")
+                    for x in items)
+        up = Path(b.get("cwd") or "").parent.name if clash else ""
+        return f"{label}（{up}）" if up else label
+
+    def board_title(self, nb, items=None):
+        """推送本子的名字：改过名的用改的；没改过的，以前那本叫「Claude 推送」，各文件夹的叫「推送 · 文件夹名」，没有文件夹的叫「推送」。"""
+        f = self._board_dir(nb) / "settings.json"
+        try:
+            t = json.loads(read_whole(f)).get("title") if f.exists() else None
+        except (OSError, ValueError, AttributeError):
+            t = None
+        if isinstance(t, str) and t.strip():
+            return t
+        if nb == "board":
+            return "Claude 推送"
+        folder = self.push_folder_title(nb, items)
+        return f"推送 · {folder}" if folder else "推送"
+
+    def board_index(self, nb="board"):
+        f = self._board_dir(nb) / "index.json"
+        return json.loads(read_whole(f)) if f.exists() else {"pages": []}
+
+    def push_entry(self, nb, key):
+        """推送本子里这一页（页的键；删掉的页也找）在 index.json 里的那一条；不是推送的页（插入的空白纸）、不是推送本子：None。"""
+        if self.kind_of(nb) != "board" or not key:
+            return None
+        lay = self.layout_of(nb)
+        e = next((x for x in lay.pages if x["key"] == key), None) or \
+            next((h["entry"] for h in lay.hidden if h["entry"]["key"] == key), None)
+        if not e or "board" not in e:
+            return None
+        pages_ = self.board_index(nb)["pages"]
+        return pages_[e["board"]] if 0 <= e["board"] < len(pages_) else None
+
+    @staticmethod
+    def _pusher(p):
+        by = p.get("by") if isinstance(p, dict) else None
+        return by if isinstance(by, dict) and by.get("sid") else None
+
+    def push_target(self, nb, key):
+        """推送本子里这一页该发往的对话 {sid, label, cwd, …}：改发过的是改发到的那个，没改发过是推它的那个（2026-11-17 用户定：
+        在哪一页上点「AI」就发回推这一页的对话）。不是推送的页、2026-11-17 以前推的没记是谁推的页：None（照整本的「这本发往」算）。"""
+        p = self.push_entry(nb, key)
+        by = self._pusher(p)
+        if not by:
+            return None
+        to = p.get("to")
+        return to if isinstance(to, dict) and to.get("sid") else by
+
+    def page_to_map(self, nb):
+        """推送本子里每张记了是谁推的页：{页的键: 改发到的对话（没改发过是 None）}，平板据此更新手上各页发往谁。"""
+        if self.kind_of(nb) != "board":
+            return {}
+        lay, pages_ = self.layout_of(nb), self.board_index(nb)["pages"]
+        out = {}
+        for e in list(lay.pages) + [h["entry"] for h in lay.hidden]:
+            p = pages_[e["board"]] if "board" in e and 0 <= e["board"] < len(pages_) else None
+            if self._pusher(p):
+                out[e["key"]] = p.get("to") if isinstance(p.get("to"), dict) else None
+        return out
+
+    def push_group_keys(self, nb, key):
+        """推送本子里和眼前这一页（key）发往同一个对话的那些页的键：几页一起交时只带上这些（2026-11-17；别的对话推的页是给
+        那个对话的，不跟着交给眼前这一页的对话）。记了是谁推的页按它发往的对话分（改发过的按改发到的）；插入的空白纸、
+        没记是谁推的旧页算一组（照整本的「这本发往」）。不是推送本子、眼前这一页不在页序里：None（不分）。"""
+        if self.kind_of(nb) != "board" or not key:
+            return None
+        lay, pages_ = self.layout_of(nb), self.board_index(nb)["pages"]
+
+        def dest(e):
+            p = pages_[e["board"]] if "board" in e and 0 <= e["board"] < len(pages_) else None
+            by = self._pusher(p)
+            if not by:
+                return None
+            to = p.get("to")
+            return (to if isinstance(to, dict) and to.get("sid") else by)["sid"]
+        here = next((e for e in lay.pages if e["key"] == key), None)
+        if here is None:
+            return None
+        want = dest(here)
+        return {e["key"] for e in lay.pages if dest(e) == want}
+
+    def bind_page_target(self, nb, key, sid):
+        """推送本子里，眼前这一页（页的键）所在的那一组改发到 sid 这个（连着的）对话。哪一组（2026-11-17 用户定）：
+        这一页现在发往的对话还在——同一个对话推的那些页（用户在抽屉里点「这本发往」主动换，或电脑上 /ink here）；
+        不在了——这一本里所有原本也该发给那个不在了的对话的页（点「AI」时先问的那种）。
+        每页另记一个「改发到」（to），「谁推的」（by）不改；改发到的就是推它的那个时去掉 to。
+        返回那个对话；它不在了、这一页不是记了谁推的推送页：None。"""
+        s = next((x for x in self.bridge.alive() if x["sid"] == sid), None)
+        if not s:
+            return None
+        alive = {x["sid"] for x in self.bridge.alive()}
+        t = {"sid": sid, "label": s["label"], "cwd": s["cwd"]}
+        with self.file_lock:
+            lay, idx = self.layout_of(nb), self.board_index(nb)
+            pages_ = idx["pages"]
+            here = None
+            for e in list(lay.pages) + [h["entry"] for h in lay.hidden]:
+                if e["key"] == key and "board" in e and 0 <= e["board"] < len(pages_):
+                    here = pages_[e["board"]]
+            by = self._pusher(here)
+            if not by:
+                return None
+            now = here.get("to") if isinstance(here.get("to"), dict) and here["to"].get("sid") else by
+            if now["sid"] in alive:  # 还在：同一个对话推的那些页
+                group = [p for p in pages_ if (self._pusher(p) or {}).get("sid") == by["sid"]]
+            else:  # 不在了：原本也该发给它的那些页
+                group = [p for p in pages_ if self._pusher(p) and
+                         ((p.get("to") if isinstance(p.get("to"), dict) and p["to"].get("sid") else p["by"])["sid"] == now["sid"])]
+            changed = False
+            for p in group:
+                if p["by"]["sid"] == sid:
+                    changed |= p.pop("to", None) is not None
+                elif (p.get("to") or {}).get("sid") != sid:
+                    p["to"] = dict(t)
+                    changed = True
+            if changed:
+                write_whole(self._board_dir(nb) / "index.json", json.dumps(idx, ensure_ascii=False, indent=1))
+        if changed:
+            self.bridge.emit("target", nb=nb, target=self.nb_target(nb), pageTo=self.page_to_map(nb))
+        return s
+
+    def add_board_page(self, src, page_no=None, title=None, nb="board", by=None):
+        """把一个文件变成推送本子 nb 里的一页：图片原样，PDF/SVG 等渲染成图，文本排成页。返回页码（0 起，index.json 里的第几条）。
+        by：谁推的 {sid, label, cwd, ai}（2026-11-17 起推的页都记，连同推的时刻）。"""
         src = Path(src)
         if not src.is_file():
             raise ValueError(f"找不到文件：{src}")
@@ -759,10 +1026,11 @@ class App:
             if not pdf.exists():
                 convert_to_pdf(src, pdf)
             label = title or (src.name if page_no in (None, 1) else f"{src.name} 第 {page_no} 页")
-            return self.add_board_page(pdf, page_no, label)
-        board = self.data / "notebooks" / "board"
+            return self.add_board_page(pdf, page_no, label, nb=nb, by=by)
+        board = self._board_dir(nb)
+        board.mkdir(parents=True, exist_ok=True)
         with self.file_lock, self.pdf_lock:
-            idx = self.board_index()
+            idx = self.board_index(nb)
             n = len(idx["pages"])
             name = f"bg-{n:04d}.png"
             if ext in IMAGE_EXT:
@@ -791,8 +1059,11 @@ class App:
             pix = fitz.Pixmap(str(board / name))
             h = round(PAGE_W * pix.height / pix.width, 1)
             label = title or (src.name if page_no in (None, 1) else f"{src.name} 第 {page_no} 页")
-            idx["pages"].append({"title": label, "file": name, "h": h, "src": str(src)})
-            (board / "index.json").write_text(json.dumps(idx, ensure_ascii=False, indent=1), "utf-8")
+            entry = {"title": label, "file": name, "h": h, "src": str(src)}
+            if by:
+                entry.update(by=dict(by), t=datetime.now().isoformat(timespec="seconds"))
+            idx["pages"].append(entry)
+            write_whole(board / "index.json", json.dumps(idx, ensure_ascii=False, indent=1))
         return n
 
     # -- 导入的文档记着原文件：原文件改了可以原地更新（笔迹保留），并和旧版对比
@@ -955,7 +1226,10 @@ class App:
         old_pdf = olddir / f"{Path(name).stem}.{stamp}.pdf"
         old_pdf.write_bytes(old_bytes)
         d = self._nb_dir(nb)
-        with self.file_lock:
+        # 也拿着存页那把锁（2026-11-17）：挪笔迹文件、换页的键、记新旧页对照这一整段做完以前，平板存页的等着；
+        # 等完再存，按 history.json 里这一次的 map 把更新以前的键换成新键（put_page）。两把锁的先后：file_lock 在外、
+        # page_lock 在里；没有哪里拿着 page_lock 再去拿 file_lock，不会互相等死
+        with self.file_lock, self.page_lock:
             # 先把旧页的笔迹文件挪到临时名，再按对齐表放回新页号，避免互相覆盖
             moved = {}
             for f in list(d.glob("page-*.json")):
@@ -979,7 +1253,7 @@ class App:
                 return out
             (d / "seen.json").write_text(json.dumps({"by": {sid: remap(v) for sid, v in self._seen_by(nb).items()}}), "utf-8")
             lay = self.layout_of(nb)  # 这时 dest 还是旧版，按旧版页数读
-            lay.remap_pdf(mapping, len(mapping))
+            lay.remap_pdf(mapping, len(mapping))  # 挪过页序的书保留用户排的先后，没挪过的跟原文件（2026-11-17）
             lay.save()
             os.replace(tmp, dest)
             self._docs = {k: v for k, v in self._docs.items() if k[0] != name}
@@ -991,7 +1265,9 @@ class App:
             (d / "changes.json").write_text(json.dumps(ch, ensure_ascii=False, indent=1), "utf-8")
             hist_f = d / "history.json"
             hist = json.loads(hist_f.read_text("utf-8")) if hist_f.exists() else []
-            hist.append({"t": ch["t"], "from": ch["from"], "to": to_title, "old_pdf": str(old_pdf), "src": str(src)})
+            # map：新版第 j 页是旧版第几页（没有对应的是 None）；平板拿着更新以前的页来存时按它换键（key_now）
+            hist.append({"t": ch["t"], "from": ch["from"], "to": to_title, "old_pdf": str(old_pdf), "src": str(src),
+                         "map": list(mapping)})
             hist_f.write_text(json.dumps(hist, ensure_ascii=False, indent=1), "utf-8")
             (d / "doc.json").write_text(json.dumps({"converter": CONVERTER, "hidden": hidden}), "utf-8")
         if rename:
@@ -1072,8 +1348,10 @@ class App:
                 self.save_offers(items)
 
     def rename_book(self, name, new_name):
-        """书改名：PDF、本子目录（笔迹、对比记录）、原文件记录一起改。返回新的本子 id。"""
-        with self.file_lock:
+        """书改名：PDF、本子目录（笔迹、对比记录）、原文件记录一起改。返回新的本子 id。
+        也拿着存页那把锁：挪目录的时候平板存页的等着，挪完按新名字存（put_page 里的 current_nb）。"""
+        seq = self.nb_seq()  # 改名之前抽屉里的先后：排过上下顺序的，文件夹那边先按它记下（folders_touch）
+        with self.file_lock, self.page_lock:
             old_dir = self._nb_dir("book:" + name)
             new_dir = self.data / "notebooks" / ("book-" + hashlib.sha1(new_name.encode()).hexdigest()[:12])
             if new_dir.exists():  # 以前用过这个名字的本子目录：挪开，不覆盖
@@ -1089,7 +1367,7 @@ class App:
         w = self.bridge.where
         if w and w.get("nb") == "book:" + name:
             w["nb"] = "book:" + new_name
-        self.folders_touch(lambda fs: folders.rename_member(fs, "book:" + name, "book:" + new_name))  # 在文件夹里的跟着走
+        self.folders_touch(lambda fs: folders.rename_member(fs, "book:" + name, "book:" + new_name), seq)  # 在文件夹里的、排过的顺序跟着走
         return "book:" + new_name
 
     def rename_notebook(self, nb, title):
@@ -1108,8 +1386,14 @@ class App:
                 hit["title"] = title[:40]
                 self._save_pads(items)
             return nb
+        if self.kind_of(nb) == "board":  # 推送本子（2026-11-17 起能改名）：名字记在它的 settings.json；同一个文件夹再推照样进这本
+            if nb not in self.board_ids():
+                raise KeyError(f"没有这个本子：{nb}")
+            with self.file_lock:
+                self.set_setting(nb, "title", title[:40])
+            return nb
         if not nb.startswith("book:"):
-            raise ValueError("草稿本和「Claude 推送」不能改名")
+            raise ValueError("草稿本不能改名")
         name = nb[5:]
         self.book_path(name)
         new = f"{title}.pdf"
@@ -1118,14 +1402,17 @@ class App:
         if new.lower() != name.lower() and (self.books / new).exists():
             raise ValueError(f"已经有一本叫《{title}》的了")
         new_nb = self.rename_book(name, new)
-        hist_f = self._nb_dir(new_nb) / "history.json"
-        hist = json.loads(hist_f.read_text("utf-8")) if hist_f.exists() else []
-        hist.append({"t": datetime.now().isoformat(timespec="seconds"), "from": Path(name).stem, "to": title, "renamed": True})
-        hist_f.write_text(json.dumps(hist, ensure_ascii=False, indent=1), "utf-8")
+        # 拿着两把锁写：存页、取页时按 history.json 算这本更新过几次（book_gen），别读到写了一半的
+        with self.file_lock, self.page_lock:
+            hist_f = self._nb_dir(new_nb) / "history.json"
+            hist = json.loads(hist_f.read_text("utf-8")) if hist_f.exists() else []
+            hist.append({"t": datetime.now().isoformat(timespec="seconds"), "from": Path(name).stem, "to": title, "renamed": True})
+            hist_f.write_text(json.dumps(hist, ensure_ascii=False, indent=1), "utf-8")
         return new_nb
 
     def delete_book(self, nb):
         """从本子列表里删掉一本：PDF 挪到 books/_已删除/，笔迹目录改名留着，都能找回。"""
+        seq = self.nb_seq()  # 删之前抽屉里的先后：排过上下顺序的，文件夹那边先按它记下，别的本子不跟着跳（folders_touch）
         if nb.startswith("pad:"):
             title = self.nb_title(nb)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1133,10 +1420,26 @@ class App:
                 d = self._nb_dir(nb)
                 os.replace(d, d.with_name(f"_deleted-{stamp}-{d.name}"))
                 self._save_pads([p for p in self.pads() if p["id"] != nb[4:]])
-            self.folders_touch(lambda fs: folders.forget(fs, nb))  # 文件夹里不再记它
+            self.folders_touch(lambda fs: folders.forget(fs, nb), seq)  # 文件夹里、排过的顺序里不再记它
+            return title
+        if self.kind_of(nb) == "board":
+            # 推送本子（2026-11-17 起能删）：和自己建的本子一样，目录改名挪开留着（能找回）；各文件夹的从登记里拿掉，
+            # 同一个文件夹再推时新开一本。以前那本「Claude 推送」的目录挪开后就没有页了，列表里不再有它
+            if nb not in self.board_ids():
+                raise KeyError(f"没有这个本子：{nb}")
+            title = self.nb_title(nb)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            with self.file_lock, self.page_lock:
+                d = self._board_dir(nb)
+                left = [b for b in self.boards(strict=True) if b["id"] != nb[6:]] if nb != "board" else None  # 先读登记：读不出来就什么都不动
+                if d.exists():
+                    os.replace(d, d.with_name(f"_deleted-{stamp}-{d.name}"))
+                if left is not None:
+                    self._save_boards(left)
+            self.folders_touch(lambda fs: folders.forget(fs, nb), seq)
             return title
         if not nb.startswith("book:"):
-            raise ValueError("草稿本和「Claude 推送」不能删")
+            raise ValueError("草稿本不能删")
         name = nb[5:]
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         with self.file_lock:
@@ -1149,28 +1452,44 @@ class App:
             if s.pop(name, None):
                 (self.books / "_sources.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), "utf-8")
             self._docs = {k: v for k, v in self._docs.items() if k[0] != name}
-        self.folders_touch(lambda fs: folders.forget(fs, nb))  # 文件夹里不再记它：以后再导入同名的书，是新的一本，在文件夹外面
+        self.folders_touch(lambda fs: folders.forget(fs, nb), seq)  # 文件夹里不再记它：以后再导入同名的书，是新的一本，在文件夹外面
         return Path(name).stem
 
     def change_summary(self, nb):
+        """这次更新改了什么。text 给平板上的人看（提示、更新后的那句话）；headline 给 Claude（导入的结果）和日志。
+        changed、added 是原文件（新版）的页号，headline 里的页号也是这个。text 里改过的、新加的页写这本里现在的页码
+        （2026-11-17：插过空白页、挪过页序的书，原文件页号和平板上的页码对不上），按页的键找；用户删掉了的页不写，
+        改动、新加的页全在删掉了的页上时照旧写原文件页号。「删掉了旧版第几页」那些页已经不在这本里，两处都写旧版的页号。
+        page：更新后先翻到哪一页（这本里的页码，从 0 起）：text 里头一个改过的页，没有就是头一个新加的，都没有是第 1 页。"""
         ch = self.changes(nb) or {"pages": {}, "removed": [], "removed_with_ink": []}
-        changed = [int(j) + 1 for j, p in ch["pages"].items() if p["status"] == "changed"]
-        added = [int(j) + 1 for j, p in ch["pages"].items() if p["status"] == "new"]
-        parts = []
-        if changed:
-            parts.append(f"第 {'、'.join(map(str, sorted(changed)))} 页有改动")
-        if added:
-            parts.append(f"新增第 {'、'.join(map(str, sorted(added)))} 页")
-        if ch["removed"]:
-            parts.append(f"删掉了旧版第 {'、'.join(str(i + 1) for i in ch['removed'])} 页"
-                         + ("（上面的手写另存了）" if ch.get("removed_with_ink") else ""))
-        text = "；".join(parts) or "内容没有变化"
+        changed = sorted(int(j) + 1 for j, p in ch["pages"].items() if p["status"] == "changed")
+        added = sorted(int(j) + 1 for j, p in ch["pages"].items() if p["status"] == "new")
+
+        def describe(chg, add):
+            parts = []
+            if chg:
+                parts.append(f"第 {'、'.join(map(str, chg))} 页有改动")
+            if add:
+                parts.append(f"新增第 {'、'.join(map(str, add))} 页")
+            if ch["removed"]:
+                parts.append(f"删掉了旧版第 {'、'.join(str(i + 1) for i in ch['removed'])} 页"
+                             + ("（上面的手写另存了）" if ch.get("removed_with_ink") else ""))
+            return "；".join(parts) or "内容没有变化"
+
+        file_text, text, page = describe(changed, added), None, 0
+        if changed or added:
+            lay = self.layout_of(nb)
+            here = lambda ns: sorted(k + 1 for k in (lay.index_of(f"p{n - 1:04d}") for n in ns) if k is not None)  # noqa: E731
+            chg, add = here(changed), here(added)
+            if chg or add:
+                text, page = describe(chg, add), (chg + add)[0] - 1
+        text = text or file_text
         renamed = bool(ch.get("from") and ch.get("to") and ch["from"] != ch["to"])
-        headline = f"从《{ch['from']}》换成了《{ch['to']}》：{text}" if renamed else text
+        headline = f"从《{ch['from']}》换成了《{ch['to']}》：{file_text}" if renamed else file_text
         old_id = f"book:{ch['from']}.pdf" if ch.get("from") else nb
-        return {"id": nb, "old_id": old_id, "title": Path(nb[5:]).stem, "changed": sorted(changed), "added": sorted(added),
+        return {"id": nb, "old_id": old_id, "title": Path(nb[5:]).stem, "changed": changed, "added": added,
                 "removed": [i + 1 for i in ch["removed"]], "text": text, "headline": headline,
-                "prev": ch["from"] if renamed else None}
+                "prev": ch["from"] if renamed else None, "page": page}
 
     def old_page_jpeg(self, nb, j):
         """更新前那一版里，与新版第 j 页对应的那一页（渲染成图）。"""
@@ -1224,19 +1543,24 @@ class App:
         self.folders_touch(lambda fs: folders.forget(fs, "book:" + dest.name))
         return "book:" + dest.name
 
-    def board_image(self, i):
-        idx = self.board_index()["pages"]
+    def board_image(self, i, nb="board"):
+        idx = self.board_index(nb)["pages"]
         if not 0 <= i < len(idx):
             raise KeyError("没有这一页")
-        return (self.data / "notebooks" / "board" / idx[i]["file"]).read_bytes()
+        return (self._board_dir(nb) / idx[i]["file"]).read_bytes()
+
+    def board_ids(self):
+        """列表里有的推送本子：以前那本「Claude 推送」、各文件夹的（按建立的先后）；有页才算（2026-11-17 用户定「有页才显示」）。"""
+        out = ["board"] if self.board_index("board")["pages"] else []
+        return out + ["board:" + b["id"] for b in self.boards() if self.board_index("board:" + b["id"])["pages"]]
 
     # -- 本子与页面
 
     def notebooks(self):
         items = [{"id": "scratch", "title": "草稿本"}]
         items += [{"id": "pad:" + p["id"], "title": p["title"]} for p in self.pads()]
-        if self.board_index()["pages"]:
-            items.append({"id": "board", "title": "Claude 推送"})
+        boards = self.boards()  # 推送本子排在普通本子里（2026-11-17 用户定：不钉在最上面），接在自己建的本子后面
+        items += [{"id": nb, "title": self.board_title(nb, boards)} for nb in self.board_ids()]
         if fitz is not None:
             items += [{"id": "book:" + n, "title": Path(n).stem} for n in self.book_names()]
         for it in items:
@@ -1245,8 +1569,10 @@ class App:
         return items
 
     def _nb_dir(self, nb):
-        if nb in ("scratch", "board"):
+        if nb == "scratch":
             d = self.data / "notebooks" / nb
+        elif self.kind_of(nb) == "board":
+            d = self._board_dir(nb)
         elif nb.startswith("pad:"):
             pid = nb[4:]
             if pid not in {p["id"] for p in self.pads()}:
@@ -1269,10 +1595,10 @@ class App:
 
     def pads(self):
         f = self.data / "notebooks" / "pads.json"
-        return json.loads(f.read_text("utf-8")) if f.exists() else []
+        return json.loads(read_whole(f)) if f.exists() else []
 
     def _save_pads(self, items):
-        (self.data / "notebooks" / "pads.json").write_text(json.dumps(items, ensure_ascii=False, indent=1), "utf-8")
+        write_whole(self.data / "notebooks" / "pads.json", json.dumps(items, ensure_ascii=False, indent=1))
 
     def new_pad(self, title, paper="portrait"):
         title = "".join(c for c in str(title or "") if c.isprintable()).strip()[:40] or "新本子"
@@ -1285,8 +1611,151 @@ class App:
         self.set_setting(nb, "paper", "landscape" if paper == "landscape" else "portrait")
         return nb
 
+    # -- 复制本子、复制一页（2026-11-18 用户提的：「还希望保留复制草稿纸的功能，这样可以更改批注或者留一份有标注一份没标注」；
+    #    弹窗里定的「整本和单页都能复制，复制时选带什么」）。带什么见 copy_page_data。
+    #    笔迹、批注的 id 不换：服务里按 id 找东西的地方都先按本子和页的键找到那一页（Claude 写回、重写、卡片红字、待处理文件、
+    #    看到哪一笔为止），复制出来的是另一本（或同一本里另一个键的页），写回原来那份的投递不会落到副本上，反过来也是；
+    #    撤销记录在平板上、跟着页走，不带过去。看到哪一笔为止（seen.json）不带：副本对哪个对话都是新的一本，下次点「AI」全部算新写的
+
+    def copy_title(self, base, suffix, limit, book=False):
+        """副本的名字：「原名 副本」，有重名的（本子名一样，书还要文件名不重）依次加 2、3……；太长先截原名，后缀留着。"""
+        bad = '<>:"/\\|?*'
+        clean = lambda s: " ".join("".join(c for c in str(s or "") if c.isprintable() and c not in bad).split())  # noqa: E731
+        base, suffix = clean(base) or "本子", clean(suffix) or "副本"
+        taken = {it["title"] for it in self.notebooks()}
+        for n in range(1, 1000):
+            tail = f" {suffix}" + (f" {n}" if n > 1 else "")
+            t = base[:max(1, limit - len(tail))].rstrip() + tail
+            if t not in taken and not (book and (self.books / f"{t}.pdf").exists()):
+                return t
+        raise ValueError("起不出不重名的名字")
+
+    def copy_notebook(self, nb, mode="all", base=None, suffix=None):
+        """复制一整本，返回新的本子 id。草稿本、自己建的本子复制成一本自己建的本子；导入的文档（书）复制成另一本书：PDF 另存一份、
+        页序、笔迹按 mode 带，「这本发往」「只在本地」「连续 / 单页」这些设置照原来那本；原文件的记录（更新、存回 PDF、撤回修改）、
+        更新的历史和新旧版对比不带——副本是一本不跟原文件走的书。推送本子（页是对话推来的图、每页记着发回哪个对话）不能复制。
+        删掉的页不带（书里删掉的原文件页照旧删着，不然会自己回来）。先在一个临时文件夹里做好再换上，出错不留半截的本子。
+        排在原来那本后面、在同一个文件夹里（草稿本的副本排在最上面，草稿本下面）。"""
+        if mode not in COPY_MODES:
+            raise ValueError("复制时带什么要是 all（全部照样）、noai（不带 AI 的蓝字）或 ink（只留黑笔）")
+        kind = self.kind_of(nb)
+        if kind == "board":
+            raise ValueError("推送的本子还不能复制（它的页是对话推来的图，每页记着发回哪个对话）")
+        if kind not in ("scratch", "pad", "book"):
+            raise KeyError(f"没有这个本子：{nb}")
+        if nb not in self.nb_ids():
+            raise KeyError(f"没有这个本子：{nb}")
+        root = self.data / "notebooks"
+        tmp = root / f"_copying-{uuid.uuid4().hex[:8]}"
+        made = []  # 已经换上去的（出错时拿掉）
+        with self.file_lock, self.page_lock:
+            src_dir, lay = self._nb_dir(nb), self.layout_of(nb)
+            title = self.copy_title(base or self.nb_title(nb), suffix or "副本", 80 if kind == "book" else 40, book=kind == "book")
+            try:
+                tmp.mkdir(parents=True)
+                for e in lay.pages:
+                    stem = layout.file_stem(e["key"])
+                    f = src_dir / f"{stem}.json"
+                    if f.exists():
+                        page = copy_page_data(json.loads(f.read_text("utf-8")), mode)
+                        (tmp / f"{stem}.json").write_text(json.dumps(page, ensure_ascii=False, separators=(",", ":")), "utf-8")
+                    entries = copy_pending(src_dir / f"{stem}.pending.json", mode)
+                    if entries:
+                        (tmp / f"{stem}.pending.json").write_text(json.dumps(entries, ensure_ascii=False), "utf-8")
+                # 书里删掉的原文件页照旧删着（不带笔迹）；别的删掉的页不带
+                hidden = [h for h in lay.hidden if "pdf" in h["entry"]] if kind == "book" else []
+                (tmp / "layout.json").write_text(json.dumps({"pages": lay.pages, "hidden": hidden}, ensure_ascii=False), "utf-8")
+                sf = src_dir / "settings.json"
+                if sf.exists():
+                    (tmp / "settings.json").write_text(read_whole(sf), "utf-8")
+                if kind == "book":
+                    new_name = f"{title}.pdf"
+                    (tmp / "meta.json").write_text(json.dumps({"book": new_name}, ensure_ascii=False), "utf-8")
+                    if (src_dir / "doc.json").exists():
+                        shutil.copyfile(src_dir / "doc.json", tmp / "doc.json")
+                    part = self.books / f"{title}.pdf.part"
+                    shutil.copyfile(self.book_path(nb[5:]), part)
+                    made.append(part)
+                    final = root / ("book-" + hashlib.sha1(new_name.encode()).hexdigest()[:12])
+                    if final.exists():  # 以前用过这个名字的本子目录（删掉的书留下的）：挪开，不覆盖（和改名一样）
+                        os.replace(final, final.with_name(final.name + "-old-" + uuid.uuid4().hex[:4]))
+                    os.replace(tmp, final)
+                    made.append(final)
+                    os.replace(part, self.books / new_name)
+                    made[0] = self.books / new_name
+                    new_nb = "book:" + new_name
+                else:
+                    pid = uuid.uuid4().hex[:8]
+                    final = root / f"pad-{pid}"
+                    os.replace(tmp, final)
+                    made.append(final)
+                    items = self.pads()
+                    items.append({"id": pid, "title": title, "created": datetime.now().isoformat(timespec="seconds")})
+                    self._save_pads(items)
+                    new_nb = "pad:" + pid
+            except BaseException:
+                shutil.rmtree(tmp, ignore_errors=True)
+                for p in made:
+                    shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+                raise
+        # 排在原来那本后面、同一个文件夹里（排不成也不影响复制本身：照原来的规矩出现在列表里）
+        holder = None
+        try:
+            holder = folders.folder_of(folders.load(self.data), nb)
+            seq = self.nb_seq()
+            after = "" if nb in folders.FIXED else nb
+            self.change_folders(lambda fs: folders.place(fs, seq, new_nb, holder["id"] if holder else "", after, ""))
+        except (OSError, ValueError, KeyError) as e:
+            print(f"[复制] 《{title}》没排到原来那本后面：{e}", flush=True)
+            self.bridge.emit("folders")
+        self.schedule_paper(new_nb)
+        return new_nb
+
+    def copy_page(self, nb, i, key=None, mode="all"):
+        """把第 i 页复制一份，接在它后面，返回新页的页码。只复制空白纸（空白本子的页、书和推送本子里插进去的空白纸）：
+        书页、推送的页的底图是原文件的一页、推来的一张图，按页的键对应着，复制不干净。带什么见 copy_page_data；
+        新页有自己的键（插进去的空白纸那种），纸的方向、挪页时记下的高度照原来那一页。key：平板以为第 i 页是哪一页，按它找。
+        先写好新页的文件再改页序，页序没改成就把文件拿掉。"""
+        if mode not in COPY_MODES:
+            raise ValueError("复制时带什么要是 all（全部照样）、noai（不带 AI 的蓝字）或 ink（只留黑笔）")
+        with self.file_lock, self.page_lock:
+            lay = self.layout_of(nb)
+            if key:
+                if not layout.KEY_RE.match(str(key)):
+                    raise ValueError("页的键不对")
+                i = lay.index_of(key)
+                if i is None:
+                    raise ValueError(PAGE_DELETED)
+            e = lay.entry(int(i))
+            if "pdf" in e or "board" in e:
+                raise ValueError("只有空白纸能复制：书页、推送的页还不能复制（可以复制整本）")
+            src = self._key_file(nb, e["key"])
+            page = json.loads(src.read_text("utf-8")) if src.exists() else {"v": 1, "strokes": [], "ai": [], "reads": []}
+            ne = layout.new_blank(e.get("orient"))
+            if "h" in e:
+                ne["h"] = e["h"]
+            dst, pend = self._key_file(nb, ne["key"]), self._key_file(nb, ne["key"], ".pending.json")
+            try:
+                write_whole(dst, json.dumps(copy_page_data(page, mode), ensure_ascii=False, separators=(",", ":")))
+                entries = copy_pending(self._key_file(nb, e["key"], ".pending.json"), mode)
+                if entries:
+                    pend.write_text(json.dumps(entries, ensure_ascii=False), "utf-8")
+                lay.pages.insert(int(i) + 1, ne)
+                lay.save()
+            except BaseException:
+                dst.unlink(missing_ok=True)
+                pend.unlink(missing_ok=True)
+                raise
+        self.schedule_paper(nb)
+        return int(i) + 1
+
     def kind_of(self, nb):
-        return "book" if nb.startswith("book:") else "pad" if nb.startswith("pad:") else nb
+        """book 导入的文档、pad 自己建的本子、board 推送本子（以前那本「board」和各文件夹的「board:<编号>」）、scratch 草稿本。"""
+        if nb.startswith("book:"):
+            return "book"
+        if nb.startswith("pad:"):
+            return "pad"
+        return "board" if nb == "board" or nb.startswith("board:") else nb
 
     def blank_nb(self, nb):
         """空白本子（草稿本、自己新建的本子；平板的 blankNb）：服务端画的图整页是纸、没有右边那一栏（pages.blank_rect）。"""
@@ -1298,40 +1767,60 @@ class App:
             return Path(nb[5:]).stem
         if kind == "pad":
             return next((p["title"] for p in self.pads() if p["id"] == nb[4:]), "本子")
-        return {"scratch": "草稿本", "board": "Claude 推送"}.get(kind, nb)
+        if kind == "board":
+            try:
+                return self.board_title(nb)
+            except KeyError:  # 删掉了的推送本子（还记着它的投递、平板上还开着）
+                return "推送"
+        return {"scratch": "草稿本"}.get(kind, nb)
 
     # -- 抽屉里的文件夹（folders.py）：只是归类，不动本子的数据
 
+    def nb_seq(self):
+        """现在列表里有的本子的 id，按 notebooks() 的先后（不读各本的设置）：抽屉里「原来的顺序」（folders.py）。"""
+        seq = ["scratch"] + ["pad:" + p["id"] for p in self.pads()] + self.board_ids()
+        if fitz is not None:
+            seq += ["book:" + n for n in self.book_names()]
+        return seq
+
     def nb_ids(self):
         """现在列表里有的本子（和 notebooks() 的 id 一样，不读各本的设置）。"""
-        ids = {"scratch"} | {"pad:" + p["id"] for p in self.pads()}
-        if self.board_index()["pages"]:
-            ids.add("board")
-        if fitz is not None:
-            ids |= {"book:" + n for n in self.book_names()}
-        return ids
+        return set(self.nb_seq())
 
-    def folder_list(self):
-        """给平板的文件夹：items 里只留现在还在的本子（删掉的、对不上的照旧留在文件里，不报错）。"""
-        ids = self.nb_ids()
-        return [dict(f, items=[i for i in f["items"] if i in ids]) for f in folders.load(self.data)]
+    def folder_list(self, fs=None, seq=None):
+        """给平板的文件夹：items 里只留现在还在的本子（删掉的、对不上的照旧留在文件里，不报错），按抽屉里从上到下的先后
+        （在文件夹里排过的按排的，没排过的按 notebooks() 的先后，2026-11-18）。"""
+        seq = self.nb_seq() if seq is None else seq
+        return [dict(f, items=folders.folder_items(f, seq)) for f in (folders.load(self.data) if fs is None else fs)]
+
+    def folder_view(self):
+        """给平板的抽屉结构：folders（同 folder_list）和 top——最外层从上到下的顺序（文件夹的 id 和不在文件夹里的本子的 id
+        混排，草稿本不在里面），由服务排好，各台设备看到的一样（2026-11-18）。"""
+        seq, fs = self.nb_seq(), folders.load(self.data)
+        return {"folders": self.folder_list(fs, seq), "top": folders.top_order(fs, seq)}
 
     def change_folders(self, fn):
-        """改文件夹：读出来（读不出来就报错，不覆盖）、fn 改、写回、告诉平板。返回 fn 的结果。"""
+        """改文件夹：读出来（读不出来就报错，不覆盖）、fn 改、写回、告诉平板。返回 fn 的结果。
+        排过上下顺序的，改之前先把现在看到的最外层顺序记下（folders.settle），免得没记着的本子跟着跳。"""
+        seq = self.nb_seq()
         with self.folder_lock:
             items = folders.load(self.data, strict=True)
+            folders.settle(items, seq)
             out = fn(items)
             folders.save(self.data, items)
         self.bridge.emit("folders")
         return out
 
-    def folders_touch(self, fn):
-        """本子删掉、改名时顺带改文件夹里的记录：没有文件夹文件、或没改到就不写；出错不影响删除和改名本身。"""
+    def folders_touch(self, fn, seq=None):
+        """本子删掉、改名时顺带改文件夹里的记录：没有文件夹文件、或没改到就不写；出错不影响删除和改名本身。
+        seq：删、改名之前的本子先后（nb_seq）；给了的话先把那时看到的最外层顺序记下（folders.settle），别的本子不跟着跳。"""
         try:
             with self.folder_lock:
                 if not folders.path_of(self.data).exists():
                     return
                 items = folders.load(self.data, strict=True)
+                if seq is not None:
+                    folders.settle(items, seq)
                 if not fn(items):
                     return
                 folders.save(self.data, items)
@@ -1343,7 +1832,7 @@ class App:
 
     def setting(self, nb, key, default=None):
         f = self._nb_dir(nb) / "settings.json"
-        return (json.loads(f.read_text("utf-8")) if f.exists() else {}).get(key, default)
+        return (json.loads(read_whole(f)) if f.exists() else {}).get(key, default)
 
     def is_local(self, nb):
         return bool(self.setting(nb, "local", False))
@@ -1359,7 +1848,7 @@ class App:
 
     def ensure_writable(self, nb, which, doing, again, tail=""):
         """设为「只在本地」的本子，Claude 一侧（/bridge/*）也不往里放东西、不换掉它：写回批注（用户 2026-11-12 定）；
-        导入时原地更新、按 replace 替换、另存出来的新文件换掉它、往「Claude 推送」推页面（2026-11-16 定「拦住，也不列名字」）。
+        导入时原地更新、按 replace 替换、另存出来的新文件换掉它、往推送本子推页面（2026-11-16 定「拦住，也不列名字」）。
         在动任何东西之前调，拦下时什么都没写。回给 Claude 的话按写批注那一句的样子拼：which 是开头（「这一页所在的那本」
         「这个文件导入成的那本」……，都不带书名），doing 是 Claude 不做的事，again 是「要……的话」里的动作。
         用户自己在平板上的导入、更新、替换（/api/*）不经过这里，照常。"""
@@ -1369,9 +1858,12 @@ class App:
 
     def set_setting(self, nb, key, value):
         f = self._nb_dir(nb) / "settings.json"
-        s = json.loads(f.read_text("utf-8")) if f.exists() else {}
-        s[key] = value
-        f.write_text(json.dumps(s, ensure_ascii=False), "utf-8")
+        # 读、改、写一气做完：两个请求同时改同一本的两项设置（一个设「只在本地」、一个改别的）时，后写的不会拿着旧的一份
+        # 把前一个刚写的盖掉（2026-11-18，审查后加）。这把锁只在这里用，里面不拿别的锁
+        with self.settings_lock:
+            s = json.loads(read_whole(f)) if f.exists() else {}
+            s[key] = value
+            write_whole(f, json.dumps(s, ensure_ascii=False))
 
     # -- 发往哪个对话：每本记住自己的对话，不随「最近打字」漂移
 
@@ -1450,29 +1942,54 @@ class App:
             self.bridge.emit("target", nb=nb, target=t)
         return s
 
-    def target_of(self, nb):
-        """这本现在发往的对话 sid：绑了且连着的那个；绑了但不在了是 None；没绑过用默认（/ink here 指定的或最近打字的）。"""
-        t = self.nb_target(nb)
+    def target_unset(self, nb, key=None):
+        """这本还没选过发往哪个对话、又连着不止一个对话：第一次点「AI」时要用户在平板上选（2026-11-17 用户定）。
+        只连着一个对话时不算（直接发给它）。key：眼前这一页的键；推送本子里记了是谁推的页不算（发回推它的对话）。"""
+        return bool(nb) and not self.push_target(nb, key) and not self.nb_target(nb) and len(self.bridge.alive()) > 1
+
+    def target_of(self, nb, key=None):
+        """这本现在发往的对话 sid：绑了且连着的那个；绑了但不在了是 None；没绑过：只连着一个对话就是它，
+        连着不止一个是 None（等用户在平板上选，见 target_unset）。key：眼前这一页的键，推送本子里记了是谁推的页按这一页算
+        （push_target）。"""
+        t = self.push_target(nb, key) or self.nb_target(nb)
         if t:
             return t["sid"] if any(s["sid"] == t["sid"] for s in self.bridge.alive()) else None
-        return self.bridge.default_target()
+        return None if self.target_unset(nb) else self.bridge.default_target()
 
-    def send_target(self, nb, want=""):
+    def send_target(self, nb, want="", key=None):
         """发送用哪个对话，并记成这本的对话（投递时就定下，之后不再转给别的对话）。
-        want：平板上刚选的。原对话不在了先问：抛 TargetGone。"""
+        want：平板上刚选的。原对话不在了先问：抛 TargetGone。这本没选过对话、连着不止一个、平板又没带选的：
+        不替用户定，抛 TargetUnset（同一个文件夹下可能开着几个对话，最近活跃的那个不一定是该收的那个）。
+        key：眼前这一页的键（这一页或几页一起交，都按眼前这一页算）。推送本子里记了是谁推的页：发回推它的对话（改发过的发到改发到的），
+        不记成整本的对话；那个对话不在了先问（TargetGone 说的是推这一页的那个）；带了 want 而这一页原本不发给它的，
+        按 bind_page_target 把那一组改发到它。"""
         alive = {s["sid"]: s for s in self.bridge.alive()}
         if not alive:
             raise ValueError("没有连上的 Claude Code 对话。在电脑上打开一个装了 inkpad 插件的对话再试。")
+        pt = self.push_target(nb, key)
+        if pt:
+            if want and want != pt["sid"]:
+                if want not in alive:
+                    raise TargetGone("选的那个对话")
+                self.bind_page_target(nb, key, want)
+                return alive[want]
+            if pt["sid"] not in alive:
+                p = self.push_entry(nb, key)
+                raise TargetGone(pt.get("label") or "对话", pushed=not (isinstance(p.get("to"), dict) and p["to"].get("sid")))
+            return alive[pt["sid"]]
         t = self.nb_target(nb)
+        if not t and not want and len(alive) > 1:
+            raise TargetUnset()
         sid = want or (t["sid"] if t else self.bridge.default_target())
         if sid not in alive:
             raise TargetGone(t["label"] if t and t["sid"] == sid else "选的那个对话")
         self.bind_target(nb, sid)
         return alive[sid]
 
-    def seen_sid(self, nb):
-        """「只发新写的」按哪个对话算：这本绑定的（不在了也按它），没绑过按默认的。"""
-        t = self.nb_target(nb)
+    def seen_sid(self, nb, key=None):
+        """「只发新写的」按哪个对话算：这本绑定的（不在了也按它），没绑过按默认的。key：眼前这一页的键，
+        推送本子里记了是谁推的页按这一页发往的对话算（几页一起交时都交给它）。"""
+        t = self.push_target(nb, key) or self.nb_target(nb)
         return t["sid"] if t else self.bridge.default_target()
 
     # -- 页面顺序：显示的第几页是什么（见 layout.py）
@@ -1483,7 +2000,7 @@ class App:
             with self.pdf_lock:
                 n = len(self._doc(nb[5:]))
         elif kind == "board":
-            n = len(self.board_index()["pages"])
+            n = len(self.board_index(nb)["pages"])
         elif kind == "scratch":
             idx = d / "index.json"  # 以前的草稿本只记了页数
             n = json.loads(idx.read_text("utf-8")).get("pages", 1) if idx.exists() else 1
@@ -1500,12 +2017,60 @@ class App:
     def index_of_key(self, nb, key):
         return self.layout_of(nb).index_of(key)
 
+    def page_now(self, nb, i, key=None):
+        """平板说的「第 i 页」现在是第几页。带了页的键（2026-11-17 起的平板页面都带）就按键找：别的设备插了页、删了页、
+        挪了页而这台平板还没刷新时，页码对不上，键对得上。那一页已经删掉了：ValueError。不带键的（旧页面）照旧是 i。"""
+        if not key:
+            return int(i)
+        if not layout.KEY_RE.match(str(key)):
+            raise ValueError("页的键不对")
+        j = self.index_of_key(nb, key)
+        if j is None:
+            raise ValueError(PAGE_DELETED)
+        return j
+
+    # -- 书原地更新时页的键重新编号（2026-11-17 用户定）：原文件的页按新版的页码重排（p0003 → p0004），笔迹文件跟着挪；
+    #    空白纸的键不变。平板取一页时同时拿到这本书当时更新过几次（gen，见 page_for_tablet），存页、取回答时带回来；
+    #    gen 比现在小，说明那一页是更新以前取的，按这之后每次更新记下的新旧页对照（history.json 里的 map）把键换过来再用
+
+    def book_updates(self, nb):
+        """这本书原地更新过的那几次（history.json 里不是改名的那几条，按先后）。不是书、没更新过：空的。"""
+        if not nb.startswith("book:"):
+            return []
+        f = self._nb_dir(nb) / "history.json"
+        try:
+            hist = json.loads(f.read_text("utf-8")) if f.exists() else []
+        except ValueError:
+            return []
+        return [h for h in hist if isinstance(h, dict) and not h.get("renamed")] if isinstance(hist, list) else []
+
+    def book_gen(self, nb):
+        """这本书原地更新过几次（不是书是 None）：平板记着它手上每一页是第几次更新以后取的。"""
+        return len(self.book_updates(nb)) if nb.startswith("book:") else None
+
+    def key_now(self, nb, key, gen):
+        """平板手上那一页的键（gen：取那一页时这本书更新过几次）现在是哪个键。空白纸的键、没更新过的照旧；
+        原文件的页按那之后每次更新的新旧页对照一次次换过去。对不上返回 None：那一页在新版里没了、那次更新是对照还没记下以前做的
+        （2026-11-17 以前）、gen 比现在还大。"""
+        ups = self.book_updates(nb)
+        if not key.startswith("p") or gen == len(ups):
+            return key
+        if not 0 <= gen < len(ups):
+            return None
+        i = int(key[1:])
+        for h in ups[gen:]:
+            m = h.get("map")
+            if not isinstance(m, list) or i not in m:
+                return None
+            i = m.index(i)
+        return f"p{i:04d}"
+
     def notebook_info(self, nb):
         kind = self.kind_of(nb)
-        if kind == "board" and not self.board_index()["pages"]:
+        if kind == "board" and not self.board_index(nb)["pages"]:
             raise KeyError("Claude 还没有推送过页面")
         lay = self.layout_of(nb)
-        board = self.board_index()["pages"] if kind == "board" else []
+        board = self.board_index(nb)["pages"] if kind == "board" else []
         pdf_h = []
         if kind == "book":
             with self.pdf_lock:
@@ -1524,6 +2089,12 @@ class App:
             sizes.append({"w": PAGE_W, "h": h})
             page_info.append({"key": e["key"], "pdf": e.get("pdf"), "board": e.get("board"),
                               "blank": "pdf" not in e and "board" not in e, "hiddenSlide": e.get("pdf") in hidden})
+            by = self._pusher(board[e["board"]]) if "board" in e else None
+            if by:  # 推送的页记着是谁推的（2026-11-17 起）：平板据此算这一页发往谁（改发过的看 to），抽屉里那一行翻页跟着变
+                page_info[-1]["push"] = {k: by.get(k) for k in ("sid", "label", "cwd", "ai")}
+                to = board[e["board"]].get("to")
+                if isinstance(to, dict) and to.get("sid"):
+                    page_info[-1]["to"] = to
             if self.reply_waiting(nb, e["key"]):  # 有 Claude 写回、还没落到纸上的回答：平板在页码旁标「别的页有新回答」
                 page_info[-1]["newAns"] = True
             n_ans = self.answer_count(d / (layout.file_stem(e["key"]) + ".json"))
@@ -1540,9 +2111,11 @@ class App:
         if kind == "book":
             name = nb[5:]
             info["v"] = int(self.book_path(name).stat().st_mtime)
+            info["gen"] = self.book_gen(nb)  # 原地更新过几次：平板取来的页记着它，存页时带回（见 put_page）
             src = self.sources().get(name)
             if src:
                 info["source"] = Path(src["src"]).name
+                info["sourceDir"] = real_dir(Path(src["src"]).parent)  # 选对话的单子里把这个文件夹的对话排在最前（2026-11-17）
                 info["sourceChanged"] = self.source_changed(name)
                 info["savePdf"] = self.pdf_source(name) is not None
                 info["saved"] = src.get("saved")
@@ -1565,16 +2138,30 @@ class App:
             lay.save()
         return self.notebook_info(nb)
 
-    def insert_page(self, nb, after, orient=None):
+    def insert_page(self, nb, after, orient=None, after_key=None):
+        """在第 after 页后插一张空白纸。after_key（2026-11-17 起的平板页面都带）：平板以为第 after 页是哪一页（页的键）；
+        按键找它现在是第几页——别的设备插了页、删了页、挪了页而平板还没刷新时，空白纸照样插在平板上那一页后面；那一页已经删掉了就不插。"""
         with self.file_lock:
             lay = self.layout_of(nb)
+            if after_key:
+                after = lay.index_of(after_key)
+                if after is None:
+                    raise ValueError(PAGE_DELETED)
             i = lay.insert_blank(int(after), orient)
             lay.save()
         return i
 
-    def delete_page(self, nb, i):
+    def delete_page(self, nb, i, key=None):
+        """删第 i 页（放进删掉的页里，能还原）。key（2026-11-17 起的平板页面都带）：平板以为第 i 页是哪一页；按键删，
+        页序在别处改过时不删错页。那一页已经删掉了（别的设备上删的）：什么都不做，返回 None。"""
         with self.file_lock:
             lay = self.layout_of(nb)
+            if key:
+                i = lay.index_of(key)
+                if i is None:
+                    if any(h["entry"]["key"] == key for h in lay.hidden):
+                        return None
+                    raise KeyError("没有这一页")
             e = lay.delete(int(i))
             lay.save()
         return e
@@ -1616,7 +2203,7 @@ class App:
 
     def hidden_pages(self, nb):
         lay = self.layout_of(nb)
-        board = self.board_index()["pages"] if nb == "board" else []
+        board = self.board_index(nb)["pages"] if self.kind_of(nb) == "board" else []
         out = []
         for h in reversed(lay.hidden):
             e = h["entry"]
@@ -1634,21 +2221,74 @@ class App:
         return self._key_file(nb, self.page_key(nb, i), suffix)
 
     def load_page(self, nb, i):
-        f = self._page_file(nb, i)
+        return self.page_with_key(nb, i)[1]
+
+    def page_with_key(self, nb, i):
+        """第 i 页的键和页面数据（JSON 文本）：页序只读一次，键和数据一定是同一页的（平板据此记住手上这一页是哪一页，存的时候按键存）。"""
+        key = self.page_key(nb, i)
+        f = self._key_file(nb, key)
         if f.exists():
-            return f.read_text("utf-8")
-        return json.dumps({"v": 1, "strokes": [], "ai": [], "reads": []})
+            return key, f.read_text("utf-8")
+        return key, json.dumps({"v": 1, "strokes": [], "ai": [], "reads": []})
+
+    def page_for_tablet(self, nb, i):
+        """平板取第 i 页（GET /api/page）：(键, 这本书更新过几次（不是书是 None）, 页面数据)。拿着存页那把锁读：
+        书正在原地更新、挪笔迹文件时等它挪完，三样一定是同一时刻的（见 update_document）。"""
+        with self.page_lock:
+            key, text = self.page_with_key(nb, i)
+            return key, self.book_gen(nb), text
 
     def save_page(self, nb, i, body, client=""):
-        """存平板发来的一页。页面带版本号 rev 和最后写它的设备 by：
+        """存平板发来的第 i 页（按页码；平板现在按页的键存，见 put_page）。返回存好后的版本号。"""
+        return self.put_page(nb, i, body, client)["rev"]
+
+    def put_page(self, nb, i, body, client="", key=None, gen=None):
+        """存平板发来的一页（PUT /api/page）。页面带版本号 rev 和最后写它的设备 by：
         平板发来的 rev 落后于文件、而文件又是别的设备写的，说明这一页在别处改过了——不覆盖，
         把这份另存到 data/conflicts/，抛 Conflict（平板据此载入新版本）。同一台设备连着存几次不算冲突。
-        返回存好后的版本号。没带 rev 的（旧版平板页面）照旧直接存。"""
+        没带 rev 的（旧版平板页面）照旧直接存。
+
+        key（2026-11-17 用户定，平板页面从这时起都带）：这一页的键。按键存，不按页码：两台设备同时开着同一本，
+        一台插了页、删了页、挪了页，另一台还没刷新就接着写，它的字照样存到它原来那一页上。
+          键在页序里：存到那一页，at 是它现在是第几页（和平板发来的页码不一样，平板就知道页序变了）；
+          键在删掉的页里：存进那一页（还原时字都在，不写到别的页上），deleted 为 True、at 为 None；
+          哪里都没有（不认识的键、书更新后没了的页）：一个字都不写，这份另存到 data/conflicts/，抛 PageGone。
+        不带 key 的（还开着的旧页面）照旧按页码 i 存。版本冲突的处理两种一样。
+
+        gen（2026-11-17 用户定，书页才带）：平板取这一页时这本书更新过几次。书在那之后原地更新过（平板还没换成新版就存了），
+        先按新旧页对照把键换成新版里的键（key_now），再照上面的规矩存：更新时这一页以前的笔迹已经挪到了新键上，平板这份是在它上面
+        接着写的，就存到那里；别的设备在更新以后改过它，照旧算冲突另存。换不过来的（那一页在新版里没了……）一个字都不写，
+        另存到 data/conflicts/，抛 PageGone。书换新版时跟着改了名的，存到改名以后的那本（current_nb）。
+        返回 {rev, at, deleted, key（实际存到的键）, gen（现在更新过几次；不是书是 None）}。"""
         page = json.loads(body)
         if not isinstance(page, dict) or not isinstance(page.get("strokes"), list):
             raise ValueError("页面数据格式不对")
         with self.page_lock:
-            f = self._page_file(nb, i)
+            at, deleted, gen_now = int(i), False, None
+            if key:
+                if not layout.KEY_RE.match(str(key)):
+                    raise ValueError("页的键不对")
+                if gen is not None:  # 不带 gen 的（这以前的页面）照旧：不跟改名，不换键
+                    nb = self.current_nb(nb)
+                gen_now = self.book_gen(nb)
+                if gen is not None and gen_now is not None:
+                    now_key = self.key_now(nb, key, int(gen))
+                    if now_key is None:
+                        keep = self._keep_aside(self._key_file(nb, key), body)
+                        print(f"[存页] 《{self.nb_title(nb)}》更新成了新版，平板上更新以前的那一页（{key}）在新版里对不上；这份另存为 {keep.name}")
+                        raise PageGone(BOOK_PAGE_GONE.format(keep.name))
+                    key = now_key
+                lay = self.layout_of(nb)
+                f = self._key_file(nb, key)
+                at = lay.index_of(key)
+                if at is None:
+                    deleted = any(h["entry"]["key"] == key for h in lay.hidden)
+                    if not deleted:
+                        keep = self._keep_aside(f, body)
+                        print(f"[存页] 《{self.nb_title(nb)}》里已经没有平板要存的那一页（{key}）；这份另存为 {keep.name}")
+                        raise PageGone(f"这一页已经不在这本里了，刚写的没存进本子。你这边没存上的字另存在电脑上：data/conflicts/{keep.name}")
+            else:
+                f = self._page_file(nb, i)
             cur = {}
             if f.exists():
                 try:
@@ -1658,18 +2298,26 @@ class App:
             cur_rev, cur_by = int(cur.get("rev") or 0), cur.get("by") or ""
             base = page.get("rev")
             if isinstance(base, int) and base != cur_rev and cur_by != client:
-                d = self.data / "conflicts"
-                d.mkdir(exist_ok=True)
-                keep = d / f"{f.parent.name}-{f.stem}-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}.json"
-                keep.write_text(body if isinstance(body, str) else body.decode("utf-8"), "utf-8")
-                print(f"[冲突] {self.page_label(nb, i)} 在别的设备上改过了；这份另存为 {keep.name}")
+                keep = self._keep_aside(f, body)
+                where = self.page_label(nb, at) if at is not None else f"《{self.nb_title(nb)}》里删掉的一页"
+                print(f"[冲突] {where} 在别的设备上改过了；这份另存为 {keep.name}")
                 raise Conflict(f"这一页在别的设备上改过了。你这边没存上的改动另存在电脑上：data/conflicts/{keep.name}")
             page["rev"], page["by"] = cur_rev + 1, client
             tmp = f.with_suffix(".tmp")
             tmp.write_text(json.dumps(page, ensure_ascii=False, separators=(",", ":")), "utf-8")
             os.replace(tmp, f)
             self.schedule_paper(nb)
-            return page["rev"]
+            if deleted:
+                print(f"[存页] 《{self.nb_title(nb)}》里删掉的一页（{key}）上又写了字：存进了那一页，还原后能看到")
+            return {"rev": page["rev"], "at": None if deleted else at, "deleted": deleted, "key": key, "gen": gen_now}
+
+    def _keep_aside(self, f, body):
+        """没存进本子的那份（版本冲突、那一页已经不在了）另存到 data/conflicts/，返回文件路径。"""
+        d = self.data / "conflicts"
+        d.mkdir(exist_ok=True)
+        keep = d / f"{f.parent.name}-{f.stem}-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}.json"
+        keep.write_text(body if isinstance(body, str) else body.decode("utf-8"), "utf-8")
+        return keep
 
     # -- 原稿与往来稿（2026-11-08 用户提出）：每本纸在 paper_dir/<本子名>/ 下有两份 PDF——原稿.pdf 只有我写的
     #    （黑字、红字），往来.pdf 再加上 Claude 的蓝字（横划掉的画淡，橡皮擦掉的不画；长回答在纸上只是圈号，
@@ -1737,7 +2385,8 @@ class App:
             except Exception as e:  # noqa: BLE001
                 print(f"[纸] 补导《{it.get('title')}》没成功：{e}")
 
-    def page_label(self, nb, i):
+    def page_label(self, nb, i, reader=None):
+        """「页面：」那句说的是哪一页。reader：收这条消息的对话；推送页不是它推的（推它的那个不在了、用户改发了），说成另一个对话推的。"""
         lay = self.layout_of(nb)
         e, title = lay.entry(int(i)), self.nb_title(nb)
         if nb.startswith("book:"):
@@ -1753,19 +2402,30 @@ class App:
             prev = next((x["pdf"] for x in reversed(lay.pages[:i]) if "pdf" in x), None)
             where = f"插在原文件第 {prev + 1} 页后" if prev is not None else "插在最前面"
             return f"《{title}》第 {i + 1} 页（{where}的空白纸）"
-        if nb == "board":
+        if self.kind_of(nb) == "board":
             if "board" in e:
-                return f"你推送到平板的「{self.board_index()['pages'][e['board']]['title']}」（我在上面写写画画）"
-            return f"「Claude 推送」第 {i + 1} 页（插入的空白纸）"
+                p = self.board_index(nb)["pages"][e["board"]]
+                by = self._pusher(p)
+                if by and reader and by["sid"] != reader:
+                    who = f"另一个对话（「{by['label']}」文件夹里的）" if by.get("label") else "另一个对话"
+                    return f"{who}推送到平板的「{p['title']}」（我在上面写写画画）"
+                return f"你推送到平板的「{p['title']}」（我在上面写写画画）"
+            return f"「{title}」第 {i + 1} 页（插入的空白纸）"
         return f"{title}第 {i + 1} 页（空白草稿纸）"
 
-    def page_role(self, nb, i):
+    def page_role(self, nb, i, reader=None):
         """这一页是谁的内容（给 Claude 判断角色用）：blank 空白纸、zotero 文献、editable 能改的文档（带原文件）、
-        pdf 说不准的 PDF（带原文件）、board Claude 推送的。"""
+        pdf 说不准的 PDF（带原文件）、board 收消息的对话自己推送的、board_other 别的对话推送的（reader 是收消息的对话；
+        2026-11-17 以前推的没记是谁推的，照旧算 board）。"""
         kind = self.kind_of(nb)
         e = self.page_entry(nb, i)
         if kind == "board":
-            return {"page": "board" if "board" in e else "blank"}
+            if "board" not in e:
+                return {"page": "blank"}
+            by = self._pusher(self.board_index(nb)["pages"][e["board"]])
+            if by and reader and by["sid"] != reader:
+                return {"page": "board_other", "by": by.get("label") or ""}
+            return {"page": "board"}
         if kind != "book" or "pdf" not in e:
             return {"page": "blank"}
         info = self.sources().get(nb[5:]) or {}
@@ -1813,9 +2473,20 @@ class App:
             items.append(entry)
             f.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
 
-    def take_pending(self, nb, i):
+    def take_pending(self, nb, i, key=None, gen=None):
+        """取走第 i 页待处理的批注。key（2026-11-17 起的平板页面都带）：平板手上那一页的键，按键取——页序在别处改过、平板还没刷新时，
+        不把别的页的回答取来落到它这一页上。gen（书页才带）：平板取那一页时这本书更新过几次；书在那之后更新过，按新旧页对照换成
+        新键再取（待处理文件更新时跟着笔迹挪到了新键上）；换不过来（那一页在新版里没了……）就不取，留给新版的页。"""
+        if key and not layout.KEY_RE.match(str(key)):
+            raise ValueError("页的键不对")
         with self.file_lock:
-            f = self._page_file(nb, i, ".pending.json")
+            if key and gen is not None:
+                nb = self.current_nb(nb)
+                if nb.startswith("book:"):
+                    key = self.key_now(nb, key, int(gen))
+                    if key is None:
+                        return []
+            f = self._key_file(nb, key, ".pending.json") if key else self._page_file(nb, i, ".pending.json")
             if not f.exists():
                 return []
             items = json.loads(f.read_text("utf-8"))
@@ -1874,7 +2545,7 @@ class App:
         nb, i = str(req.get("nb") or "scratch"), int(req.get("page") or 0)
         meta = {k: v for k, v in req.items() if k != "images"}
         meta.update(nb=nb, page=i, page_key=self.page_key(nb, i), id=sub_id, snapshot=snapshot,
-                    created=now.isoformat(timespec="seconds"), role=self.page_role(nb, i))
+                    created=now.isoformat(timespec="seconds"), role=self.page_role(nb, i, reader or meta.get("target")))
         page = json.loads(self.load_page(nb, i))
         t0 = time.perf_counter()
         self.attach_reco(nb, i, meta.get("groups") or [], only=lambda g: g.get("inSel") or prompt.asking(g), page=page)
@@ -1884,10 +2555,15 @@ class App:
         if t2 - t0 > 1:  # 认字慢了：记一句，真机时好查
             print(f"[认字] Windows 识别 {t1 - t0:.1f} 秒，字帖和 PP-OCR {t2 - t1:.1f} 秒")
         meta.pop("cards", None)  # 卡片由服务端按存好的这一页挑，不认平板发来的
+        for k in ("others", "prev_by"):  # 这两样由服务端按存好的这一页算（mark_others），不认平板发来的
+            meta.pop(k, None)
+        me, who_cache = reader or meta.get("target") or "", {}
         if not snapshot:  # 长回答卡片上的红字（还没交的、交了还没被回应的）：每张卡片画一张图，连同红字一起交
-            cards = self.card_images(page, d)
+            cards = self.card_images(page, d, me=me, cache=who_cache)
             if cards:
                 meta["cards"] = cards
+        self.mark_others(meta, page, me, who_cache)
+        self.mark_note_reds(page, meta.get("groups") or [])  # 红笔写在纸上的短批注上：书写过程里写明是哪条（2026-11-18）
         book_text = self.page_text(nb, i)
         meta["corrections"] = self.corrections_for(meta.get("groups") or [], (book_text,))
         meta["vocab"] = self.vocab_for(nb, reader or meta.get("target") or "", book_text)
@@ -1895,7 +2571,7 @@ class App:
             meta["owed"] = self.owed_for(meta.get("target") or "", skip={v.get("ref") for v in meta.get("verdicts") or [] if isinstance(v, dict)})
         e = self.page_entry(nb, i) if nb.startswith("book:") else {}
         src = (str(self.book_path(nb[5:])), e["pdf"] + 1) if "pdf" in e else None
-        text = prompt.build_message(meta, paths, self.page_label(nb, i), book_text, sub_id, snapshot, src=src)
+        text = prompt.build_message(meta, paths, self.page_label(nb, i, reader or meta.get("target")), book_text, sub_id, snapshot, src=src)
         if snapshot:  # 快照：卡片、小蓝点上还没交的红字图里看不到，也不附卡片的图——如实说一句（放在最后那句「写回用……」前面）
             unsent = snapshot_unsent(*pages.unsent_on_page(page))
             if unsent:
@@ -1907,11 +2583,12 @@ class App:
             self.record_owed(sub_id, meta.get("target"), nb, self.owed_rows(meta.get("verdicts"), meta["page_key"]))
         return sub_id, text
 
-    def card_images(self, page, d, prefix=""):
+    def card_images(self, page, d, prefix="", me="", cache=None):
         """这一页上要连同红字一起交的长回答卡片：每张画成 d/<prefix>card-<圈号>.png（pages.render_card）。
-        返回 [{id, n, q, img, marks, note?}]，marks 是这次交的红字的 id（平板据此记下「交过了」）；
-        note 为 True 的是纸上的短批注收成的卡片（用户在那条短批注上写了红字，平板交稿时把它收成了圈号，见 pages.from_note）。"""
-        out = []
+        返回 [{id, n, q, img, marks, note?, by?}]，marks 是这次交的红字的 id（平板据此记下「交过了」）；
+        note 为 True 的是纸上的短批注收成的卡片（用户在那条短批注上写了红字，平板交稿时把它收成了圈号，见 pages.from_note）；
+        by（2026-11-17）：给了收消息的对话 me、那张卡片（原来的回答或短批注）是别的对话写的：怎么称呼那个对话（消息里不说成「你之前的回答」）。"""
+        out, cache = [], {} if cache is None else cache
         for it, marks in pages.cards_to_send(page):
             img = d / f"{prefix}card-{it.get('n') or len(out) + 1}.png"
             try:
@@ -1922,6 +2599,9 @@ class App:
             c = {"id": it.get("id"), "n": it.get("n"), "q": it.get("q"), "img": str(img), "marks": [m.get("id") for m in marks]}
             if pages.from_note(it):
                 c["note"] = True
+            k, a = self.who_wrote(it, me, cache) if me else (None, None)
+            if k == "other":
+                c["by"] = self.who_name(a, me)
             out.append(c)
         return out
 
@@ -1941,6 +2621,191 @@ class App:
                 if meta.get("target") == sid and (meta.get("kind") == "scan" or "page" in meta):
                     return meta
         return None
+
+    # -- 蓝字是谁写的（2026-11-17 用户定，《产品定义》第 2 节「本子、对话、AI 的关系」：纸是跨对话、跨 AI 的共同记忆）。
+    #    写回纸上的每一条在页面数据里带 author（对话的 sid、文件夹名 label、文件夹 cwd、哪个 AI），平板落下时从待处理条目抄过去
+    #    （bridge_reply 放进条目，app.js 的 buildItem 等抄到每一条上）。交给一个对话时，这一页上有别的对话写的蓝字，就在消息里说明
+    #    那几条不是它写的、它没有它们的上下文。同一个对话按 sid 认。这以前写的没记作者：它回的那次投递（条目上的 req）在投递记录里
+    #    记着交给了哪个对话，按那个认；查不出（快照、没指明投递、投递记录不在了）就不说。旧数据一个字都不改
+
+    def author_of(self, sid):
+        """sid 这个对话作为作者：{sid, label, cwd, ai}。插件 hello 时没报 ai 的记 Claude；没登记过的对话只记 sid（别的不知道，不编）。
+        sid 是空的返回 None。"""
+        sid = str(sid or "")
+        if not sid:
+            return None
+        s = self.bridge.sessions.get(sid)
+        if not s:
+            return {"sid": sid}
+        out = {"sid": sid, "ai": s.get("ai") or "Claude"}
+        for k in ("label", "cwd"):
+            if s.get(k):
+                out[k] = s[k]
+        return out
+
+    def _sub_reader(self, req, cache):
+        """一次投递（编号 req）交给了哪个对话（投递记录 meta.json 里的 target）；查不到是 None。cache 按投递编号记着，一次消息里只读一遍。"""
+        if not isinstance(req, str) or not SUB_ID_RE.fullmatch(req):
+            return None
+        if req not in cache:
+            try:
+                cache[req] = str(self.load_submission(req).get("target") or "") or None
+            except (KeyError, OSError, ValueError, AttributeError):
+                cache[req] = None
+        return cache[req]
+
+    def who_wrote(self, x, me, cache):
+        """一条蓝字（或卡片下面接着回的一段、一条待处理的回写）对收消息的对话 me 来说是谁写的：("me", None) 它自己；
+        ("other", 作者) 别的对话；(None, None) 查不出（不说）。记着 author 的按它；没记的（这次改动以前写的）按它回的那次投递交给了谁。"""
+        a = x.get("author") if isinstance(x, dict) else None
+        sid = str(a.get("sid") or "") if isinstance(a, dict) else ""
+        if not sid:
+            a = None
+            sid = self._sub_reader(x.get("req") if isinstance(x, dict) else None, cache) or ""
+        if not sid or not me:
+            return None, None
+        if sid == me:
+            return "me", None
+        return "other", a or {"sid": sid}
+
+    def who_name(self, a, me):
+        """消息里怎么称呼写了那几条的别的对话：「文件夹」的对话；和收消息的对话在同一个文件夹里时「「文件夹」的另一个对话」；
+        两边不是同一个 AI 时带上 AI 的名字（「「文件夹」的 Codex 对话」）。不知道文件夹（以前写的、那个对话现在不在了）写「别的对话」。"""
+        s = self.bridge.sessions.get(a.get("sid")) or {}
+        mine = self.bridge.sessions.get(me) or {}
+        label = a.get("label") or s.get("label") or ""
+        label = "" if label == "对话" else label  # 插件没报文件夹时登记的占位名
+        cwd = a.get("cwd") or s.get("cwd") or ""
+        ai, my_ai = a.get("ai") or s.get("ai") or "", mine.get("ai") or "Claude"
+        tag = f" {ai} " if ai and ai != my_ai else ""
+        if not label:
+            return f"别的{tag}对话"
+        same = label == mine.get("label") and bool(cwd) and real_dir(cwd) == real_dir(mine.get("cwd") or "")
+        return f"「{label}」的{'另一个' if same else ''}{tag}对话"
+
+    def others_on(self, page, me, sid2g=None, listed=(), cache=None):
+        """这一页纸上看得见的蓝字里不是 me 这个对话写的（交给 me 的消息里说明用，prompt.others_line）。看得见：和发给 AI 的图里
+        画出来的一样（pages.ai_shown，长回答要有圈号）；长回答卡片下面接着回的每一段也各算一条。listed：消息里另有一份字的列表
+        （单页交时「之前写回的批注」、整本消息里的长回答和小蓝点）里列出的条目 id——那几条在列表里标出来，这里只数个数；
+        别的写出是什么（prompt.item_brief：「勾（g3）」「短批注「……」（g2）」）。sid2g：笔迹 id → 组号。
+        返回 {n, who: [[怎么称呼, 几条]], listed, bare}；没有别的对话写的（或查不出）返回 None：消息里一个字都不多。"""
+        if not me:
+            return None
+        cache = {} if cache is None else cache
+        listed, n, who, bare, nlisted = set(listed or ()), 0, {}, [], 0
+        for it in pages.ai_shown(page):
+            if it.get("type") == "proposal" or not pages.ai_box(it):
+                continue
+            parts = [(it, prompt.item_brief(it, sid2g))]
+            if pages.badge_at(it):
+                parts += [(m, f"圈号 {it.get('n')} 下面接着回的一段") for m in pages.more_of(it)]
+            for x, brief in parts:
+                k, a = self.who_wrote(x, me, cache)
+                if k != "other":
+                    continue
+                n += 1
+                w = self.who_name(a, me)
+                who[w] = who.get(w, 0) + 1
+                if it.get("id") in listed:
+                    nlisted += 1
+                else:
+                    bare.append(brief)
+        if not n:
+            return None
+        return {"n": n, "who": [[w, c] for w, c in who.items()], "listed": nlisted, "bare": bare}
+
+    def answered_elsewhere(self, groups, page, me, cache):
+        """书写过程里的「回答过」（平板发来的 answered：那组红笔的每一笔都有蓝字指着）：指着它的蓝字都是别的对话写的，
+        标上 answered_by = "other"（消息里写「回答过：别的对话答的」）。有一笔没有蓝字指着（以前记的 faded）、
+        有一条是 me 写的或查不出是谁写的，都不标。"""
+        cover = {}
+        for a in page.get("ai") or []:
+            if isinstance(a, dict) and not a.get("dismissed"):
+                for x in list(a.get("on") or []) + list(a.get("on2") or []):
+                    cover.setdefault(x, []).append(a)
+        for g in groups:
+            if not (isinstance(g, dict) and g.get("red") and g.get("answered") and isinstance(g.get("ids"), list) and g["ids"]):
+                continue
+            kinds = set()
+            for x in g["ids"]:
+                items = cover.get(x)
+                if not items:
+                    kinds.add(None)
+                    break
+                kinds.update(self.who_wrote(a, me, cache)[0] for a in items)
+            if kinds == {"other"}:
+                g["answered_by"] = "other"
+
+    def mark_others(self, meta, page, me, cache):
+        """单页交（和快照）的消息里，这一页上别的对话写的蓝字（2026-11-17）：书写过程里谁答的红笔（answered_elsewhere）、
+        「之前写回的批注」里哪几条不是 me 写的（prev_by，和平板带的 prev_notes 一一对应，按平板一起带的 prev_ids 找到那一条）、
+        修改建议的决定里哪几条是别的对话提的（verdicts 的 other）、总的那一句（others）。me 是空的（不知道交给谁）什么都不加。"""
+        if not me:
+            return
+        groups = [g for g in meta.get("groups") or [] if isinstance(g, dict)]
+        self.answered_elsewhere(groups, page, me, cache)
+        by_id = {a.get("id"): a for a in page.get("ai") or [] if isinstance(a, dict) and a.get("id")}
+        notes, ids = meta.get("prev_notes"), meta.get("prev_ids")
+        listed = set()
+        if isinstance(notes, list) and isinstance(ids, list) and len(ids) == len(notes):
+            by = []
+            for x in ids:
+                it = by_id.get(x) if isinstance(x, str) else None
+                if not it:
+                    by.append(None)
+                    continue
+                other = self.who_wrote(it, me, cache)[0] == "other"
+                segs = [self.who_wrote(m, me, cache)[0] == "other" for m in pages.more_of(it)] if it.get("type") == "write" else []
+                by.append({"other": other, "more": segs} if other or any(segs) else None)
+            if any(by):
+                meta["prev_by"] = by
+            listed = {ids[k] for k in prompt.prev_shown(notes)}
+        for v in meta.get("verdicts") or []:
+            if not isinstance(v, dict):
+                continue
+            v.pop("other", None)  # 由这里按存好的这一页定，不认平板发来的
+            it = by_id.get(v.get("ref"))
+            if it and self.who_wrote(it, me, cache)[0] == "other":
+                v["other"] = True
+        sid2g = {x: g["id"] for g in groups if g.get("id") for x in g.get("ids") or [] if isinstance(x, str)}
+        others = self.others_on(page, me, sid2g, listed, cache)
+        if others:
+            meta["others"] = others
+
+    @staticmethod
+    def mark_note_reds(page, groups, vis=None):
+        """红笔写在纸上的短批注上（2026-11-18 用户改的，《产品定义》「红笔批过的短批注留在纸上」）：那条批注和红字都留在纸上，
+        这里给那组红笔标上 note_on = 那条批注的原话，书写过程里写明写在哪条批注上（prompt.red_label）。
+        只看还要回答的红笔组（prompt.asking）。vis：{组号: 那组没擦掉的笔迹}（整本检测按服务端分的组给）；
+        不给的按交上来的 ids 在存好的这一页里找（单页交）。平板发来的 note_on 不认，由这里定。"""
+        groups = [g for g in groups if isinstance(g, dict)]
+        for g in groups:
+            g.pop("note_on", None)
+        if vis is None:
+            by_id = {s.get("id"): s for s in pages.ink(page) if s.get("id") and s.get("pts") and not s.get("erasedAt")}
+            vis = {g.get("id"): [by_id[x] for x in g["ids"] if isinstance(x, str) and x in by_id]
+                   for g in groups if isinstance(g.get("ids"), list)}
+        want = {g["id"]: g for g in groups if isinstance(g.get("id"), str) and prompt.asking(g) and vis.get(g["id"])}
+        for gid, a in pages.red_on_notes(page, [(k, vis[k]) for k in want]).items():
+            want[gid]["note_on"] = " ".join(str(a.get("text") or "").split())
+
+    def unplaced_others(self, nb, me, cache):
+        """{页序号: 条数}：还在排队等平板落下的回写里，别的对话写的（整本消息里「还在排队」那句不全算在收消息的对话头上）。"""
+        out = {}
+        if not me:
+            return out
+        for i, e in enumerate(self.layout_of(nb).pages):
+            f = self._key_file(nb, e["key"], ".pending.json")
+            if not f.exists():
+                continue
+            try:
+                entries = json.loads(f.read_text("utf-8"))
+            except ValueError:
+                continue
+            n = sum(len(x.get("items") or []) for x in entries if isinstance(x, dict) and self.who_wrote(x, me, cache)[0] == "other")
+            if n:
+                out[i] = n
+        return out
 
     def attach_reco(self, nb, i, groups, only=None, page=None):
         """给笔迹分组加上本机手写识别的候选（g["reco"]）。
@@ -2088,7 +2953,8 @@ class App:
             meta = self.load_submission(submission)
         elif self.bridge.where:  # 没指定投递：平板当前那一页（box 用页面坐标）
             w = self.bridge.where
-            meta = {"id": "direct-" + uuid.uuid4().hex[:6], "nb": w["nb"], "page": w["page"], "groups": [],
+            # page_key：平板报位置时带的那一页的键（2026-11-17）；平板手上的页序过时了也写到它眼前那一页上，那一页删掉了就不写
+            meta = {"id": "direct-" + uuid.uuid4().hex[:6], "nb": w["nb"], "page": w["page"], "page_key": w.get("key"), "groups": [],
                     "crop": {"x0": 0, "y0": 0, "scale": 1}, "sel": None, "level": None, "rot": None}
         else:
             meta = self.latest_submission_for(sid)
@@ -2122,6 +2988,8 @@ class App:
                    "crop": meta.get("crop"), "sel": meta.get("sel"), "level": meta.get("level"), "rot": meta.get("rot"), "gx": gx,
                    "vx": {v["id"]: v["ref"] for v in meta.get("verdicts") or [] if isinstance(v, dict) and v.get("id") and v.get("ref")},
                    "reds": reds, "live": live, "marks": marks}
+            if isinstance(meta.get("redo"), dict):  # 卡片上的「再短点」「展开讲」请的重写（2026-11-17）：bridge_reply 据此把回应接到那张卡片下面
+                loc["redo"] = meta["redo"]
         loc["nb"] = self.current_nb(loc["nb"])  # 投递之后书可能换成了新版、跟着改了名
         # 投递之后用户可能插了页、删了页：按页的键找它现在是第几页
         if not loc["key"]:
@@ -2138,7 +3006,7 @@ class App:
         return self.notebook_info(nb)["pages"]
 
     def resolve_nb(self, want, claude=False):
-        """Claude 说的本子：id，或名字（书名、「草稿本」、「Claude 推送」；也可只写名字的一部分）。
+        """Claude 说的本子：id，或名字（书名、「草稿本」、推送本子的「推送 · 文件夹名」；也可只写名字的一部分）。
 
         claude=True（/bridge 一侧，2026-11-16 用户定「拦住，也不列名字」）：只在本地的本子只在写全了时认出来（id、名字，
         或文件名去掉扩展名后和名字一样），由调用的地方拦下；只写了一部分的不往它们上面配，出错时列出的现有本子里也没有它们。
@@ -2169,7 +3037,7 @@ class App:
                 r = self._doc(nb[5:])[e["pdf"]].rect
             return turn(round(PAGE_W * r.height / r.width, 1)), self.book_page_jpeg(nb[5:], e["pdf"])
         if "board" in e:
-            return turn(self.board_index()["pages"][e["board"]]["h"]), self.board_image(e["board"])
+            return turn(self.board_index(nb)["pages"][e["board"]]["h"]), self.board_image(e["board"], nb)
         lay, pdf_h = self.layout_of(nb), []
         if nb.startswith("book:"):
             with self.pdf_lock:
@@ -2203,8 +3071,10 @@ class App:
                 s[key] = max(s.get(key, 0), t)
             self._seen_file(nb).write_text(json.dumps({"by": by}), "utf-8")
 
-    def scan(self, nb, page_nos=None, only_new=False, region=None, target=None, origin="claude"):
-        """把一本里写过字的页（或指定的页）画成图，写成一条消息。返回（投递编号, 消息, 页数）。"""
+    def scan(self, nb, page_nos=None, only_new=False, region=None, target=None, origin="claude", only_keys=None, size=None):
+        """把一本里写过字的页（或指定的页）画成图，写成一条消息。返回（投递编号, 消息, 页数）。
+        only_keys：只取这些键的页（推送本子里几页一起交时，只带上和眼前这一页发往同一个对话的页，见 push_group_keys）。
+        size：平板点「AI」几页一起交时「AI」旁边那个开关选的档（2026-11-17），消息里带一句（prompt.size_line）。"""
         self.ensure_shareable(nb)
         if fitz is None:
             raise ValueError("没有安装 PyMuPDF，不能整本检测")
@@ -2215,10 +3085,15 @@ class App:
                 raise ValueError(f"页码超出范围（这本共 {n} 页）")
         else:
             idxs = list(range(n))
+        if only_keys is not None:
+            lay0 = self.layout_of(nb)
+            idxs = [i for i in idxs if lay0.entry(i)["key"] in only_keys]
         if region and len(idxs) != 1:
             raise ValueError("region 只能配合单独一页使用")
         seen = self.seen(nb, target)
         unplaced = self.unplaced(nb)
+        who_cache = {}  # 蓝字是谁写的：按投递编号记着交给了哪个对话（App.who_wrote），这一次里只读一遍
+        unplaced_other = self.unplaced_others(nb, target, who_cache) if unplaced else {}
         lay = self.layout_of(nb)
         picked, skipped_old = [], 0
         for i in idxs:
@@ -2262,7 +3137,8 @@ class App:
             pages.render_page(page, str(img), base_h, bg, labelled, scale, clip, blank=blank)
             key = lay.entry(i)["key"]
             vis = dict(pages.group_strokes(pages.ink(page)))
-            gx = {g["id"]: {"ids": [s["id"] for s in vis[g["id"]]], "red": g["red"], "sel": g["inSel"]} for g in groups if g["id"] in vis}
+            self.mark_note_reds(page, groups, vis)  # 红笔写在纸上的短批注上：书写过程里写明是哪条（2026-11-18）
+            gx = {g["id"]:{"ids": [s["id"] for s in vis[g["id"]]], "red": g["red"], "sel": g["inSel"]} for g in groups if g["id"] in vis}
             # 只是划线、圈、箭头的组不用交读法（mark_like；2026-11-17 用户定：几页一起交时也免，和单页交一样）。
             # 这条路上没有 PP-OCR 的读法，只凭本机手写识别判断；没认过字的组照旧要
             bare = [g["id"] for g in groups if g["n"] > g["erased"] and mark_like(g)]
@@ -2272,15 +3148,30 @@ class App:
                                    # 回的时候要交读法的：这一页上次之后新写的红笔（App.reads_owed）；没全擦掉的组
                                    "reds": [g["id"] for g in groups if g["red"] and g["inSel"] and g["n"] > g["erased"] and g["id"] not in bare],
                                    "live": [g["id"] for g in groups if g["n"] > g["erased"]], "marks": bare}
-            info = {"no": i + 1, "image": str(img), "label": self.page_label(nb, i), "scale": scale, "h": h, "y0": y0,
+            # 别的对话写的蓝字（2026-11-17）：长回答、小蓝点的列表里标出来，修改建议标出是别的对话提的，这一页另说一句（others）
+            who = (lambda x: self.who_wrote(x, target, who_cache)[0] == "other") if target else (lambda x: False)
+            answers = []
+            for a in pages.answers_of(page):
+                ans = dict({"n": a.get("n"), "q": a.get("q"), "text": a.get("text"), "more": pages.more_of(a)},
+                           **({"note": True} if pages.from_note(a) else {}), **({"open": True} if pages.open_of(a) else {}))
+                segs = [who(m) for m in ans["more"]]
+                if who(a) or any(segs):
+                    ans["by"] = {"other": who(a), "more": segs}
+                answers.append(ans)
+            for v in verdicts:
+                if who(next((a for a in page.get("ai") or [] if isinstance(a, dict) and a.get("id") == v["ref"]), None)):
+                    v["other"] = True
+            info = {"no": i + 1, "image": str(img), "label": self.page_label(nb, i, target), "scale": scale, "h": h, "y0": y0,
                     "groups": groups, "now": pages.last_touch(page), "first": key not in seen,
-                    "clip": clip if region else None, "base_h": base_h, "role": self.page_role(nb, i),
-                    "verdicts": verdicts,
-                    "answers": [dict({"n": a.get("n"), "q": a.get("q"), "text": a.get("text"), "more": pages.more_of(a)},
-                                     **({"note": True} if pages.from_note(a) else {})) for a in pages.answers_of(page)]}
+                    "clip": clip if region else None, "base_h": base_h, "role": self.page_role(nb, i, target),
+                    "verdicts": verdicts, "answers": answers}
+            others = self.others_on(page, target, {s["id"]: gid for gid, ss in vis.items() for s in ss},
+                                    {a.get("id") for a in pages.answers_of(page) + pages.dot_items(page)}, who_cache) if target else None
+            if others:
+                info["others"] = others
             if verdicts:
                 sent[i] = [v["ref"] for v in verdicts]
-            cards = self.card_images(page, d, prefix=f"p{i + 1:03d}-")  # 长回答卡片上的红字：每张卡片一张图
+            cards = self.card_images(page, d, prefix=f"p{i + 1:03d}-", me=target or "", cache=who_cache)  # 长回答卡片上的红字：每张卡片一张图
             if cards:
                 info["cards"] = cards
                 msent[i] = {c["id"]: c["marks"] for c in cards if c.get("id")}
@@ -2289,10 +3180,12 @@ class App:
                 info["pdf_page"] = lay.entry(i)["pdf"] + 1
             if unplaced.get(i):
                 info["unplaced"] = unplaced[i]
+                if unplaced_other.get(i):
+                    info["unplaced_other"] = unplaced_other[i]
             # 收成小蓝点的短批注：图里只有一个点，字写进消息；浮出来时上面写了还没交的红字的，后面写明图里看不到（SCAN_DOT_UNSENT）。
-            # 用户点「AI」几页一起交时，平板已经先把这种小蓝点收成卡片了，不写
-            dots = [str(a["text"]).strip() + (SCAN_DOT_UNSENT if origin != "tablet" and pages.unsent_marks(a) else "")
-                    for a in pages.dot_items(page)]
+            # 用户点「AI」几页一起交时，平板已经先把这种小蓝点收成卡片了，不写。别的对话写的前面标〔不是你写的〕（2026-11-17）
+            dots = [(prompt.OTHERS_TAG if who(a) else "") + str(a["text"]).strip()
+                    + (SCAN_DOT_UNSENT if origin != "tablet" and pages.unsent_marks(a) else "") for a in pages.dot_items(page)]
             if dots:
                 info["dots"] = dots
             infos.append(info)
@@ -2305,9 +3198,11 @@ class App:
         # 之前采纳了、还没回报的修改：用户点「AI」几页一起交时列出来（Claude 自己整本检测取来的不列）（B 组⑤）
         owed = self.owed_for(target, skip={r["ref"] for r in owe_now}) if origin == "tablet" and infos else []
         text = prompt.build_scan_message(title, infos, sub_id, origin=origin, only_new=only_new,
-                                         skipped_old=skipped_old, truncated=truncated, owed=owed)
+                                         skipped_old=skipped_old, truncated=truncated, owed=owed, size=size)
         meta = {"id": sub_id, "kind": "scan", "nb": nb, "target": target,
                 "created": datetime.now().isoformat(timespec="seconds"), "pages": entries}
+        if origin == "tablet" and size in ("brief", "clear", "full"):
+            meta["size"] = size
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
         (d / "message.txt").write_text(text, "utf-8")
         self.record_owed(sub_id, target, nb, owe_now)
@@ -2327,12 +3222,15 @@ class App:
             g["inSel"] = g["t1"] > t_seen or (g.get("erasedAt") or 0) > t_seen
         return groups
 
-    def new_pages(self, nb, sid=None):
-        """这本里有新笔迹（这个对话上次看过之后新写或擦改）的页：平板点「AI」时，除了当前页还有别的页就几页一起交。"""
+    def new_pages(self, nb, sid=None, keys=None, only=None):
+        """这本里有新笔迹（这个对话上次看过之后新写或擦改）的页：平板点「AI」时，除了当前页还有别的页就几页一起交。
+        给了 keys（一个列表）：同样几页的键按顺序放进去（和页码是同一次读的页序）。only：只看这些键的页（push_group_keys）。"""
         if self.is_local(nb):
             return []
         seen, lay, out = self.seen(nb, sid), self.layout_of(nb), []
         for i, e in enumerate(lay.pages):
+            if only is not None and e["key"] not in only:
+                continue
             f = self._key_file(nb, e["key"])
             if not f.exists():
                 continue
@@ -2342,6 +3240,10 @@ class App:
                 out.append(i)
             elif self.unsent_card_marks(nb, e["key"], page):  # 纸上没写新字，只在长回答的卡片上写了红字：也算有新东西
                 out.append(i)
+            else:
+                continue
+            if keys is not None:
+                keys.append(e["key"])
         return out
 
     def unsent_card_marks(self, nb, key, page):
@@ -2355,7 +3257,9 @@ class App:
         lay = self.layout_of(nb)
         for i, cards in sent.items():
             self.add_pending(nb, lay.entry(i)["key"], {"msent": cards, "req": req, "t": int(time.time() * 1000)})
-        self.bridge.emit("msent", nb=nb, req=req, pages={str(i): c for i, c in sent.items()})
+        # keys：各页的键（2026-11-17）。平板按键找手上的那一页，页序在别处改过、它还没刷新时不记到别的页上
+        self.bridge.emit("msent", nb=nb, req=req, pages={str(i): c for i, c in sent.items()},
+                         keys={str(i): lay.entry(i)["key"] for i in sent})
 
     def mark_pages_sent(self, nb, sent, req):
         """用户点「AI」几页一起交上去的那几页：记下各页交到了哪一笔为止（那一页当时最后落笔、擦除的时刻，平板的时钟）。
@@ -2367,7 +3271,8 @@ class App:
         now = int(time.time() * 1000)
         for i, t in sent.items():
             self.add_pending(nb, lay.entry(i)["key"], {"lsent": t, "req": req, "t": now})
-        self.bridge.emit("lsent", nb=nb, req=req, pages={str(i): t for i, t in sent.items()})
+        self.bridge.emit("lsent", nb=nb, req=req, pages={str(i): t for i, t in sent.items()},
+                         keys={str(i): lay.entry(i)["key"] for i in sent})
 
     def pending_msent(self, nb, key):
         """还在队列里、平板还没合进页面的「卡片红字交过了」标记（红字的 id）。"""
@@ -2411,7 +3316,8 @@ class App:
         lay = self.layout_of(nb)
         for i, ids in sent.items():
             self.add_pending(nb, lay.entry(i)["key"], {"vsent": ids, "t": int(time.time() * 1000)})
-        self.bridge.emit("vsent", nb=nb, pages={str(i): ids for i, ids in sent.items()})
+        self.bridge.emit("vsent", nb=nb, pages={str(i): ids for i, ids in sent.items()},
+                         keys={str(i): lay.entry(i)["key"] for i in sent})
 
     def pending_vsent(self, nb, key):
         """还在队列里、平板还没合进页面的「已发」标记（建议的 id）。"""
@@ -3219,7 +4125,7 @@ class App:
         similar = self.similar_book(src)
         if similar and mode == "replace":
             summary = self.update_document("book:" + similar, src)
-            return {"nb": summary["id"], "page": (summary["changed"] + summary["added"] + [1])[0] - 1, "title": summary["title"],
+            return {"nb": summary["id"], "page": summary["page"], "title": summary["title"],
                     "updated": True, "summary": summary["text"], "prev": summary["prev"]}
         nb = self.import_document(src, as_new=mode == "new")
         return {"nb": nb, "page": 0, "title": self.nb_title(nb)}
@@ -3294,7 +4200,7 @@ class App:
                     for x in self.offers():
                         if x["state"] == "new" and x["name"] == name:
                             self.resolve_offer(x["id"], "dismissed")
-                return {"nb": summary["id"], "old": summary["old_id"], "page": (summary["changed"] + summary["added"] + [1])[0] - 1,
+                return {"nb": summary["id"], "old": summary["old_id"], "page": summary["page"],
                         "title": summary["title"], "summary": summary["text"], "headline": summary["headline"],
                         "prev": summary["prev"], "updated": True}
             nb = self.import_document(src, as_new=mode == "new")
@@ -3444,7 +4350,24 @@ def clean_item(obj):
             item["q"] = obj["q"].strip()[:200]  # 回答的是哪个红笔问题（照用户写的原样转写）
         if obj.get("card") not in (None, ""):  # 回应卡片上的红字：接在圈号 card 那张卡片下面（填得不对的由 bridge_reply 报错）
             item["card"] = card_no(obj["card"])
+        # 摊在纸上（2026-11-17，暂定）：想放在哪——一个方向（right/below/left/above），或消息图里的一个像素框 [x0,y0,x1,y1]；
+        # 草稿纸先试那里，放不下再照常找。fold 为 true：这条收着（只标圈号）。认不出的当没写（不报错：放哪本来由草稿纸定）
+        place = obj.get("place")
+        if isinstance(place, str) and place.strip().lower() in WRITE_PLACES:
+            item["place"] = place.strip().lower()
+        elif (isinstance(place, list) and len(place) == 4
+              and all(isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) <= PLACE_MAX for v in place)  # NaN、无穷大比什么都是 False
+              and place[2] > place[0] and place[3] > place[1]):
+            # 框要是个正常的框：数有限、不离谱（图的像素坐标到不了这么大）、右下在左上的右下。不是的当没写——
+            # 平板拿它找空地时是一格一格试的，离谱的框会让纸面长时间没反应（2026-11-18，审查后加）
+            item["place"] = [float(v) for v in place]
+        if obj.get("fold") is True:
+            item["fold"] = True
     return item
+
+
+WRITE_PLACES = ("right", "below", "left", "above")  # write 的 place 认的四个方向（平板 app.js 的 OPEN_SIDES）
+PLACE_MAX = 20000  # place 像素框的每个数最大多大（给 AI 的图长边几千像素；超过的当没写）
 
 
 # 短批注最多多长（2026-11-16 规则瘦身 B 组①：原来规则里写「短的（约 40 字以内）用 note」，改成服务按字数归位）：
@@ -3570,6 +4493,52 @@ def is_badge(a):
 def shown_items(items):
     """Claude 写回的这一批里有没有平板纸上看得见的（读法只在「Claude 读到了什么」里显示，不算）。"""
     return isinstance(items, list) and any(isinstance(it, dict) and it.get("type") != "read" for it in items)
+
+
+# 复制本子、复制一页时带什么（2026-11-18 用户在弹窗里定的三种）：all 全部照样、noai 不带 AI 的蓝字、ink 只留黑笔
+COPY_MODES = ("all", "noai", "ink")
+
+
+def copy_page_data(page, mode):
+    """复制出来的那一页的数据（page 是从文件读出来的一份，直接改它）。
+    all：我写的黑笔红笔、AI 写回的一切（短批注、圈号和卡片连同卡片上的红字、摊开的、小蓝点、批改符号、图、公式、示意图）、
+    「Claude 读到了什么」的读法、纸的大小和转向，照原来的。noai：再去掉 page.ai 里的一切和读法（卡片上的红字在卡片里，一起去掉），
+    「交到了哪一笔为止」（lastSent，只管短批注上的红字什么时候收成卡片）也去掉。ink：再去掉我的红笔。
+    擦掉的（erasedAt：笔迹、AI 的批注、卡片上的红字）都不带；版本号和最后写它的设备（rev、by）不带，新的一份从头算。"""
+    if not isinstance(page, dict):
+        page = {}
+    out = {k: v for k, v in page.items() if k not in ("rev", "by")}
+    strokes = [s for s in page.get("strokes") or [] if isinstance(s, dict) and not s.get("erasedAt")]
+    if mode == "ink":
+        strokes = [s for s in strokes if s.get("c") != "r"]
+    out["strokes"] = strokes
+    if mode == "all":
+        ai = []
+        for a in page.get("ai") or []:
+            if not isinstance(a, dict) or a.get("erasedAt"):
+                continue
+            if isinstance(a.get("marks"), list):
+                a["marks"] = [m for m in a["marks"] if isinstance(m, dict) and not m.get("erasedAt")]
+            ai.append(a)
+        out["ai"] = ai
+        out["reads"] = page.get("reads") if isinstance(page.get("reads"), list) else []
+    else:
+        out["ai"], out["reads"] = [], []
+        out.pop("lastSent", None)
+    out.setdefault("v", 1)
+    return out
+
+
+def copy_pending(f, mode):
+    """复制一页时，它还没落到纸上的 Claude 写回（待处理文件 f 里的）带不带：全部照样时带上写回的那几批（打开副本时一样落下）；
+    只是记账的（卡片红字、✓/× 决定、几页一起交「交过了」）不带——那是原来那份交给对话的事，副本还没交过。别的两种都不带。"""
+    if mode != "all" or not f.exists():
+        return []
+    try:
+        entries = json.loads(f.read_text("utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("items"), list)] if isinstance(entries, list) else []
 
 
 def attach_cards(page, items):
@@ -3702,8 +4671,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(e).strip("'\"")}, 404)
         except Conflict as e:
             self.send_json({"error": str(e), "conflict": True}, 409)
+        except PageGone as e:
+            self.send_json({"error": str(e), "pageGone": True}, 410)
         except TargetGone as e:
             self.send_json({"error": str(e), "gone": e.label}, 410)
+        except TargetUnset as e:
+            self.send_json({"error": str(e), "pick": True}, 410)
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001 - 本地服务：打印出来，返回 500
@@ -3885,17 +4858,46 @@ def api_add_page(h, q):
 
 
 def api_get_page(h, q):
-    h.send_json(h.app.load_page(q.get("nb", "scratch"), int(q.get("i", 0))))
+    """第 i 页的数据；回话头 X-Page-Key 是这一页的键（2026-11-17）：平板记住手上这一页是哪一页，存的时候按键存。
+    书页另有 X-Page-Gen：这时这本书原地更新过几次，平板存这一页、取它的回答时带回来（书在那之后更新过，服务按新旧页对照换键）。"""
+    key, gen, text = h.app.page_for_tablet(q.get("nb", "scratch"), int(q.get("i", 0)))
+    head = {"Cache-Control": "no-store", "X-Page-Key": key}
+    if gen is not None:
+        head["X-Page-Gen"] = str(gen)
+    h.send_bytes(text.encode("utf-8"), "application/json; charset=utf-8", 200, head)
+
+
+def _gen_arg(q):
+    """地址里的 gen（平板取那一页时这本书更新过几次）；没带是 None。"""
+    g = q.get("gen")
+    if g in (None, ""):
+        return None
+    if not str(g).isdigit():
+        raise ValueError("gen 不对")
+    return int(g)
 
 
 def api_put_page(h, q):
-    rev = h.app.save_page(q.get("nb", "scratch"), int(q.get("i", 0)), h.read_body(limit=40 * 1024 * 1024),
-                          client=h.headers.get("X-Client", "")[:40])
-    h.send_json({"ok": True, "rev": rev})
+    """存一页。带 key（这一页的键，2026-11-17 起的平板页面都带）就按键存（App.put_page）：回话里 at 是它现在是第几页，
+    那一页已经删掉了时 deleted 为 true（字存进了删掉的那一页）。书页再带 gen：书在平板取那一页之后更新过，按新旧页对照换键再存，
+    回话里 key 是实际存到的键、gen 是现在更新过几次。不带 key 的旧页面照旧按页码存，回话照旧。"""
+    key = q.get("key") or None
+    res = h.app.put_page(q.get("nb", "scratch"), int(q.get("i", 0)), h.read_body(limit=40 * 1024 * 1024),
+                         client=h.headers.get("X-Client", "")[:40], key=key, gen=_gen_arg(q) if key else None)
+    out = {"ok": True, "rev": res["rev"]}
+    if key:
+        out["at"] = res["at"]
+        out["key"] = res["key"]
+        if res["gen"] is not None:
+            out["gen"] = res["gen"]
+        if res["deleted"]:
+            out["deleted"] = True
+    h.send_json(out)
 
 
 def api_pending(h, q):
-    h.send_json(h.app.take_pending(q.get("nb", "scratch"), int(q.get("i", 0))))
+    key = q.get("key") or None
+    h.send_json(h.app.take_pending(q.get("nb", "scratch"), int(q.get("i", 0)), key, _gen_arg(q) if key else None))
 
 
 def api_book_page(h, q):
@@ -3930,25 +4932,31 @@ def api_figure(h, q):
 
 
 def api_board_bg(h, q):
-    e = h.app.page_entry("board", int(q.get("i", 0)))
+    """推送页的底图。nb：哪一本推送本子（2026-11-17 起按项目文件夹各一本；不带的是以前那本「Claude 推送」）。"""
+    nb = q.get("nb") or "board"
+    if h.app.kind_of(nb) != "board":
+        raise KeyError(f"没有这个本子：{nb}")
+    e = h.app.page_entry(nb, int(q.get("i", 0)))
     if "board" not in e:
         raise KeyError("这一页是插入的空白纸，没有底图")
-    h.send_bytes(h.app.board_image(e["board"]), "image/png", 200, {"Cache-Control": "private, max-age=86400"})
+    h.send_bytes(h.app.board_image(e["board"], nb), "image/png", 200, {"Cache-Control": "private, max-age=86400"})
 
 
 def api_page_insert(h, q):
+    """{nb, after, orient, afterKey}：在第 after 页后插一张空白纸；afterKey（2026-11-17）是平板以为第 after 页是哪一页，按它找。"""
     app = h.app
     req = h.read_json()
     nb = str(req.get("nb") or "scratch")
-    i = app.insert_page(nb, int(req.get("after", -1)), req.get("orient"))
+    i = app.insert_page(nb, int(req.get("after", -1)), req.get("orient"), str(req.get("afterKey") or "") or None)
     h.send_json({"page": i, "notebook": app.notebook_info(nb)})
 
 
 def api_page_delete(h, q):
+    """{nb, i, key}：删第 i 页；key（2026-11-17）是平板以为第 i 页是哪一页，按它删（那一页已经删掉了就什么都不做）。"""
     app = h.app
     req = h.read_json()
     nb = str(req.get("nb") or "scratch")
-    app.delete_page(nb, int(req.get("i", 0)))
+    app.delete_page(nb, int(req.get("i", 0)), str(req.get("key") or "") or None)
     h.send_json({"notebook": app.notebook_info(nb)})
 
 
@@ -3960,6 +4968,29 @@ def api_page_move(h, q):
     nb = str(req.get("nb") or "scratch")
     i = app.move_page(nb, int(req.get("from", -1)), int(req.get("to", -1)), str(req.get("key") or "") or None)
     h.send_json({"page": i, "notebook": app.notebook_info(nb)})
+
+
+def api_page_copy(h, q):
+    """复制这一页（2026-11-18）：{nb, page, key, mode}，接在它后面；key 是平板以为第 page 页是哪一页，按它找。
+    mode：all 全部照样、noai 不带 AI 的蓝字、ink 只留黑笔。只复制空白纸（书页、推送的页 400）。返回新页的页码和这本的样子。"""
+    app = h.app
+    req = h.read_json()
+    nb = str(req.get("nb") or "scratch")
+    i = app.copy_page(nb, int(req.get("page", 0)), str(req.get("key") or "") or None, str(req.get("mode") or "all"))
+    print(f"[复制] 《{app.nb_title(nb)}》第 {i} 页 → 第 {i + 1} 页（{req.get('mode') or 'all'}）")
+    h.send_json({"page": i, "notebook": app.notebook_info(nb)})
+
+
+def api_notebook_copy(h, q):
+    """复制这本（2026-11-18）：{nb, mode, base, suffix}。base、suffix：副本的名字「base suffix」（平板按界面的语言给，
+    英文界面是「Notes copy」；不给就是「原名 副本」），重名的再加 2、3……。返回 {id, title} 和抽屉的样子（folders、top）。"""
+    app = h.app
+    req = h.read_json()
+    nb = str(req.get("nb") or "")
+    new = app.copy_notebook(nb, str(req.get("mode") or "all"), req.get("base"), req.get("suffix"))
+    title = app.nb_title(new)
+    print(f"[复制] 《{app.nb_title(nb)}》→《{title}》（{req.get('mode') or 'all'}）")
+    h.send_json(dict(app.folder_view(), id=new, title=title))
 
 
 def api_page_hidden(h, q):
@@ -3982,11 +5013,23 @@ def api_thumb(h, q):
 
 
 def api_notebook_new(h, q):
+    """新建一本空白本子。带 folder（文件夹的 id，2026-11-18：文件夹那一行上的「＋」）就直接放进那个文件夹；
+    那个文件夹已经不在了（别的设备上删了）照样建，放在外面，回话里 folder 为空，平板据此说一句。"""
     app = h.app
     req = h.read_json()
+    fid = str(req.get("folder") or "")
     nb = app.new_pad(req.get("title"), str(req.get("paper") or "portrait"))
-    print(f"[新本子] {app.nb_title(nb)}")
-    h.send_json(app.notebook_info(nb))
+    put = None
+    if fid:
+        try:
+            put = app.change_folders(lambda items: folders.move(items, nb, fid))
+        except (KeyError, ValueError) as e:
+            print(f"[新本子] 没放进文件夹：{str(e).strip(chr(39))}")
+    print(f"[新本子] {app.nb_title(nb)}" + (f"（在「{put['name']}」里）" if put else ""))
+    info = app.notebook_info(nb)
+    if fid:
+        info = dict(info, folder=put["id"] if put else "")
+    h.send_json(info)
 
 
 def api_upload(h, q):
@@ -4006,20 +5049,27 @@ def api_upload(h, q):
 
 
 def api_where(h, q):
+    """平板眼前是哪一本、第几页；key（2026-11-17）是那一页的键：Claude 不指定投递、写到「平板当前那一页」时按它找（App.locate）。"""
     req = h.read_json()
     if isinstance(req.get("nb"), str) and isinstance(req.get("page"), int):
-        h.app.bridge.where = {"nb": req["nb"], "page": req["page"]}
+        w = {"nb": req["nb"], "page": req["page"]}
+        if isinstance(req.get("key"), str) and layout.KEY_RE.match(req["key"]):
+            w["key"] = req["key"]
+        h.app.bridge.where = w
     h.send_json({"ok": True})
 
 
 def api_sessions(h, q):
     """连着的对话（最近打字的在前）：平板「这本发往」的列表按文件夹分组，每个对话写最近打的一句话、什么时候开的、
-    多久前活跃、执行过 /ink 没有（插件报的；/ink here 指定过的那个也算）。"""
+    多久前活跃、执行过 /ink 没有（插件报的；/ink here 指定过的那个也算）。
+    ai：这个对话是哪个 AI（2026-11-17，接别的 AI 的第一步：经 mcp_server.py 接进来的报自己是哪家；插件没报的记 Claude，和 App.author_of
+    一样）。平板上不是 Claude 的才标出来。"""
     b = h.app.bridge
     now = time.time()
-    h.send_json({"sessions": [{"sid": s["sid"], "label": s["label"], "cwd": s["cwd"], "idle": int(now - s["active"]),
+    # dir：对话所在文件夹的完整写法，和本子信息里的 sourceDir 比（这本的原文件在不在这个文件夹里，2026-11-17）
+    h.send_json({"sessions": [{"sid": s["sid"], "label": s["label"], "cwd": s["cwd"], "dir": real_dir(s["cwd"]), "idle": int(now - s["active"]),
                                "started": s.get("started"), "hint": s.get("hint"),
-                               "ink": bool(s.get("ink")) or s["sid"] == b.preferred} for s in b.alive()],
+                               "ink": bool(s.get("ink")) or s["sid"] == b.preferred, "ai": s.get("ai") or "Claude"} for s in b.alive()],
                  "default": b.default_target(), "preferred": b.preferred})
 
 
@@ -4035,7 +5085,10 @@ def api_send(h, q):
     req = json.loads(h.read_body(limit=30 * 1024 * 1024))
     nb = str(req.get("nb") or "scratch")
     app.ensure_shareable(nb)
-    s = app.send_target(nb, str(req.get("target") or ""))  # 这本的对话；原对话不在了先问
+    # 平板带了这一页的键（2026-11-17）：按键找它现在是第几页，页序在别处改过、平板还没刷新时也交对那一页；删掉了就不交
+    req["page"] = app.page_now(nb, req.get("page") or 0, req.pop("key", None))
+    # 这本的对话；原对话不在了先问。推送本子里记了是谁推的页：发回推这一页的对话（2026-11-17）
+    s = app.send_target(nb, str(req.get("target") or ""), app.page_key(nb, req["page"]))
     target = req["target"] = s["sid"]
     sub_id, _ = app.save_submission(req)
     b.enqueue(target, sub_id)
@@ -4067,6 +5120,7 @@ def api_snapshot(h, q):
         # 发出快照请求时查过一次（bridge_snapshot），但平板可能正好在这几秒里换到了「只在本地」的本子：
         # 交回来的是那一本的页，这里再查一次，不存、不发，回给 Claude 的话不带书名
         h.app.ensure_shareable(str(req.get("nb") or "scratch"), "平板上开着的这一本")
+        req["page"] = h.app.page_now(str(req.get("nb") or "scratch"), req.get("page") or 0, req.pop("key", None))  # 按页的键找（同 api_send）
         slot["result"] = h.app.save_submission(req, snapshot=True, reader=slot.get("sid"))
     except ValueError as e:
         slot["error"] = str(e)
@@ -4075,8 +5129,11 @@ def api_snapshot(h, q):
 
 
 def api_new_pages(h, q):
-    nb = q.get("nb", "scratch")
-    h.send_json({"pages": h.app.new_pages(nb, h.app.seen_sid(nb))})
+    """有新笔迹的页：pages 是页码，keys 是同样几页的键（2026-11-17；平板按键对到自己手上的页序，页序在别处改过时不弄错是哪几页）。"""
+    nb, keys, key = q.get("nb", "scratch"), [], q.get("key") or None
+    # key：平板眼前这一页的键（2026-11-17）。推送本子里各页可能发往不同的对话：按眼前这一页发往的那个算「新写的」，
+    # 只数和它发往同一个对话的页（几页一起交时都交给它）
+    h.send_json({"pages": h.app.new_pages(nb, h.app.seen_sid(nb, key), keys, h.app.push_group_keys(nb, key)), "keys": keys})
 
 
 def api_send_all(h, q):
@@ -4085,9 +5142,12 @@ def api_send_all(h, q):
     req = h.read_json()
     nb = str(req.get("nb") or "scratch")
     app.ensure_shareable(nb)
-    s = app.send_target(nb, str(req.get("target") or ""))
+    # key：平板眼前这一页的键（2026-11-17）：推送本子里几页一起交，按眼前这一页发往的对话算
+    key = req.get("key") if isinstance(req.get("key"), str) and layout.KEY_RE.match(req["key"]) else None
+    s = app.send_target(nb, str(req.get("target") or ""), key)
     target = s["sid"]
-    sub_id, _, count = app.scan(nb, only_new=bool(req.get("only_new")), target=target, origin="tablet")
+    sub_id, _, count = app.scan(nb, only_new=bool(req.get("only_new")), target=target, origin="tablet",
+                                only_keys=app.push_group_keys(nb, key), size=req.get("size"))
     if not count:
         shutil.rmtree(app.data / "submissions" / sub_id, ignore_errors=True)
         raise ValueError("这本里没有新写的页" if req.get("only_new") else "这本里还没有写过字")
@@ -4096,6 +5156,45 @@ def api_send_all(h, q):
     label = s["label"]
     print(f"[整本] → {label} · {count} 页 · {sub_id}")
     h.send_json({"id": sub_id, "target": target, "label": label, "pages": count})
+
+
+def api_redo(h, q):
+    """卡片上的「再短点」「展开讲」（2026-11-17 用户定「事后一键」，细节暂定）：请写这条长回答的那个对话按新的长短重写，
+    回应接在这张卡片下面（write 带 card；bridge_reply 按这次投递记着的 redo 补上 card、记下是哪个钮）。
+    body：{nb, page, key（这一页的键）, id（那条长回答）, want（brief 再短点 / full 展开讲）, target（平板上刚选的对话，同 api_send）}。
+    交给谁：这条记着的作者（author.sid）还连着就交给它，不改这本发往谁；它不在了、没记作者，按这本现在发往的对话（send_target：
+    没选过、原来的不在了照旧抛 TargetUnset / TargetGone，平板先问发往哪个对话）。只在本地的本子不发（ensure_shareable）。
+    只有文字（是哪个钮、圈号几、原来的回答），不画图。返回 {id, target, label}。"""
+    app, b = h.app, h.app.bridge
+    req = h.read_json()
+    nb = str(req.get("nb") or "scratch")
+    app.ensure_shareable(nb)
+    want = req.get("want")
+    if want not in ("brief", "full"):
+        raise ValueError("want 要是 brief（再短点）或 full（展开讲）")
+    i = app.page_now(nb, req.get("page") or 0, req.get("key") if isinstance(req.get("key"), str) and req.get("key") else None)
+    key = app.page_key(nb, i)  # 只取这一次：后面记进投递里的就是读出这条回答的那一页（中途别的设备插了页也不会记成别的页）
+    page = json.loads(app.load_page(nb, i))
+    a = next((x for x in page.get("ai") or [] if isinstance(x, dict) and x.get("id") == req.get("id")), None)
+    if not a or not is_badge(a) or a.get("dismissed") or not str(a.get("text") or "").strip():
+        raise ValueError("这一页上没有这条回答了（可能擦掉了），没法重写")
+    author = a.get("author") if isinstance(a.get("author"), dict) else {}
+    alive = {s["sid"]: s for s in b.alive()}
+    s = alive.get(str(author.get("sid") or "")) or app.send_target(nb, str(req.get("target") or ""), key)
+    target = s["sid"]
+    sub_id, d = app.new_sub_dir()
+    k, who = app.who_wrote(a, target, {})
+    r = {"n": a.get("n"), "want": want, "q": a.get("q"), "text": a.get("text"), "label": app.page_label(nb, i, target),
+         "more": [{"q": m.get("q"), "text": m.get("text"), "redo": m.get("redo")} for m in pages.more_of(a)], "by": app.who_name(who, target) if k == "other" else ""}
+    meta = {"id": sub_id, "kind": "redo", "nb": nb, "page": i, "page_key": key, "target": target,
+            "created": datetime.now().isoformat(timespec="seconds"), "groups": [], "crop": {"x0": 0, "y0": 0, "scale": 1}, "sel": None,
+            "redo": {"id": a.get("id"), "n": a.get("n"), "want": want}}
+    (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
+    (d / "message.txt").write_text(prompt.build_redo_message(r, sub_id), "utf-8")
+    b.enqueue(target, sub_id)
+    app.progress(sub_id, "sent", target)
+    print(f"[重写] 圈号 {a.get('n')}（{'再短点' if want == 'brief' else '展开讲'}）→ {s['label']} · {sub_id}")
+    h.send_json({"id": sub_id, "target": target, "label": s["label"]})
 
 
 def confirm_public(c, app=None):
@@ -4250,10 +5349,17 @@ def api_notebook_setting(h, q):
 
 
 def api_notebook_target(h, q):
-    """平板上「发往：XX ▾」选了一个对话：这本以后发到那里。"""
+    """平板上「发往：XX ▾」选了一个对话：这本以后发到那里。key：眼前这一页的键；推送本子里记了是谁推的页，
+    改的是这一页所在的那一组（bind_page_target，2026-11-17），整本的不动；pageTo 是改完各页发往谁。"""
     app = h.app
     req = h.read_json()
     nb = str(req.get("nb") or "")
+    key = str(req.get("key") or "")
+    if key and app.push_target(nb, key):
+        if not app.bind_page_target(nb, key, str(req.get("sid") or "")):
+            raise ValueError("这个对话已经断开了")
+        print(f"[发往] {app.nb_title(nb)} 的 {key} 那一组 → {app.push_target(nb, key)['label']}")
+        return h.send_json({"target": app.nb_target(nb), "pageTo": app.page_to_map(nb)})
     if not app.bind_target(nb, str(req.get("sid") or "")):
         raise ValueError("这个对话已经断开了")
     print(f"[发往] {app.nb_title(nb)} → {app.nb_target(nb)['label']}")
@@ -4270,16 +5376,17 @@ def api_notebook_delete(h, q):
 
 
 def api_folders(h, q):
-    """抽屉里的文件夹（只是归类）：[{id, name, items, folded?}]，items 里只有现在还在的本子。"""
-    h.send_json({"folders": h.app.folder_list()})
+    """抽屉里的文件夹（只是归类）：folders [{id, name, items, folded?, ordered?}]，items 里只有现在还在的本子、按抽屉里的先后；
+    top 是最外层从上到下的顺序（2026-11-18，见 folder_view）。"""
+    h.send_json(h.app.folder_view())
 
 
 def api_folder_new(h, q):
-    """新建文件夹（排在最后）；带 nb 就顺手把这本放进去。"""
+    """新建文件夹（排在别的文件夹后面）；带 nb 就顺手把这本放进去。"""
     app, req = h.app, h.read_json()
     nb = str(req.get("nb") or "")
     if nb and (nb in folders.FIXED or nb not in app.nb_ids()):
-        raise ValueError("草稿本和「Claude 推送」不能放进文件夹" if nb in folders.FIXED else f"没有这个本子：{nb}")
+        raise ValueError("草稿本不能放进文件夹" if nb in folders.FIXED else f"没有这个本子：{nb}")
 
     def make(items):
         fd = folders.create(items, req.get("name"))
@@ -4288,22 +5395,23 @@ def api_folder_new(h, q):
         return fd
     fd = app.change_folders(make)
     print(f"[文件夹] 新建「{fd['name']}」" + (f"，放进《{app.nb_title(nb)}》" if nb else ""))
-    h.send_json({"id": fd["id"], "folders": app.folder_list()})
+    h.send_json(dict(app.folder_view(), id=fd["id"]))
 
 
 def api_folder_rename(h, q):
     app, req = h.app, h.read_json()
     fd = app.change_folders(lambda items: folders.rename(items, str(req.get("id") or ""), req.get("name")))
     print(f"[文件夹] 改名为「{fd['name']}」")
-    h.send_json({"folders": app.folder_list()})
+    h.send_json(app.folder_view())
 
 
 def api_folder_delete(h, q):
-    """删文件夹：里面的本子回到外面，本子本身不动。"""
+    """删文件夹：里面的本子回到外面，本子本身不动（最外层排过顺序的，排在文件夹原来的位置上）。"""
     app, req = h.app, h.read_json()
-    fd = app.change_folders(lambda items: folders.delete(items, str(req.get("id") or "")))
+    seq = app.nb_seq()
+    fd = app.change_folders(lambda items: folders.delete(items, str(req.get("id") or ""), seq))
     print(f"[文件夹] 删掉「{fd['name']}」，{len(fd['items'])} 本回到外面")
-    h.send_json({"folders": app.folder_list()})
+    h.send_json(app.folder_view())
 
 
 def api_folder_move(h, q):
@@ -4314,7 +5422,21 @@ def api_folder_move(h, q):
         raise KeyError(f"没有这个本子：{nb}")
     fd = app.change_folders(lambda items: folders.move(items, nb, fid))
     print(f"[文件夹] 《{app.nb_title(nb)}》" + (f"放进「{fd['name']}」" if fd else "移出文件夹"))
-    h.send_json({"folders": app.folder_list()})
+    h.send_json(app.folder_view())
+
+
+def api_folder_place(h, q):
+    """改上下顺序（2026-11-18：抽屉里拖动、「⋯」里的上移下移）：把 id（一本或一个文件夹）排到 into 这一层（空是最外层，
+    文件夹的 id 是那个文件夹里）的 after 后面；after 为空排在最前，after 不在那一层里就排在 before 前面，都不在排在最后。
+    本子换了层的顺带放进、移出文件夹。顺序记在 folders.json，各台设备一样。"""
+    app, req = h.app, h.read_json()
+    x, into = str(req.get("id") or ""), str(req.get("into") or "")
+    after, before = str(req.get("after") or ""), str(req.get("before") or "")
+    seq = app.nb_seq()
+    fd = app.change_folders(lambda items: folders.place(items, seq, x, into, after, before))
+    what = f"《{app.nb_title(x)}》" if x in seq else "一个文件夹"
+    print(f"[顺序] {what}排到" + (f"「{fd['name']}」里" if fd else "外面") + (f"《{app.nb_title(after)}》后面" if after in seq else ""))
+    h.send_json(app.folder_view())
 
 
 def api_save_pdf(h, q):
@@ -4392,15 +5514,16 @@ def bridge_hello(h, q):
         raise ValueError("缺少 sid")
     hint = " ".join(str(req.get("hint") or "").split())
     app.bridge.hello(sid, str(req.get("label") or ""), str(req.get("cwd") or ""),
-                     started=req.get("started"), hint=hint, ink=req.get("ink") is True)
+                     started=req.get("started"), hint=hint, ink=req.get("ink") is True,
+                     ai=" ".join(str(req.get("ai") or "").split()))
     h.send_json(bridge_status_of(app, sid))
 
 
 def bridge_status_of(app, sid):
     b = app.bridge
-    nb = (b.where or {}).get("nb")
-    try:  # 平板上开着的那本发往哪个对话
-        target, title = (app.target_of(nb), app.nb_title(nb)) if nb else (b.default_target(), "")
+    nb, key = (b.where or {}).get("nb"), (b.where or {}).get("key")
+    try:  # 平板上开着的那本发往哪个对话（推送本子里记了是谁推的页：眼前这一页发往的那个）
+        target, title = (app.target_of(nb, key), app.nb_title(nb)) if nb else (b.default_target(), "")
     except (KeyError, ValueError, OSError):
         target, title = b.default_target(), ""
     labels = {s["sid"]: s["label"] for s in b.alive()}
@@ -4414,9 +5537,15 @@ def bridge_status_of(app, sid):
         pass
     if local:
         target, title = None, ""
+    # 平板上开着的那本还没选过发往哪个对话、又连着不止一个对话：第一次点「AI」时在平板上选，这里不说它发往谁
+    unset = False
+    try:
+        unset = bool(nb) and not local and app.target_unset(nb, key)
+    except (KeyError, ValueError, OSError):
+        pass
     return {
         "url": url, "qr": qr_svg(url), "code": app.code, "known": sid in b.sessions, "stableUrl": app.stable_url(),
-        "tabletOnline": b.tablet_online(), "isTarget": target == sid and not local, "targetLocal": local,
+        "tabletOnline": b.tablet_online(), "isTarget": target == sid and not local, "targetLocal": local, "targetUnset": unset,
         "targetLabel": labels.get(target, ""), "targetNb": title, "sessions": len(labels),
         "submissionsDir": str((app.data / "submissions").resolve()),
         "skipDirs": [str(app.data.resolve()), str(app.books.resolve())],  # 找新文件时跳过草稿纸自己的数据
@@ -4464,13 +5593,17 @@ def bridge_active(h, q):
 
 
 def bridge_claim(h, q):
-    """/ink here：平板上开着的这本改发到这个对话；也作为还没绑过对话的本子的默认。"""
+    """/ink here：平板上开着的这本改发到这个对话。也记成「指定过的对话」（列表里标「执行过 /ink」）；
+    没选过对话的本子不再默认发给它：连着不止一个对话时第一次点「AI」由用户在平板上选（2026-11-17 用户定）。"""
     app, b = h.app, h.app.bridge
     sid = h.read_json().get("sid")
     b.set_preferred(sid)
-    nb = (b.where or {}).get("nb")
+    nb, key = (b.where or {}).get("nb"), (b.where or {}).get("key")
     if nb and sid:
-        app.bind_target(nb, sid)
+        if app.push_target(nb, key):  # 推送本子里记了是谁推的页：改的是眼前这一页所在的那一组（2026-11-17），整本的不动
+            app.bind_page_target(nb, key, sid)
+        else:
+            app.bind_target(nb, sid)
     h.send_json({"ok": True})
 
 
@@ -4500,8 +5633,26 @@ def bridge_reply(h, q):
     items = [it for _, it in kept]
     if not items:
         raise ValueError("result 的 anchor 要填消息里「修改建议的决定」列出的 s 编号")
+    rd = meta.get("redo") if isinstance(meta.get("redo"), dict) else None
+    if rd and card_no(rd.get("n")):  # 「再短点」「展开讲」请的重写（2026-11-17）：write 都接在那张卡片下面（没带 card 的补上），记下是哪个钮
+        for it in items:
+            # 「再短点」的回应本来就短，AI 可能写成 note / question：也当成重写的那一段接在卡片下面（不然落成纸上另一条批注，
+            # 卡片上的「已交」一直等不到）（2026-11-18，审查后加）
+            if it["type"] in ("note", "question") and str(it.get("text") or "").strip():
+                it["type"] = "write"
+                for k in ("anchor", "box"):
+                    it.pop(k, None)
+            if it["type"] == "write":
+                it.setdefault("card", rd["n"])
+                if it["card"] == rd["n"] and rd.get("want") in ("brief", "full"):
+                    it["redo"] = rd["want"]
+                    it.pop("q", None)  # 不是回应红字：卡片上那一段写「按『再短点』重写」，不写「红字：……」
     if any(it["type"] == "write" and "card" in it for it in items):  # 回应卡片上的红字：那张卡片得在这一页上、没擦掉
         attach_cards(json.loads(app.load_page(meta["nb"], meta["page"])), items)
+    if rd and rd.get("id"):  # 重写要接回原来那一条：交出去以后原来那条被擦了、这个圈号给了别的回答，就不接（2026-11-18，审查后加）
+        for it in items:
+            if it.get("redo") and it.get("cid") != rd["id"]:
+                raise ValueError(f"圈号 {rd.get('n')} 原来那条回答已经不在这一页上了（用户擦掉或换过），这次重写不用写回了")
     for it in items:  # 图：把文件存进来（SVG 画成 PNG），平板、发给 Claude 的图、存回 PDF 都用这一份
         if it["type"] == "figure":
             it.update(app.store_figure(it.pop("path")))
@@ -4512,6 +5663,9 @@ def bridge_reply(h, q):
     groups, gx = app.line_anchors(meta, items)
     entry = {"req": meta["id"], "level": meta.get("level"), "items": items, "groups": groups, "gx": gx,
              "crop": meta.get("crop"), "sel": meta.get("sel"), "rot": meta.get("rot"), "t": int(time.time() * 1000)}
+    author = app.author_of(req.get("sid"))  # 这一次写回的是谁（2026-11-17）：平板落下时抄到每一条上，存进页面数据
+    if author:
+        entry["author"] = author
     app.add_pending(meta["nb"], meta["key"], entry)
     if results:  # 回报了的不再在之后的消息里提醒（B 组⑤）
         app.settle_owed([it["ref"] for it in results])
@@ -4527,17 +5681,35 @@ def bridge_reply(h, q):
 
 
 def bridge_show(h, q):
+    """ink_show：把一个文件推成平板上的一页。2026-11-17 用户定：进推它的对话所在项目文件夹自己的那本推送本子（没有就新开一本），
+    页上记下是谁推的；在这一页上点「AI」发回推它的对话（App.send_target），不再把整本绑给它。"""
     app = h.app
     req = h.read_json()
-    # 「Claude 推送」设成了只在本地：不加页、不改它发往的对话（2026-11-16 用户定），Word、PPT 也不先转换
-    app.ensure_writable("board", "「Claude 推送」这本", "往里推页面，这次什么都没推", "推")
-    i = app.add_board_page(req.get("path", ""), req.get("page"), req.get("title"))
-    app.bind_target("board", str(req.get("sid") or ""))  # 推给你的页，你在上面写的发回推它的对话
-    title = app.board_index()["pages"][i]["title"]
-    shown = app.index_of_key("board", f"p{i:04d}")
-    app.bridge.emit("show", nb="board", page=shown, title=title)
-    print(f"[推送] {title}")
-    h.send_json({"ok": True, "page": shown, "title": title, "tabletOnline": app.bridge.tablet_online()})
+    sid = str(req.get("sid") or "")
+    sess = dict(app.bridge.sessions.get(sid) or {})  # 没登记过的对话：当作没有文件夹
+    by = {"sid": sid, "label": str(sess.get("label") or ""), "cwd": str(sess.get("cwd") or ""), "ai": str(sess.get("ai") or "Claude")}
+    with app.push_lock:  # 同一个文件夹的两个对话同时推：不各开一本
+        nb = app.push_book_of(by["cwd"])
+        # 这个文件夹的推送本子设成了只在本地：不加页（2026-11-16 用户定），也不悄悄另开一本同文件夹的；Word、PPT 也不先转换。
+        # 回给对话的话不带本子名
+        if nb:
+            app.ensure_writable(nb, "这个文件夹的推送本子", "往里推页面，这次什么都没推", "推")
+        fresh = not nb
+        if fresh:
+            nb = app.new_push_book(by)
+        try:
+            i = app.add_board_page(req.get("path", ""), req.get("page"), req.get("title"), nb=nb, by=by)
+        except Exception:
+            if fresh:  # 第一页就没推成：刚开的这本不留
+                app.drop_push_book(nb)
+            raise
+    title = app.board_index(nb)["pages"][i]["title"]
+    shown = app.index_of_key(nb, f"p{i:04d}")
+    name, folder = app.nb_title(nb), app.push_folder_title(nb)
+    # folder：推的对话在哪个文件夹（平板上方的提示说明是哪个文件夹的对话推的；没有文件夹是空的）
+    app.bridge.emit("show", nb=nb, page=shown, title=title, folder=folder)
+    print(f"[推送] {title} → {name}")
+    h.send_json({"ok": True, "nb": nb, "nbTitle": name, "page": shown, "title": title, "tabletOnline": app.bridge.tablet_online()})
 
 
 def bridge_import(h, q):
@@ -4788,6 +5960,7 @@ API = {
     ("POST", "/api/snapshot"): api_snapshot,
     ("POST", "/api/where"): api_where,
     ("POST", "/api/send-all"): api_send_all,
+    ("POST", "/api/redo"): api_redo,
     ("GET", "/api/new-pages"): api_new_pages,
     ("GET", "/api/figure"): api_figure,
     ("GET", "/api/confirms"): api_confirms,
@@ -4807,8 +5980,10 @@ API = {
     ("GET", "/api/page/hidden"): api_page_hidden,
     ("POST", "/api/page/restore"): api_page_restore,
     ("POST", "/api/page/move"): api_page_move,
+    ("POST", "/api/page/copy"): api_page_copy,
     ("GET", "/api/thumb"): api_thumb,
     ("POST", "/api/notebook/new"): api_notebook_new,
+    ("POST", "/api/notebook/copy"): api_notebook_copy,
     ("POST", "/api/notebook/delete"): api_notebook_delete,
     ("POST", "/api/notebook/setting"): api_notebook_setting,
     ("POST", "/api/notebook/target"): api_notebook_target,
@@ -4818,6 +5993,7 @@ API = {
     ("POST", "/api/folders/rename"): api_folder_rename,
     ("POST", "/api/folders/delete"): api_folder_delete,
     ("POST", "/api/folders/move"): api_folder_move,
+    ("POST", "/api/folders/place"): api_folder_place,
     ("GET", "/api/offers"): api_offers,
     ("GET", "/api/files"): api_files,
     ("POST", "/api/files/import"): api_files_import,

@@ -135,9 +135,9 @@ T.ok('对话收到【草稿纸·撤回】，写着另留在哪', Boolean(toldD) 
 // E. 推送页：指着我手写的字的建议画成页边批注（没有 ✓ ×），指着印刷内容的照旧在文档上
 const TXT = join(SRC, '采购单.txt');
 writeFileSync(TXT, '办公室采购单\n一、打印纸 三箱\n二、白板笔 两盒\n三、纸杯 一袋\n', 'utf8');
-await T.post('/bridge/show', { sid, path: TXT, title: '采购单' });
-await T.openNotebook('board', 0);
-await T.waitFor(`window.__ink.S.nb.id === 'board' && window.__ink.S.bgImg`);
+const shownE = await T.post('/bridge/show', { sid, path: TXT, title: '采购单' }); // 进这个对话所在文件夹的推送本子（2026-11-17）
+await T.openNotebook(shownE.nb, 0);
+await T.waitFor(`window.__ink.S.nb.id === ${JSON.stringify(shownE.nb)} && window.__ink.S.bgImg`);
 await T.pen(T.line(150, 700, 260));
 await T.saved();
 await drain();

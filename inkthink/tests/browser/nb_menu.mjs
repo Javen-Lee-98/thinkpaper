@@ -1,6 +1,6 @@
 // 抽屉里一本右边的「⋯」（2026-11-16 用户定，《产品定义》第 2 节「交互上补的八样」）：原来排着的存回 PDF、文件夹、改名、删除四个图标
 // 收成一个「⋯」，点开是一张写着字的小菜单——放进文件夹…、改名…、删除这本…，当前这本有原 PDF 时多一项「存回 PDF」。
-// 查：每本只剩一个「⋯」（行里没有图标了），草稿本、「Claude 推送」没有；菜单紧挨着「⋯」、在抽屉上面、整个在屏幕里，开着时「⋯」白底加粗边框；
+// 查：每本只剩一个「⋯」（行里没有图标了），草稿本没有（推送本子 2026-11-17 起有）；菜单紧挨着「⋯」、在抽屉上面、整个在屏幕里，开着时「⋯」白底加粗边框；
 // 同时只开一张（点另一本的「⋯」换成那本的）；点菜单外面收起、抽屉不收；再点同一个「⋯」收起；点「⋯」不会打开那本，点名字照常打开；
 // 当前这本是从电脑上的 PDF 导入的：菜单里多一项「存回 PDF」，各项沿用原来图标的 id；别的那本的菜单里没有它；
 // 点菜单里的一项：菜单收起、抽屉还开着，做的事照旧（放进文件夹 → 选文件夹的小列表；改名 → 问名字；删除 → 先问一句）。
@@ -41,14 +41,15 @@ const menu = () => js(`(() => { const m = document.querySelector('#nbMenu'); ret
 const onMarks = () => js(`[...document.querySelectorAll('#nbList .nb-more.on')].map((b) => b.closest('.nb-item').dataset.nb)`);
 const answer = (kind, val) => js(`window.__asked = []; window.${kind} = (m) => { window.__asked.push(m); return ${JSON.stringify(val)}; }; 1`);
 
-// 1. 每本只剩一个「⋯」，行里没有图标了；草稿本、「Claude 推送」没有「⋯」
+// 1. 每本只剩一个「⋯」，行里没有图标了（推送本子 2026-11-17 起和别的本子一样有；草稿本 2026-11-18 起也有，里面只有「复制这本…」）
 await drawer(true);
 const rows = await js(`[...document.querySelectorAll('#nbList .nb-item')].map((r) => ({ nb: r.dataset.nb, more: r.querySelectorAll('.nb-more').length,
   icons: r.querySelectorAll('[data-icon]').length, text: (r.querySelector('.nb-more') || {}).textContent || '' }))`);
-T.ok('每本自己的本子、导入的书右边只有一个「⋯」，没有图标了', rows.length === 6
-  && rows.filter((r) => r.nb !== 'scratch' && r.nb !== 'board').every((r) => r.more === 1 && r.icons === 0 && r.text === '⋯'), rows);
-T.ok('草稿本、「Claude 推送」没有「⋯」（不改名、不删、不进文件夹）', rows.filter((r) => r.nb === 'scratch' || r.nb === 'board').length === 2
-  && rows.filter((r) => r.nb === 'scratch' || r.nb === 'board').every((r) => r.more === 0 && r.icons === 0), rows);
+T.ok('每本（草稿本、自己的本子、推送本子、导入的书）右边只有一个「⋯」，没有图标了', rows.length === 6 && rows.some((r) => r.nb.startsWith('board:'))
+  && rows.some((r) => r.nb === 'scratch') && rows.every((r) => r.more === 1 && r.icons === 0 && r.text === '⋯'), rows);
+await tap(moreOf('scratch'), 400);
+T.ok('草稿本的「⋯」里只有「复制这本…」（不改名、不删、不进文件夹、不挪）', JSON.stringify((await menu()).items) === JSON.stringify(['copy:复制这本…#actCopyNb']), await menu());
+await tap(moreOf('scratch'), 300);
 const room = await js(`(() => { const r = document.querySelector(${JSON.stringify(rowSel(P1))}), n = r.querySelector('.nb-name'), m = r.querySelector('.nb-more');
   return { row: Math.round(r.getBoundingClientRect().width), name: Math.round(n.getBoundingClientRect().width), more: Math.round(m.getBoundingClientRect().width),
     label: m.getAttribute('aria-label'), h: Math.round(m.getBoundingClientRect().height) }; })()`);
@@ -58,8 +59,8 @@ T.ok('「⋯」不宽（名字占了这一行的大半），够得着手指（�
 const before = await js(`window.__ink.S.nb.id`);
 await tap(moreOf(P1), 400);
 let m = await menu();
-T.ok('点「随笔」的「⋯」：弹出它的菜单——放进文件夹…、改名…、删除这本…（不是当前这本，没有 id、没有存回 PDF）',
-  m.open && m.nb === P1 && JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…', 'rename:改名…', 'delete:删除这本…']), m);
+T.ok('点「随笔」的「⋯」：弹出它的菜单——放进文件夹…、上移、下移、改名…、复制这本…（2026-11-18）、删除这本…（不是当前这本，没有 id、没有存回 PDF）',
+  m.open && m.nb === P1 && JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…', 'up:上移', 'down:下移', 'rename:改名…', 'copy:复制这本…', 'delete:删除这本…']), m);
 const geo = await js(`(() => { const p = document.querySelector('#nbMenu').getBoundingClientRect(), b = document.querySelector(${JSON.stringify(moreOf(P1))}).getBoundingClientRect(),
   cs = getComputedStyle(document.querySelector(${JSON.stringify(moreOf(P1))}));
   return { gap: Math.round(p.top - b.bottom), right: Math.round(Math.abs(p.right - b.right)), inScreen: p.left >= 0 && p.right <= innerWidth && p.top >= 0 && p.bottom <= innerHeight,
@@ -95,11 +96,12 @@ await drawer(true);
 await tap(moreOf(B1), 400);
 m = await menu();
 T.ok('当前这本（从电脑上的 PDF 导入）：菜单里多一项「存回 PDF」，各项是原来那几个图标的 id',
-  JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…#actFolder', 'rename:改名…#actRename', 'save:存回 PDF#actSavePdf', 'delete:删除这本…#actDelete']), m);
+  JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…#actFolder', 'up:上移#actUp', 'down:下移#actDown', 'rename:改名…#actRename', 'copy:复制这本…#actCopyNb',
+    'save:存回 PDF#actSavePdf', 'delete:删除这本…#actDelete']), m);
 await tap(moreOf(B1), 300); // 收起（菜单往下开，盖着下面那本的「⋯」）
 await tap(moreOf(B2), 400);
 m = await menu();
-T.ok('另一本书（不是当前这本）：没有「存回 PDF」，也没有那几个 id', JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…', 'rename:改名…', 'delete:删除这本…']), m);
+T.ok('另一本书（不是当前这本）：没有「存回 PDF」，也没有那几个 id', JSON.stringify(m.items) === JSON.stringify(['folder:放进文件夹…', 'up:上移', 'down:下移', 'rename:改名…', 'copy:复制这本…', 'delete:删除这本…']), m);
 await tap(moreOf(B2), 300);
 
 // 7. 点菜单里的一项：菜单收起、抽屉还开着，做的事照旧

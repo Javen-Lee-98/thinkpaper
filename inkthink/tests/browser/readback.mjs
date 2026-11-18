@@ -1,4 +1,5 @@
 // 「Claude 读到了什么」（阶段 D2，《产品定义》第 3 节）：Claude 每次回都交红笔那几组和回应到的那几组的读法（ink_reply 的 read，anchor 填组号）。
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 默认不显示；在「⋯」菜单（全屏时在抽屉最下面）打开后，每组的读法用小号灰色印刷体写在那几笔正下方，不压字；
 // 读法跟着那几笔走（接着在旁边写的字不算进去）；那几笔擦掉了就不写，撤销回来又写；同一组后来又交了读法只写新的；
 // 没带 anchor 的存着、不显示；开关记在这台设备上（刷新后还开着）；连续阅读时相邻页上的也写；书页上也写；关掉就没了；
@@ -51,7 +52,7 @@ const rep = await T.post('/bridge/reply', { sid: 'S1', submission: sub.id, items
   { type: 'read', anchor: 'g1', text: '周六去买菜' }, { type: 'read', anchor: 'g2', text: 'buy eggs and milk' }, { type: 'read', anchor: 'g3', text: '周日几点出发？' },
   { type: 'read', text: '整页：周末安排' },
   { type: 'note', anchor: 'g1', text: '记得带购物袋' },
-  { type: 'write', anchor: 'g3', q: '周日几点出发？', text: '早上八点出发比较好：路上不堵，中午前能到。\n\n要是下雨，就改到周六下午。' }] });
+  { type: 'write', fold: true, anchor: 'g3', q: '周日几点出发？', text: '早上八点出发比较好：路上不堵，中午前能到。\n\n要是下雨，就改到周六下午。' }] });
 T.ok('服务收下了 6 条', rep.ok === true && rep.count === 6, rep);
 T.ok('都落到这一页了', await landed(6), await reads());
 const R0 = await reads();

@@ -38,6 +38,9 @@
     <button id="barAdd" data-icon="addv" aria-label="在这一页后面加一张空白页" hidden></button>
   </div>
   <div class="grp">
+    <!-- 回答要多长：和右下角那一条上的 #sizeBtn 是同一个开关，点开在下面出 #sizePick -->
+    <!-- 顶栏挤不下时（窄屏、英文、「别的页有新回答」的记号长）名字换成三格小格子（亮几格是第几档，.tight，app.js 的 fitBarSize） -->
+    <button id="barSize" class="size-btn" data-size="clear" aria-label="回答要多长：点开选"><span class="sz-meter" aria-hidden="true"><i></i><i></i><i></i></span><span class="sz-name">讲清楚</span><span class="sz-caret" aria-hidden="true">▾</span></button>
     <button id="barCheck" class="primary">AI</button><!-- 退出全屏后，顶栏上的「AI」：字跟着这一轮走，和右下角的同一个样子（app.js 的 updateCheck） -->
     <button id="menuBtn" aria-label="更多">⋯</button>
   </div>
@@ -87,6 +90,10 @@
       <svg id="acInk" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>
   </div>
+  <!-- 卡片底下一排（2026-11-17，暂定）：「摊在纸上」（收着的）/「收起」（摊开着的），只在空白本子里有；「再短点」「展开讲」：请写这条回答的
+       对话按新的长短重写，接在这张卡片下面（交了以后那个钮写「已交」，回应到了恢复）。贴在卡片底下，内容滑动时它不动（不在 acPage 里：
+       不影响红字的坐标）；小蓝点浮出来的小卡片上没有 -->
+  <div id="acActs" hidden><button id="acSpread" data-act="open">摊在纸上</button><span class="ac-fill"></span><button id="acShorter" data-want="brief">再短点</button><button id="acLonger" data-want="full">展开讲</button></div>
 </div>
 
 <!-- 左侧抽屉：本子、页面缩略图、加页删页 -->
@@ -123,6 +130,8 @@
       <button id="actTurnR" data-icon="rotr" aria-label="这一页连同写的字右转 90°"></button>
       <button id="actAddPortrait" data-icon="addv" aria-label="在这一页后面加一张竖版空白页"></button>
       <button id="actAddLandscape" data-icon="addh" aria-label="在这一页后面加一张横版空白页"></button>
+      <!-- 复制这一页（2026-11-18）：点开选带什么，复制出的页接在这一页后面；书页、推送的页上灰着（app.js 的 openCopy） -->
+      <button id="actCopyPage" data-icon="copy" aria-label="复制这一页…（选带什么，接在这一页后面）"></button>
       <button id="actDelPage" data-icon="trash" aria-label="删除这一页（可以在「显示已删的页」里还原）"></button>
     </span>
   </div>
@@ -178,6 +187,15 @@
 <!-- 「几页有新回答」的小单子（2026-11-16 夜）：点左上角、顶栏上的那个记号出来，在它正下方（屏幕上方）；每页一行「第 3 页」，
      点一行翻过去、收起；点外面收起（app.js 的 renderNewAnsList） -->
 <div id="newAnsList" class="panel" role="menu" aria-label="有新回答的页" hidden></div>
+
+<!-- 回答要多长（2026-11-17，暂定）：点「AI」旁边写着当前档的那个钮出来，挨着那个钮（右下角那一条上的在它上面，顶栏上的在它下面）；
+     三行，每行写档名和一句说明，现在这一档白底加粗边框带 ✓；点一行就换成它、收起；点外面、再点那个钮、按 Esc 收起（app.js 的 openSizePick） -->
+<div id="sizePick" class="panel" role="menu" aria-label="回答要多长（交给 AI 时带上）" hidden>
+  <div class="row small">回答要多长（交给 AI 时带上）</div>
+  <button class="row sz-row" data-size="brief"><span class="tp-main"><span class="tp-l1">点一下</span><span class="tp-l2">只给记号和一两句短批注，不展开</span></span></button>
+  <button class="row sz-row" data-size="clear"><span class="tp-main"><span class="tp-l1">讲清楚</span><span class="tp-l2">短批注加必要的几步推导或一段话（默认）</span></span></button>
+  <button class="row sz-row" data-size="full"><span class="tp-main"><span class="tp-l1">展开讲</span><span class="tp-l2">完整的长回答</span></span></button>
+</div>
 
 <!-- 一本右边的「⋯」点开的小菜单：放进文件夹…、改名…、删除这本…，当前这本有原 PDF 时多一项存回 PDF（app.js 的 nbMenuItems 填） -->
 <div id="nbMenu" class="panel" role="menu" hidden></div>
@@ -255,10 +273,26 @@
 <div id="newNb" class="overlay" hidden>
   <div class="card">
     <h3>新建本子</h3>
+    <!-- 从文件夹那一行上的「＋」点开时（2026-11-18）：建好放进哪个文件夹 -->
+    <p id="newNbIn" hidden></p>
     <input id="newNbTitle" placeholder="名字，比如：随笔、想法、读书笔记" autocomplete="off">
     <select id="newNbPaper" aria-label="纸张方向"><option value="portrait">竖版纸</option><option value="landscape">横版纸</option></select>
     <p>黑笔写你自己的；想让 Claude 做什么，用红笔写。</p>
     <div class="card-btns"><button id="newNbCancel">取消</button><button id="newNbOk" class="primary">建立</button></div>
+  </div>
+</div>
+
+<!-- 复制这本…、复制这一页…（2026-11-18 用户提的）：和新建本子同一种卡片；带什么三选一，选中的白底加粗边框带 ✓（app.js 的 openCopy） -->
+<div id="copyAsk" class="overlay" hidden>
+  <div class="card" role="dialog" aria-labelledby="copyAskTitle">
+    <h3 id="copyAskTitle"></h3>
+    <div class="cp-opts" role="radiogroup" aria-label="复制时带什么">
+      <button class="cp-opt" data-mode="all" role="radio"><span class="cp-l1">全部照样</span><span class="cp-l2">黑笔、红笔和 AI 写的都带上</span></button>
+      <button class="cp-opt" data-mode="noai" role="radio"><span class="cp-l1">不带 AI 的蓝字</span><span class="cp-l2">留下你写的黑笔和红笔</span></button>
+      <button class="cp-opt" data-mode="ink" role="radio"><span class="cp-l1">只留黑笔（不带红字和蓝字）</span><span class="cp-l2">只有你用黑笔写的</span></button>
+    </div>
+    <p id="copyAskWhere"></p>
+    <div class="card-btns"><button id="copyAskCancel">取消</button><button id="copyAskOk" class="primary">复制</button></div>
   </div>
 </div>
 
@@ -312,6 +346,9 @@
   <button data-tool="lasso" data-icon="lasso" aria-label="套索：圈住你的几笔，按住框里拖到别处"></button>
   <button id="toolsUndo" data-icon="undo" aria-label="撤销"></button>
   <button id="toolsRedo" data-icon="redo" aria-label="恢复" disabled></button>
+  <!-- 回答要多长（2026-11-17 用户定「事先一档」，样子暂定）：写着现在这一档（点一下 / 讲清楚 / 展开讲）和 ▾，点开在上面出 #sizePick 那张小单子；
+       选了一直留着（记在这台设备上），交给 AI 时带上。和顶栏上的 #barSize 是同一个开关 -->
+  <button id="sizeBtn" class="size-btn" data-size="clear" aria-label="回答要多长：点开选"><span class="sz-name">讲清楚</span><span class="sz-caret" aria-hidden="true">▾</span></button>
   <!-- 点了交给 Claude；交上去以后字跟着这一轮走：已交 / 排队中 / Claude 在看 / 在改文件，结束变回「AI」；这本只在本地时写「只在本地」 -->
   <button id="check">AI</button>
 </div>
@@ -323,5 +360,39 @@
 <script src="/static/lasso.js"></script>
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
+<!-- 脚本没载全（网络抖了一下，上面某个文件没取到）：后面的脚本照样会跑、然后报错，页面开着但是坏的（2026-11-17 用户定）。
+     这一段写在页面里（不是另一个文件，不会取不到），不靠别的脚本：缺了就自己重新加载一次；重新加载后还缺（一分钟以内），
+     就在屏幕上方说一句、给一个「重新加载」，不再自己试（免得没完没了）。记在这个标签页里（sessionStorage 的 ink.reloadTry），到齐了就清掉。
+     公式用的 KaTeX 不查：缺了只是公式排不出来，纸照样能写。这里的字不走 i18n.js（它也可能没取到）：中文、英文各写一句，按界面语言选 -->
+<script>
+(function () {
+  var need = { Gesture: 'gesture.js', Turn: 'turn.js', Brush: 'brush.js', Straight: 'straight.js', Lasso: 'lasso.js', InkLang: 'i18n.js', __ink: 'app.js' };
+  var missing = Object.keys(need).filter(function (k) { return !window[k]; }).map(function (k) { return need[k]; });
+  var KEY = 'ink.reloadTry', tried = 0, canStore = true;
+  try { tried = Number(sessionStorage.getItem(KEY)) || 0; } catch (e) { canStore = false; }
+  if (!missing.length) { try { sessionStorage.removeItem(KEY); } catch (e) { /* */ } return; }
+  if (canStore && (!tried || Date.now() - tried > 60000)) {
+    try { sessionStorage.setItem(KEY, String(Date.now())); location.reload(); return; } catch (e) { /* 记不了：不自己试，往下说一句 */ }
+  }
+  var zh = true;
+  try { zh = /^zh/i.test(new URLSearchParams(location.search).get('lang') || localStorage.getItem('ink.lang') || navigator.language || 'zh'); } catch (e) { /* */ }
+  var bar = document.createElement('div'), say = document.createElement('span'), btn = document.createElement('button');
+  bar.id = 'loadTrouble';
+  bar.setAttribute('role', 'alert');
+  bar.style.cssText = 'position:fixed;left:50%;top:calc(64px + env(safe-area-inset-top));transform:translateX(-50%);z-index:1000;'
+    + 'max-width:calc(100vw - 24px);box-sizing:border-box;padding:10px 12px;display:flex;align-items:center;gap:10px;'
+    + 'background:#fffdf8;border:1px solid #d9d3c6;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.14);color:#222;'
+    + 'font:15px/1.4 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  say.textContent = zh ? '页面没载全（缺 ' + missing.join('、') + '），可能写不了字。'
+    : 'The page did not load completely (missing ' + missing.join(', ') + '). Writing may not work.';
+  btn.id = 'loadTroubleBtn';
+  btn.textContent = zh ? '重新加载' : 'Reload';
+  btn.style.cssText = 'flex:none;height:44px;padding:0 16px;border:1px solid #2f5fae;border-radius:8px;background:#2f5fae;color:#fff;font:inherit;font-weight:600';
+  btn.addEventListener('click', function () { try { sessionStorage.removeItem(KEY); } catch (e) { /* */ } location.reload(); });
+  bar.appendChild(say);
+  bar.appendChild(btn);
+  document.body.appendChild(bar);
+})();
+</script>
 </body>
 </html>

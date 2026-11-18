@@ -1,5 +1,5 @@
 // 纸四边的「＋ 加长 / 加宽 / 向上 / 向左」（阶段 D1，《产品定义》第 2 节）：空白本子（草稿本、自己新建的本子）里没有这四个按钮——
-// 笔写到纸边附近也不出来；纸照样跟着字长（写到页底自己加长）。书页（导入的文档）和推送页（「Claude 推送」那本）照旧：
+// 笔写到纸边附近也不出来；纸照样跟着字长（写到页底自己加长）。书页（导入的文档）和推送页（推送本子里的）照旧：
 // 写到哪一边附近，那一边的按钮亮出来，点一下纸就往那边长。
 // 跑法：node tests/run_browser.mjs <临时目录> --only paper_edges；有一项不对退出码 1。只在无头 Edge 里跑过；笔是 pointerType 为 pen 的鼠标事件。
 import { execFileSync } from 'node:child_process';
@@ -95,10 +95,10 @@ await T.openNotebook(imp.id, 0);
 T.ok('（前提）打开了导入的书页', (await S('S.nb.kind')) === 'book' && (await S('Boolean(S.bgImg)')), await S('S.nb.kind'));
 await useEdges('书页');
 
-// ================= 4. 推送页（「Claude 推送」那本）：同样照旧
+// ================= 4. 推送页（推它的对话所在文件夹的推送本子，2026-11-17 起各文件夹一本）：同样照旧
 const sh = await T.post('/bridge/show', { sid: 'S1', path: PNG, title: '路线图' });
-T.ok('（前提）推送了一张图', sh && sh.ok !== false, sh);
-await T.openNotebook('board', 0);
+T.ok('（前提）推送了一张图', sh && sh.ok !== false && Boolean(sh.nb), sh);
+await T.openNotebook(sh.nb, 0);
 T.ok('（前提）打开了推送页', (await S('S.nb.kind')) === 'board' && (await T.waitFor('window.__ink.S.bgImg', 8000)), await S('S.nb.kind'));
 await useEdges('推送页');
 

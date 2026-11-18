@@ -1,4 +1,5 @@
 // 长回答（2026-11-13）：纸上只留一个圈号，点开是浮出的卡片。查：
+// （2026-11-17 起空白本子里不太长、旁边有空的长回答会摊在纸上：这里的长回答都带 fold: true，查的是收着（圈号）的样子；摊开的见 open_answer.mjs）
 // 圈号落在所答笔迹右边、不压东西（没指明答哪句时落在这一轮最后一句红笔问题旁边，没有红笔问题才落在最后写的那组旁边）；没看过实心、看过空心；到达时跳两下、不自己打开、上方说一句；
 // 点圈号（手指、笔）开卡片：紧挨圈号、整个在屏幕里、靠右下时翻过去，宽高有限、内容能滑、「问：」那行、KaTeX 公式、之前的版本；
 // 点别处 / 落笔（那一笔照常写上）/ 挪纸 / 缩放 / 翻页 / 开抽屉都收起（笔刚用过一秒内落在纸上的手指当手掌，不收），再点同一个圈号是收起；笔点圈号不留笔迹；
@@ -89,8 +90,8 @@ const LONG = ['先说结论：总价和买的斤数成正比。', '$$y = k \\bar
   .concat(Array.from({ length: 30 }, (_, k) => `第 ${k + 1} 条理由：单价不变时，买得越多花得越多，和在哪家店买无关（只要价格一样）。`)).join('\n');
 await resetLog();
 const rep1 = await T.post('/bridge/reply', { sid: 'S1', submission: sub1.id, items: [
-  { type: 'write', anchor: 'g1', q: '为什么是线性的？', text: LONG },
-  { type: 'write', anchor: 'g3', q: '单位对吗？', text: '对，单位是千克。' },
+  { type: 'write', fold: true, anchor: 'g1', q: '为什么是线性的？', text: LONG },
+  { type: 'write', fold: true, anchor: 'g3', q: '单位对吗？', text: '对，单位是千克。' },
   { type: 'note', anchor: 'g2', text: '短批注' }] });
 T.ok('服务收下了 3 条', rep1.ok === true && rep1.count === 3, rep1);
 T.ok('3 条落到这一页', await T.waitFor(`window.__ink.S.page.ai.length === 3`, 10000), await S(`S.page.ai.map((a) => a.type)`));
@@ -146,9 +147,11 @@ T.ok('顶上一行较淡的「问：为什么是线性的？」', C.q === '问�
 T.ok('单独一行的 $$…$$ 用 KaTeX 排成了公式', C.tex > 30 && (await js(`Boolean(document.querySelector('#acBody .ac-tex .katex .mfrac, #acBody .ac-tex .katex .accent, #acBody .ac-tex .katex .mord'))`)) && !C.body.includes('$$'), [C.tex, C.body.slice(0, 60)]);
 T.ok('全文都在（最后一条理由也在）', C.body.includes('第 30 条理由') && C.body.includes('先说结论'), C.body.slice(-40));
 T.ok('蓝色手写体、白底、细框、轻微阴影', /Xiaolai/.test(C.font) && C.color === 'rgb(47, 95, 174)' && C.bg === 'rgb(255, 255, 255)' && C.border === '1px' && C.shadow !== 'none', [C.font, C.color, C.bg, C.border, C.shadow]);
-// 2026-11-16 起卡片顶上有「上一条」「下一条」两个按钮（这一页有两条回答；怎么换见 card_nav.mjs），别的按钮、输入框没有
-T.ok('卡片上除了顶上的「上一条」「下一条」，没有别的按钮、没有输入框（在卡片上写红字见 card_marks.mjs）',
-  (await T.count('#answerCard button:not(#acPrev):not(#acNext), #answerCard input, #answerCard textarea, #answerCard [contenteditable]')) === 0);
+// 2026-11-16 起卡片顶上有「上一条」「下一条」两个按钮（这一页有两条回答；怎么换见 card_nav.mjs）；2026-11-17 起底下一排
+// 「摊在纸上」「再短点」「展开讲」（见 open_answer.mjs、answer_redo.mjs），别的按钮、输入框没有
+T.ok('卡片上除了顶上的「上一条」「下一条」、底下一排「摊在纸上」「再短点」「展开讲」，没有别的按钮、没有输入框（在卡片上写红字见 card_marks.mjs）',
+  (await T.count('#answerCard button:not(#acPrev):not(#acNext):not(#acSpread):not(#acShorter):not(#acLonger), #answerCard input, #answerCard textarea, #answerCard [contenteditable]')) === 0
+  && (await T.text('#acActs')).replace(/\s+/g, '') === '摊在纸上再短点展开讲', await T.text('#acActs'));
 const SHOT2 = await T.shot('2-card-open.png');
 await T.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: C.l + C.w / 2, y: C.t + C.h / 2, deltaX: 0, deltaY: 400 });
 await sleep(400);
@@ -249,7 +252,7 @@ const vis = await js(`Boolean(window.__ink.neighborOnScreen(1))`);
 T.ok('回到第 1 页：第 2 页接在下面，屏幕上看得见', (await S('S.idx')) === 0 && vis);
 const ty9 = await S('S.view.ty');
 await resetLog();
-await T.post('/bridge/reply', { sid: 'S1', submission: sub3.id, items: [{ type: 'write', anchor: 'g1', q: '第二页的问题', text: '第二页的回答' }, { type: 'note', anchor: 'g1', text: '邻页短批注' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: sub3.id, items: [{ type: 'write', fold: true, anchor: 'g1', q: '第二页的问题', text: '第二页的回答' }, { type: 'note', anchor: 'g1', text: '邻页短批注' }] });
 const landed9 = await T.waitFor(`(window.__ink.S.flowCache.get(1) || { page: { ai: [] } }).page.ai.length === 2`, 10000);
 await sleep(400);
 L = await log();
@@ -275,7 +278,7 @@ await T.tap('#check');
 const sub4 = await T.waitSub('S1'), meta4 = sub4 && T.metaOf(sub4);
 const gq = meta4 && meta4.groups.find((g) => g.bbox[0] > qx0 - 20);
 T.ok('第 2 页右下方那句红笔交上去了', Boolean(gq) && meta4.page === 1, meta4 && meta4.groups);
-await T.post('/bridge/reply', { sid: 'S1', submission: sub4.id, items: [{ type: 'write', anchor: gq.id, q: '靠右下角的问题', text: LONG }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: sub4.id, items: [{ type: 'write', fold: true, anchor: gq.id, q: '靠右下角的问题', text: LONG }] });
 await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 2`, 10000);
 await sleep(300);
 const w4 = (await answers()).find((a) => a.q === '靠右下角的问题');
@@ -325,7 +328,7 @@ await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 
 await T.waitFor(`window.__ink.S.page.ai.some((a) => a.text === '只有一条短的')`, 10000);
 await sleep(500);
 T.ok('这一次只有短批注、没有长回答：不说「Claude 回了 N 条」', !(await log()).toasts.some((t) => /Claude 回了/.test(t)), (await log()).toasts);
-await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', anchor: 'g2', text: '第三条回答' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: sub2.id, items: [{ type: 'write', fold: true, anchor: 'g2', text: '第三条回答' }] });
 await T.waitFor(`window.__ink.S.page.ai.filter((a) => a.type === 'write').length === 3`, 10000);
 A = await answers();
 T.ok('两条回答是 1、2；擦掉 1 之后再来一条是 3（擦掉的也占着号）', A.map((a) => a.n).join() === '1,2,3' && A[0].erasedAt > 0, A.map((a) => [a.n, a.erasedAt || 0]));
@@ -345,7 +348,8 @@ T.ok('撤销：不再是采纳', !(await answers())[1].adopted && !b12.adopted &
 T.ok('存上了', await T.saved());
 await sleep(500);
 const disk = T.pageFile('scratch', 0).ai.filter((a) => a.type === 'write');
-const OK = new Set(['id', 'type', 't', 'req', 'text', 'q', 'on', 'n', 'at', 'seen', 'older', 'adopted', 'erasedAt', 'dismissed']);
+// author：是哪个对话写的（2026-11-17 起，见 authors.mjs）
+const OK = new Set(['id', 'type', 't', 'req', 'text', 'q', 'on', 'n', 'at', 'seen', 'older', 'adopted', 'erasedAt', 'dismissed', 'author']);
 T.ok('页面文件里的长回答只有新格式的字段（没有 lay、hit、fold、shut、notes、revises、dock、placed……）', disk.length === 3 && disk.every((a) => Object.keys(a).every((k) => OK.has(k))
   && ['id', 't', 'req', 'text', 'on', 'n', 'at', 'seen'].every((k) => k in a)), disk.map((a) => Object.keys(a)));
 T.ok('文件里记着圈号、位置、看过没有', disk.map((a) => `${a.n}:${a.seen}`).join() === '1:true,2:true,3:true' && disk.every((a) => Array.isArray(a.at) && a.at.length === 2), disk.map((a) => [a.n, a.at, a.seen]));
@@ -388,7 +392,7 @@ await write15(false, 480, 400);
 await T.tap('#check');
 const s15a = await T.waitSub('S1'), m15a = s15a && T.metaOf(s15a);
 T.ok('（前提）第一轮交上去四组：红、黑、红、黑', Boolean(m15a) && m15a.groups.map((g) => (g.red ? 'r' : 'k')).join('') === 'rkrk', m15a && m15a.groups);
-await T.post('/bridge/reply', { sid: 'S1', submission: s15a.id, items: [{ type: 'write', text: '没指明答哪句的回答' }, { type: 'write', anchor: 'end', text: 'anchor 写了 end 的回答' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: s15a.id, items: [{ type: 'write', fold: true, text: '没指明答哪句的回答' }, { type: 'write', fold: true, anchor: 'end', text: 'anchor 写了 end 的回答' }] });
 const A15 = (await writes15(2)) || [];
 const q3 = bbox(m15a, 'g3'), k4 = bbox(m15a, 'g4');
 T.ok('没给 anchor：圈号在这一轮最后一句红笔问题 g3 的右端外侧、和它一样高，不在最后写的黑字 g4 旁边', A15.length === 2 && rightOf(A15[0], q3), [A15[0] && A15[0].at, q3, k4]);
@@ -400,7 +404,7 @@ await T.tap('#check');
 const s15b = await T.waitSub('S1'), m15b = s15b && T.metaOf(s15b);
 T.ok('（前提）第二轮交上去五组，g1、g3 标着回答过，最后一组 g5 是黑字', Boolean(m15b) && m15b.groups.length === 5 && m15b.groups[0].answered && m15b.groups[2].answered && !m15b.groups[4].red,
   m15b && m15b.groups.map((g) => [g.id, g.red, g.answered]));
-await T.post('/bridge/reply', { sid: 'S1', submission: s15b.id, items: [{ type: 'write', text: '这一轮没有红笔问题' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: s15b.id, items: [{ type: 'write', fold: true, text: '这一轮没有红笔问题' }] });
 const B15 = (await writes15(3)) || [], k5 = bbox(m15b, 'g5');
 T.ok('这一轮没有红笔问题（回答过的红笔不算）：圈号放在最后写的那组 g5 旁边', B15.length === 3 && rightOf(B15[2], k5), [B15[2] && B15[2].at, k5, q3]);
 // 第三轮：红笔问题 g6，黑字 g7。Claude 先回一条指着 g6 的短批注，再回一条没给 anchor 的长回答（两次回写，同一轮）
@@ -412,7 +416,7 @@ T.ok('（前提）第三轮交上去七组，g6 是红笔问题、g7 是黑字',
   m15c && m15c.groups.map((g) => [g.id, g.red, g.answered]));
 await T.post('/bridge/reply', { sid: 'S1', submission: s15c.id, items: [{ type: 'note', anchor: 'g6', text: '先到的短答' }] });
 T.ok('（前提）指着 g6 的短批注先落下了', await T.waitFor(`window.__ink.S.page.ai.some((a) => a.text === '先到的短答')`, 10000));
-await T.post('/bridge/reply', { sid: 'S1', submission: s15c.id, items: [{ type: 'write', text: '后到的长答' }] });
+await T.post('/bridge/reply', { sid: 'S1', submission: s15c.id, items: [{ type: 'write', fold: true, text: '后到的长答' }] });
 const C15 = (await writes15(4)) || [], q6 = bbox(m15c, 'g6'), k7 = bbox(m15c, 'g7');
 T.ok('同一轮先到的短批注不算「之前回答过」：圈号仍在这一轮最后一句红笔问题 g6 那一行、在它右边，不在 g7 旁边',
   C15.length === 4 && Math.abs(C15[3].at[1] - mid(q6)) < 2 && C15[3].at[0] > q6[2], [C15[3] && C15[3].at, q6, k7]);

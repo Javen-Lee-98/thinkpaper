@@ -96,7 +96,7 @@ await tapButton('#offerList', '加入', 400);
 T.ok('点「加入」：这张图自己成了一本，打开了它的第 1 页', await T.waitFor(`window.__ink.S.nb && window.__ink.S.nb.id === 'book:周末安排.pdf' && window.__ink.S.idx === 0 && window.__ink.S.bgImg`, 15000),
   await js('window.__ink.S.nb && window.__ink.S.nb.id'));
 await sleep(500);
-T.ok('没有放进「Claude 推送」', !(await js(`window.__ink.S.nbList.some((n) => n.id === 'board')`)), await js(`window.__ink.S.nbList.map((n) => n.id)`));
+T.ok('没有放进「Claude 推送」', !(await js(`window.__ink.S.nbList.some((n) => n.id.startsWith('board'))`)), await js(`window.__ink.S.nbList.map((n) => n.id)`));
 T.ok('提示没了：抽屉那一组、小圆点都不出', (await pending()).length === 0 && (await js(`document.querySelector('#offerBox').hidden`)) && (await dots()).every((d) => !d), [await pending(), await dots()]);
 T.ok('说了一句「已加入《周末安排》」', (await toasts()).includes('已加入《周末安排》'), await toasts());
 
@@ -106,7 +106,7 @@ await barUp();
 await tapButton('#obBtns', '加入', 400);
 T.ok('一页的 PDF：在上方那一条上点「加入」，自己成了一本（一页），打开了它', await T.waitFor(`window.__ink.S.nb && window.__ink.S.nb.id === 'book:一页说明.pdf' && window.__ink.S.nb.pages === 1`, 15000),
   await js('window.__ink.S.nb && [window.__ink.S.nb.id, window.__ink.S.nb.pages]'));
-T.ok('上方那一条收起了，也没进「Claude 推送」', (await js(`document.querySelector('#offerBar').hidden`)) && !(await js(`window.__ink.S.nbList.some((n) => n.id === 'board')`)), null);
+T.ok('上方那一条收起了，也没进「Claude 推送」', (await js(`document.querySelector('#offerBar').hidden`)) && !(await js(`window.__ink.S.nbList.some((n) => n.id.startsWith('board'))`)), null);
 
 // 5. 在上方那一条上点「忽略」：收起，不再提示
 await offer('买菜清单.pdf');

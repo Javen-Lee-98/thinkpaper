@@ -122,38 +122,56 @@ class Layout:
         self.pages.insert(pos, h["entry"])
         return pos
 
+    def moved(self):
+        """原文件的页在这本里的先后（不算空白纸、删掉的页）不是原文件自己的先后：用户在草稿纸里挪过页序。
+        挪了又挪回原样的不算。"""
+        seq = [e["pdf"] for e in self.pages if "pdf" in e]
+        return any(a > b for a, b in zip(seq, seq[1:]))
+
     def remap_pdf(self, mapping, n_new):
         """原文件换成新版后重排。mapping[新页号] = 旧页号（新增的页为 None）。
 
-        空白纸跟着它前面那一页走；那一页在新版里没了，就跟到再往前最近的一页（都没有就放最前）；
+        没挪过页序的书（moved() 为假）：原文件的页按新版里的先后排，和 2026-11-17 以前完全一样。
+        挪过的（2026-11-17 用户定，尽量保留用户排的先后）：新版里还在的页按更新前这本里的先后排（原文件自己换了先后也不跟）；
+        新版里新加的页跟在新版里它前面那一页后面（连同那一页带着的空白纸），那一页是用户删掉的就再往前找，前面没有页就放最前
+        （排在最前面的空白纸后面）。没挪过的书照这条规矩排出来也正是新版里的先后。
+        空白纸跟着它前面那一页走；那一页在新版里没了，就跟到这本里再往前最近的、还在的那一页（都没有就放最前）；
         用户删掉的页如果新版里还在，仍然是删除状态。
-        在草稿纸里挪过页序（move）的：原文件的页回到新版里的先后，挪过的不保留；空白纸照上面的规矩，
-        跟着它在挪过的页序里前面那一页走（挪到最前面的空白纸留在最前）。
         """
         old_to_new = {i: j for j, i in enumerate(mapping) if i is not None}
-        leading, trailing, last = [], {}, None
+        moved = self.moved()
+        # 按这本里的先后分组：最前面的空白纸；每一张原文件页带着它后面的空白纸
+        leading, groups = [], []
         for e in self.pages:
             if "pdf" in e:
-                last = e["pdf"]
-                trailing.setdefault(last, [])
-            elif last is None:
-                leading.append(e)
+                groups.append((e["pdf"], []))
+            elif groups:
+                groups[-1][1].append(e)
             else:
-                trailing[last].append(e)
-        # 没了的旧页：它后面的空白纸交给前面最近一个还在的旧页
-        for i in sorted(trailing):
-            if i not in old_to_new and trailing[i]:
-                prev = max((k for k in trailing if k < i and k in old_to_new), default=None)
-                (trailing[prev] if prev is not None else leading).extend(trailing[i])
-                trailing[i] = []
-        hidden_old = {h["entry"]["pdf"] for h in self.hidden if "pdf" in h["entry"]}
-        pages = list(leading)
+                leading.append(e)
+        # 新版里还在的页（换成新页号）；没了的旧页：它后面的空白纸交给这本里排在它前面、还在的那一页
+        kept = []
+        for i, blanks in groups:
+            if i in old_to_new:
+                kept.append((old_to_new[i], blanks))
+            else:
+                (kept[-1][1] if kept else leading).extend(blanks)
+        if not moved:
+            kept.sort(key=lambda g: g[0])  # 跟原文件（新版）的先后
+        # 新加的页挂在新版里它前面最近的、这本里看得见的那一页后面（None：放最前）；连着几张新页按新版的先后挂在同一页后面
+        shown, after, anchor = {j for j, _ in kept}, {}, None
         for j in range(n_new):
             i = mapping[j] if j < len(mapping) else None
-            if i is None or i not in hidden_old:
-                pages.append({"key": f"p{j:04d}", "pdf": j})
-            if i is not None:
-                pages.extend(trailing.get(i, []))
+            if i is None:
+                after.setdefault(anchor, []).append(j)
+            elif j in shown:
+                anchor = j
+        entry = lambda j: {"key": f"p{j:04d}", "pdf": j}  # noqa: E731
+        pages = list(leading) + [entry(j) for j in after.get(None, [])]
+        for j, blanks in kept:
+            pages.append(entry(j))
+            pages.extend(blanks)
+            pages.extend(entry(k) for k in after.get(j, []))
         # 删掉的页：新版里还在的换成新页号；新版里没了的就不用再留着
         new_key = {f"p{i:04d}": f"p{j:04d}" for i, j in old_to_new.items()}
         hidden = []
